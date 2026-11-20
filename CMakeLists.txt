@@ -10,8 +10,6 @@ endif()
 find_package(Qt5 5.15 REQUIRED COMPONENTS Core)
 find_package(Threads REQUIRED)
 find_path(IR_ASIO_INCLUDE_DIR asio.hpp REQUIRED)
-option(IR_ENABLE_NI_IMAQ "Build the optional Windows NI-IMAQ frame-grabber backend" OFF)
-set(IR_NI_IMAQ_ROOT "" CACHE PATH "NI-IMAQ SDK root containing its headers and 64-bit MSVC import library")
 
 add_library(IR_analysis SHARED analysis/frame_statistics.cpp)
 target_compile_definitions(IR_analysis PRIVATE IR_ANALYSIS_BUILD
@@ -34,27 +32,6 @@ endif()
 if(WIN32)
     target_sources(IR_station PRIVATE station/acquisition/directshow/source.cpp)
     target_link_libraries(IR_station PRIVATE strmiids ole32 oleaut32)
-endif()
-if(IR_ENABLE_NI_IMAQ)
-    if(NOT WIN32)
-        message(FATAL_ERROR "The NI-IMAQ backend is available only on Windows")
-    endif()
-    if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-        message(FATAL_ERROR "The NI-IMAQ backend requires a 64-bit build")
-    endif()
-    find_path(IR_NI_IMAQ_INCLUDE_DIR niimaq.h
-        HINTS "${IR_NI_IMAQ_ROOT}/include" "${IR_NI_IMAQ_ROOT}/Include")
-    find_library(IR_NI_IMAQ_LIBRARY NAMES imaq
-        HINTS
-            "${IR_NI_IMAQ_ROOT}/ExternalCompilerSupport/C/lib64/msvc"
-            "${IR_NI_IMAQ_ROOT}/lib64/msvc")
-    if(NOT IR_NI_IMAQ_INCLUDE_DIR OR NOT IR_NI_IMAQ_LIBRARY)
-        message(FATAL_ERROR "Set x64 NI-IMAQ headers and import library; use IR_NI_IMAQ_INCLUDE_DIR and IR_NI_IMAQ_LIBRARY when they are in separate locations")
-    endif()
-    target_sources(IR_station PRIVATE station/acquisition/ni_imaq/source.cpp)
-    target_include_directories(IR_station SYSTEM PRIVATE "${IR_NI_IMAQ_INCLUDE_DIR}")
-    target_compile_definitions(IR_station PRIVATE IR_STATION_HAS_NI_IMAQ)
-    target_link_libraries(IR_station PRIVATE "${IR_NI_IMAQ_LIBRARY}")
 endif()
 # 流程编排：协调仪器、采集和独立的 IR_analysis 指标库。
 target_sources(IR_station PRIVATE

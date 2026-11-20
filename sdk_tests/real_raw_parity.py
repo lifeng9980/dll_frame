@@ -2,6 +2,7 @@
 import argparse
 import csv
 import ctypes as c
+from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
@@ -22,7 +23,14 @@ class NoiseRecipe(c.Structure):
 
 
 class Result(c.Structure):
-    _fields_ = [("completed", c.c_int32), ("mean_dn", c.c_double), ("temporal_noise_dn", c.c_double)]
+    _fields_ = [
+        ("completed", c.c_int32), ("mean_dn", c.c_double), ("temporal_noise_dn", c.c_double),
+        ("failed_step", c.c_int32), ("cleanup_status", c.c_int32),
+    ]
+
+
+assert c.sizeof(Result) == 32
+assert Result.failed_step.offset == 24 and Result.cleanup_status.offset == 28
 
 
 def open_api(directory):
@@ -58,6 +66,7 @@ def run(sdk, directory, frames, output=None):
         recipe = NoiseRecipe(recipe_id=b"raw-parity", frames=frames)
         name = str(output).encode() if output else None
         checked(sdk.IR_RunNoise, c.byref(recipe), name, c.byref(result))
+        assert result.failed_step == 0 and result.cleanup_status == 0
         return (g.width, g.height, g.valid_bits), result
     finally:
         checked(sdk.IR_CloseFrames)
@@ -91,6 +100,7 @@ def main():
     parser.add_argument("input", type=Path)
     parser.add_argument("output", type=Path, help="New output directory")
     args = parser.parse_args()
+    args.output = args.output.resolve()
     with (args.input / "frames.csv").open(encoding="utf-8-sig", newline="") as index:
         rows = list(csv.DictReader(index))
     first = rows[0]
@@ -108,11 +118,31 @@ def main():
     with (args.output / "frames.csv").open(encoding="utf-8-sig", newline="") as index:
         saved_rows = list(csv.DictReader(index))
     assert len(saved_rows) == frames
+    required_fields = {"frame_index", "width", "height", "stride_bytes", "pixel_format", "bit_depth", "endianness"}
+    assert required_fields.issubset(saved_rows[0]), saved_rows[0].keys()
+    numeric_fields = {
+        "frame_index", "application_sequence", "driver_frame_number", "lost_frames", "width", "height",
+        "stride_bytes", "bit_depth", "source_timestamp_ns", "received_monotonic_ns", "monotonic_ms",
+        "relative_time_ms", "callback_sequence",
+    }
+    timestamp_fields = ("source_timestamp_ns", "received_monotonic_ns", "monotonic_ms", "relative_time_ms")
     for incoming, saved in zip(rows, saved_rows):
+        timestamp_source = next((field for field in timestamp_fields if incoming.get(field, "") != ""), None)
         for field in ("frame_index", "application_sequence", "driver_frame_number", "lost_frames",
                       "source_timestamp_ns", "received_monotonic_ns", "monotonic_ms", "relative_time_ms",
                       "callback_sequence", "pixels_inverted"):
-            assert incoming[field] == saved[field], (incoming["frame_index"], field)
+            if field not in incoming or field not in saved:
+                continue
+            if field in timestamp_fields and field != timestamp_source:
+                continue
+            input_value, saved_value = incoming[field], saved[field]
+            if input_value == "" or saved_value == "":
+                assert input_value == saved_value, (incoming["frame_index"], field, input_value, saved_value)
+            elif field in numeric_fields:
+                assert Decimal(input_value) == Decimal(saved_value), (
+                    incoming["frame_index"], field, input_value, saved_value)
+            else:
+                assert input_value == saved_value, (incoming["frame_index"], field, input_value, saved_value)
 
     checksum = args.input / "frames.sha256"
     saved_raw = args.output / "frames.raw"

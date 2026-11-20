@@ -6,6 +6,8 @@
 #include <asio/serial_port.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/write.hpp>
+#include <algorithm>
+#include <array>
 #include <variant>
 #ifdef _WIN32
 #include <windows.h>
@@ -46,6 +48,36 @@ void withDeadline(asio::io_context &io, Deadline deadline, const char *operation
 }
 }
 
+std::vector<std::string> resolveTcpAddresses(const TcpEndpoint &endpoint, Deadline deadline)
+{
+    asio::io_context io;
+    Tcp::resolver resolver(io);
+    Tcp::resolver::results_type resolved;
+    withDeadline(io, deadline, "Resolve blackbody host", [&](auto done) {
+        resolver.async_resolve(endpoint.host, std::to_string(endpoint.port),
+            [&, done](auto error, auto results) {
+                resolved = std::move(results);
+                done(error);
+            });
+    }, [&] { resolver.cancel(); });
+
+    std::vector<std::string> addresses;
+    for (const auto &entry : resolved) {
+        auto address = entry.endpoint().address();
+        if (address.is_v6() && address.to_v6().is_v4_mapped()) {
+            const auto bytes = address.to_v6().to_bytes();
+            asio::ip::address_v4::bytes_type ipv4{};
+            std::copy(bytes.end() - ipv4.size(), bytes.end(), ipv4.begin());
+            address = asio::ip::address_v4(ipv4);
+        }
+        const auto value = address.to_string();
+        if (std::find(addresses.begin(), addresses.end(), value) == addresses.end())
+            addresses.push_back(value);
+    }
+    require(!addresses.empty(), IR_IO_ERROR, "Blackbody host resolved to no addresses");
+    return addresses;
+}
+
 struct AsioLink::State {
     asio::io_context io;
     std::variant<Tcp::socket, asio::serial_port> stream;
@@ -61,15 +93,12 @@ AsioLink::AsioLink(const TcpEndpoint &endpoint, Deadline deadline)
 {
     auto &state = *state_;
     auto &socket = std::get<Tcp::socket>(state.stream);
-    Tcp::resolver resolver(state.io);
-    Tcp::resolver::results_type addresses;
-    withDeadline(state.io, deadline, "Resolve blackbody host", [&](auto done) {
-        resolver.async_resolve(endpoint.host, std::to_string(endpoint.port),
-            [&, done](auto error, auto results) {
-                addresses = std::move(results);
-                done(error);
-            });
-    }, [&] { resolver.cancel(); });
+    const auto addressStrings = endpoint.resolvedAddresses.empty() ?
+        resolveTcpAddresses(endpoint, deadline) : endpoint.resolvedAddresses;
+    std::vector<Tcp::endpoint> addresses;
+    addresses.reserve(addressStrings.size());
+    for (const auto &address : addressStrings)
+        addresses.emplace_back(asio::ip::make_address(address), endpoint.port);
     withDeadline(state.io, deadline, "Connect to blackbody", [&](auto done) {
         asio::async_connect(socket, addresses, [done](auto error, const auto &) { done(error); });
     }, [&] {

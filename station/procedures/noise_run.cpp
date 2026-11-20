@@ -17,7 +17,8 @@ void checked(int32_t code, const char *message)
 }
 
 void settleBlackbody(const IRNoiseRecipe &recipe, acquisition::Capture &capture,
-                     int32_t &step)
+                     int32_t &step, double &setpointReadback,
+                     IRBlackbodyReading &stableReading)
 {
     using namespace std::chrono;
     require(std::isfinite(recipe.temperature_c) && std::isfinite(recipe.tolerance_c) &&
@@ -26,10 +27,9 @@ void settleBlackbody(const IRNoiseRecipe &recipe, acquisition::Capture &capture,
             (recipe.require_device_stable == 0 || recipe.require_device_stable == 1),
             IR_BAD_ARGUMENT, "Invalid blackbody stability parameters");
     char detail[1024]{};
-    double readback{};
     capture.checkStop();
     step = IR_NOISE_STEP_SET_BLACKBODY;
-    checked(IR_SetBlackbody(recipe.blackbody, recipe.temperature_c, &readback, detail, sizeof detail), detail);
+    checked(IR_SetBlackbody(recipe.blackbody, recipe.temperature_c, &setpointReadback, detail, sizeof detail), detail);
     step = IR_NOISE_STEP_WAIT_BLACKBODY;
     const auto deadline = steady_clock::now() + milliseconds(recipe.stable_timeout_ms);
     std::optional<steady_clock::time_point> stableSince;
@@ -44,6 +44,7 @@ void settleBlackbody(const IRNoiseRecipe &recipe, acquisition::Capture &capture,
         const bool inRange = std::abs(reading.actual_c - recipe.temperature_c) <= recipe.tolerance_c &&
                              (!recipe.require_device_stable || reading.stable);
         if (inRange) {
+            stableReading = reading;
             if (!stableSince) stableSince = now;
             if (now - *stableSince >= milliseconds(recipe.stable_window_ms)) return;
         } else {
@@ -97,11 +98,15 @@ extern "C" int32_t IR_RunNoise(const IRNoiseRecipe *recipe, const char *output,
             std::vector<IRFrameStamp> stamps(recipe->frames);
             std::vector<double> means(static_cast<size_t>(pixelCount));
             std::vector<double> deviations(static_cast<size_t>(pixelCount));
+            double blackbodySetpointReadback{};
+            IRBlackbodyReading blackbodyReading{};
             bool captureStarted = false;
 
             try {
                 // 等稳期间尚未启动采集，避免把升温过程中的帧计入本次测量。
-                if (recipe->blackbody) settleBlackbody(*recipe, capture, step);
+                if (recipe->blackbody) {
+                    settleBlackbody(*recipe, capture, step, blackbodySetpointReadback, blackbodyReading);
+                }
                 capture.checkStop();
                 step = IR_NOISE_STEP_START_CAPTURE;
                 capture.start();
@@ -128,7 +133,8 @@ extern "C" int32_t IR_RunNoise(const IRNoiseRecipe *recipe, const char *output,
                 if (output) {
                     step = IR_NOISE_STEP_SAVE;
                     procedures::saveNoiseRun(directory, *recipe, capture.backend, capture.sourceName, geometry,
-                                             frames, stamps, measured);
+                                             frames, stamps, measured, blackbodySetpointReadback,
+                                             recipe->blackbody ? &blackbodyReading : nullptr);
                 }
                 *result = measured;
                 result->failed_step = IR_NOISE_STEP_NONE;

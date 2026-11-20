@@ -22,6 +22,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "Station: %s\n", error);
         return 1;
     }
+    status = IR_OpenFrames(IR_NI_IMAQ, "img0", 0, &g, error, sizeof error);
+    if (status != IR_UNSUPPORTED) {
+        fprintf(stderr, "Reserved NI-IMAQ backend: %s\n", error);
+        return 1;
+    }
     IRHandle device = 1;
     status = IR_OpenDevice(0, "{}", &device, error, sizeof error);
     if (status != IR_UNSUPPORTED || device != 0) {

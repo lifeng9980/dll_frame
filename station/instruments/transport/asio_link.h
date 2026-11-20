@@ -4,17 +4,23 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace ir::transport {
 using Deadline = std::chrono::steady_clock::time_point;
 struct TcpEndpoint {
     std::string host;
     uint16_t port;
+    std::vector<std::string> resolvedAddresses;
 };
 struct SerialEndpoint {
     std::string port;
     unsigned baud;
 };
+
+// Resolve once with the instrument timeout so endpoint reservation and connect
+// use the same numeric addresses (for example, localhost and 127.0.0.1).
+std::vector<std::string> resolveTcpAddresses(const TcpEndpoint &endpoint, Deadline deadline);
 
 // One caller owns a link at a time. A request and all its response fragments
 // share the same deadline. Delimited reads retain bytes for the next read.

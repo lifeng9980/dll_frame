@@ -18,6 +18,10 @@ class Reading(c.Structure):
     _fields_ = [("actual_c", c.c_double), ("setpoint_c", c.c_double), ("stable", c.c_int32)]
 
 
+class Geometry(c.Structure):
+    _fields_ = [("width", c.c_int32), ("height", c.c_int32), ("valid_bits", c.c_int32)]
+
+
 class NoiseRecipe(c.Structure):
     _fields_ = [
         ("recipe_id", c.c_char_p), ("detector", c.c_uint64), ("blackbody", c.c_uint64),
@@ -144,6 +148,11 @@ def exercise(sdk, controller, config):
         assert not handle.value
 
     check(sdk.IR_OpenDevice, kind, json.dumps(config).encode(), c.byref(handle))
+    if controller.tcp:
+        alias_config = json.dumps(dict(config, host="localhost")).encode()
+        alias_handle = c.c_uint64()
+        check(sdk.IR_OpenDevice, kind, alias_config, c.byref(alias_handle), expected=9)
+        assert not alias_handle.value
     reading, readback = Reading(), c.c_double()
     try:
         check(sdk.IR_ReadBlackbody, handle, c.byref(reading))
@@ -164,6 +173,11 @@ def exercise(sdk, controller, config):
         retry_exhausted_status = io_error if controller.tcp else timeout
         check(sdk.IR_ReadBlackbody, handle, c.byref(reading), expected=retry_exhausted_status)
         assert controller.disconnect_reads == 0
+
+        # A call that starts with a broken link gets exactly three reconnect attempts.
+        controller.disconnect_reads = 4
+        check(sdk.IR_ReadBlackbody, handle, c.byref(reading), expected=retry_exhausted_status)
+        assert controller.disconnect_reads == 1
         check(sdk.IR_ReadBlackbody, handle, c.byref(reading))
         assert reading.actual_c == reading.setpoint_c == 30.125
 
@@ -176,7 +190,7 @@ def exercise(sdk, controller, config):
     check(sdk.IR_ReadBlackbody, handle, c.byref(reading), expected=invalid_handle)
 
 
-def exercise_recipe(args, controller, config):
+def exercise_recipe(args, sdk, controller, config):
     env = os.environ.copy()
     if os.name == "nt":
         env["PATH"] = os.pathsep.join([str(args.library.resolve().parent), str(args.qt_bin), env["PATH"]])
@@ -200,6 +214,45 @@ def exercise_recipe(args, controller, config):
                 assert math.isclose(float(values["noise_dn"]), math.sqrt(2), rel_tol=0, abs_tol=1e-12)
             else:
                 assert values == {"completed": "0", "failed_step": "4", "cleanup_status": "0"}
+
+        exercise_saved_recipe(sdk, controller, config, fixture)
+
+
+def exercise_saved_recipe(sdk, controller, config, fixture):
+    error_args = [c.c_char_p, c.c_int32]
+    sdk.IR_OpenDevice.argtypes = [c.c_int32, c.c_char_p, c.POINTER(c.c_uint64), *error_args]
+    sdk.IR_CloseDevice.argtypes = [c.c_uint64, *error_args]
+    sdk.IR_OpenFrames.argtypes = [c.c_int32, c.c_char_p, c.c_int32, c.POINTER(Geometry), *error_args]
+    sdk.IR_CloseFrames.argtypes = error_args
+    sdk.IR_RunNoise.argtypes = [c.POINTER(NoiseRecipe), c.c_char_p, c.POINTER(NoiseResult), *error_args]
+
+    error = c.create_string_buffer(1024)
+    kind = 2 if controller.tcp else 3
+    handle = c.c_uint64()
+    status = sdk.IR_OpenDevice(kind, json.dumps(config).encode(), c.byref(handle), error, len(error))
+    assert status == 0, error.value
+    geometry = Geometry()
+    try:
+        status = sdk.IR_OpenFrames(2, str(fixture).encode(), 0, c.byref(geometry), error, len(error))
+        assert status == 0, error.value
+        try:
+            controller.stable = True
+            recipe = NoiseRecipe(b"saved-result", 0, handle.value, 0, 0, 0, 32.0, 0.01,
+                                 100, 5000, 1, 2, 0)
+            result = NoiseResult()
+            output = fixture / "saved-run"
+            status = sdk.IR_RunNoise(c.byref(recipe), str(output).encode(), c.byref(result), error, len(error))
+            assert status == 0, error.value
+            saved = json.loads((output / "result.json").read_text(encoding="utf8"))
+            blackbody = saved["blackbody"]
+            assert blackbody["temperature_c"] == blackbody["setpoint_readback_c"] == 32
+            assert blackbody["actual_c"] == 32 and blackbody["device_stable"] is True, blackbody
+        finally:
+            status = sdk.IR_CloseFrames(error, len(error))
+            assert status == 0, error.value
+    finally:
+        status = sdk.IR_CloseDevice(handle, error, len(error))
+        assert status == 0, error.value
 
 
 def exercise_recipe_ownership(args, sdk, controller, config):
@@ -355,7 +408,7 @@ def main():
     server.start()
     try:
         exercise(sdk, controller, config)
-        exercise_recipe(args, controller, config)
+        exercise_recipe(args, sdk, controller, config)
         exercise_recipe_ownership(args, sdk, controller, config)
     finally:
         stop.set()

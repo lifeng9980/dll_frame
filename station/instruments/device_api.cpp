@@ -20,7 +20,7 @@ using ir::instruments::Doc058Blackbody;
 using namespace ir::api;
 
 struct Session {
-    std::string endpoint;
+    std::vector<std::string> endpointKeys;
     std::mutex mutex;
     std::unique_ptr<Doc058Blackbody> blackbody;
     std::thread::id workflowOwner;
@@ -50,7 +50,7 @@ int integer(const QJsonObject &json, const char *key, int fallback, int low, int
     return int(number);
 }
 
-std::pair<BlackbodyConfig, std::string> parseConfig(int kind, const char *config)
+std::pair<BlackbodyConfig, std::vector<std::string>> parseConfig(int kind, const char *config)
 {
     using namespace ir::transport;
     require(config && *config, IR_BAD_ARGUMENT, "Missing connection JSON");
@@ -68,9 +68,18 @@ std::pair<BlackbodyConfig, std::string> parseConfig(int kind, const char *config
         const auto port = uint16_t(integer(json, "tcp_port", 2101, 1, 65535));
         result.head = integer(json, "head", -1, -1, 1);
         require(result.expectedHead.empty() || result.head >= 0, IR_BAD_ARGUMENT, "Expected head serial requires a head index");
-        result.endpoint = TcpEndpoint{host, port};
-        return {std::move(result), "tcp:" + QString::fromStdString(host).toCaseFolded().toStdString() + ':' +
-            std::to_string(port)};
+        TcpEndpoint endpoint{host, port};
+        endpoint.resolvedAddresses = resolveTcpAddresses(endpoint, std::chrono::steady_clock::now() + result.timeout);
+        std::vector<std::string> keys;
+        keys.reserve(endpoint.resolvedAddresses.size());
+        for (const auto &address : endpoint.resolvedAddresses) {
+            const auto formattedAddress = address.find(':') == std::string::npos ? address : '[' + address + ']';
+            keys.push_back("tcp:" + formattedAddress + ':' + std::to_string(port));
+        }
+        std::sort(keys.begin(), keys.end());
+        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+        result.endpoint = std::move(endpoint);
+        return {std::move(result), std::move(keys)};
     }
 
     const auto name = text(json, "port", true);
@@ -83,7 +92,7 @@ std::pair<BlackbodyConfig, std::string> parseConfig(int kind, const char *config
     const auto resolved = std::filesystem::canonical(std::filesystem::path(name), errorCode);
     const auto key = errorCode ? name : resolved.string();
 #endif
-    return {std::move(result), "serial:" + key};
+    return {std::move(result), {"serial:" + key}};
 }
 
 auto findDevice(IRHandle handle)
@@ -132,7 +141,7 @@ DeviceLease::DeviceLease(const IRHandle *handles, std::size_t count)
     for (const auto handle : handles_)
         sessions.push_back(findDevice(handle)->second);
     std::sort(sessions.begin(), sessions.end(), [](const auto &left, const auto &right) {
-        return left->endpoint < right->endpoint;
+        return left->endpointKeys < right->endpointKeys;
     });
 
     std::vector<std::unique_lock<std::mutex>> sessionLocks;
@@ -164,28 +173,33 @@ extern "C" int32_t IR_OpenDevice(int32_t kind, const char *config, IRHandle *out
     return guarded(err, bytes, [&] {
         needed(out, 1, 1);
         require(kind == IR_PCN7LT || kind == IR_DCN1000, IR_UNSUPPORTED, "Unsupported instrument kind");
-        auto [options, endpoint] = parseConfig(kind, config);
+        auto [options, endpointKeys] = parseConfig(kind, config);
         {
             std::lock_guard lock(devicesMutex);
-            for (const auto &[handle, session] : devices)
-                require(session->endpoint != endpoint, IR_BUSY, "Instrument endpoint is already open");
-            require(openingEndpoints.insert(endpoint).second, IR_BUSY,
-                    "Instrument endpoint is being opened");
+            for (const auto &endpoint : endpointKeys) {
+                require(!openingEndpoints.contains(endpoint), IR_BUSY,
+                        "Instrument endpoint is being opened");
+                for (const auto &[handle, session] : devices)
+                    require(std::find(session->endpointKeys.begin(), session->endpointKeys.end(), endpoint) ==
+                                session->endpointKeys.end(),
+                            IR_BUSY, "Instrument endpoint is already open");
+            }
+            openingEndpoints.insert(endpointKeys.begin(), endpointKeys.end());
         }
 
         std::shared_ptr<Session> device;
         try {
             device = std::make_shared<Session>();
-            device->endpoint = endpoint;
+            device->endpointKeys = endpointKeys;
             device->blackbody = std::make_unique<Doc058Blackbody>(std::move(options));
         } catch (...) {
             std::lock_guard lock(devicesMutex);
-            openingEndpoints.erase(endpoint);
+            for (const auto &endpoint : endpointKeys) openingEndpoints.erase(endpoint);
             throw;
         }
 
         std::lock_guard lock(devicesMutex);
-        openingEndpoints.erase(endpoint);
+        for (const auto &endpoint : endpointKeys) openingEndpoints.erase(endpoint);
         const auto handle = nextHandle++;
         devices.emplace(handle, std::move(device));
         *out = handle;
@@ -198,7 +212,7 @@ extern "C" int32_t IR_CloseDevice(IRHandle handle, char *err, int32_t bytes)
         std::shared_ptr<Session> device;
         std::unique_ptr<Doc058Blackbody> closing;
         std::unique_lock<std::mutex> deviceLock;
-        std::string endpoint;
+        std::vector<std::string> endpointKeys;
         {
             std::lock_guard registryLock(devicesMutex);
             const auto pos = findDevice(handle);
@@ -206,8 +220,8 @@ extern "C" int32_t IR_CloseDevice(IRHandle handle, char *err, int32_t bytes)
             deviceLock = std::unique_lock<std::mutex>(device->mutex, std::try_to_lock);
             require(deviceLock.owns_lock(), IR_BUSY, "Instrument operation is active");
             require(device->workflowOwner == std::thread::id{}, IR_BUSY, "Instrument is in use");
-            endpoint = device->endpoint;
-            openingEndpoints.insert(endpoint);
+            endpointKeys = device->endpointKeys;
+            openingEndpoints.insert(endpointKeys.begin(), endpointKeys.end());
             closing = std::move(device->blackbody);
             devices.erase(pos);
         }
@@ -215,7 +229,7 @@ extern "C" int32_t IR_CloseDevice(IRHandle handle, char *err, int32_t bytes)
         deviceLock.unlock();
         {
             std::lock_guard registryLock(devicesMutex);
-            openingEndpoints.erase(endpoint);
+            for (const auto &endpoint : endpointKeys) openingEndpoints.erase(endpoint);
         }
     });
 }

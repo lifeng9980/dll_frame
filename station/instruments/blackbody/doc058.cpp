@@ -142,20 +142,28 @@ double Doc058Blackbody::number(uint8_t function) { return numeric(request(functi
 
 double Doc058Blackbody::numberWithReconnect(uint8_t function)
 {
-    for (int retry = 0;; ++retry) {
+    int reconnects = 0;
+    for (;;) {
         try {
-            if (!link_) open();
+            if (!link_) {
+                if (reconnectable_) {
+                    if (reconnects == ReconnectRetries)
+                        throw Error(IR_IO_ERROR, "Blackbody reconnect limit reached");
+                    std::this_thread::sleep_for(ReconnectDelay);
+                    ++reconnects;
+                }
+                open();
+            }
             return number(function);
         } catch (...) {
-            if (!reconnectable_ || retry == ReconnectRetries) throw;
-            std::this_thread::sleep_for(ReconnectDelay);
+            if (!reconnectable_ || reconnects == ReconnectRetries) throw;
         }
     }
 }
 
 IRBlackbodyReading Doc058Blackbody::readOnce()
 {
-    if (!link_) open();
+    require(bool(link_), IR_IO_ERROR, "Blackbody is disconnected");
     require(number(Mode) == 0, IR_IO_ERROR, "Blackbody is outside absolute temperature mode");
     IRBlackbodyReading result{};
     result.actual_c = number(Temperature);
@@ -166,12 +174,21 @@ IRBlackbodyReading Doc058Blackbody::readOnce()
 
 IRBlackbodyReading Doc058Blackbody::read()
 {
-    for (int retry = 0;; ++retry) {
+    int reconnects = 0;
+    for (;;) {
         try {
+            if (!link_) {
+                if (reconnectable_) {
+                    if (reconnects == ReconnectRetries)
+                        throw Error(IR_IO_ERROR, "Blackbody reconnect limit reached");
+                    std::this_thread::sleep_for(ReconnectDelay);
+                    ++reconnects;
+                }
+                open();
+            }
             return readOnce();
         } catch (...) {
-            if (!reconnectable_ || retry == ReconnectRetries) throw;
-            std::this_thread::sleep_for(ReconnectDelay);
+            if (!reconnectable_ || reconnects == ReconnectRetries) throw;
         }
     }
 }

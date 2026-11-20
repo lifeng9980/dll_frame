@@ -97,11 +97,6 @@ extern "C" int32_t IR_OpenFrames(int32_t backend, const char *name, int32_t bits
         else if (backend == IR_DIRECTSHOW) {
             source = openDirectShow(name, bits);
         }
-#if defined(IR_STATION_HAS_NI_IMAQ)
-        else if (backend == IR_NI_IMAQ) {
-            source = openNiImaq(name, bits);
-        }
-#endif
 #endif
         else throw Error(IR_UNSUPPORTED, "Frame backend is not available on this platform");
         *actual = source->geometry();

@@ -19,7 +19,7 @@ enum IRBackend {
     IR_DIRECTSHOW = 1, /* Windows DirectShow device name, e.g. FX3. */
     IR_RAW_REPLAY = 2,
     IR_V4L2 = 3, /* Linux /dev/videoN, for the FX3 YUYV 16-bit raw stream. */
-    IR_NI_IMAQ = 4 /* Optional Windows NI-IMAQ Camera Link interface name. */
+    IR_NI_IMAQ = 4 /* Reserved for future NI-IMAQ support; currently returns IR_UNSUPPORTED. */
 };
 enum IRFrameFields {
     IR_HAS_SEQUENCE = 1, IR_HAS_DRIVER_SEQUENCE = 2, IR_HAS_LOSS = 4,
@@ -45,8 +45,8 @@ typedef struct IRFrameStamp {
 /* 一个进程使用一个采集源。除 RequestStop 外，采集和流程调用使用打开源的线程。
    打开、启动、读取、停止和关闭必须由同一个工作线程执行；并发操作返回 IR_BUSY。
    RAW 目录的 valid_bits 传 0 时读取索引。实时源的 valid_bits 由调用方按探测器配置提供，
-   不清楚时传 0。Windows 可传 IR_DIRECTSHOW 和相机名，启用 NI-IMAQ 后可传 IR_NI_IMAQ 和接口名；
-   Linux 可传 IR_V4L2 和 /dev/videoN。
+   不清楚时传 0。Windows 可传 IR_DIRECTSHOW 和相机名；Linux 可传 IR_V4L2 和 /dev/videoN。
+   IR_NI_IMAQ 为保留编号，当前构建返回 IR_UNSUPPORTED。
    FX3 必须提供 16 位原始传输格式：Windows DirectShow RGB565/YUY2，Linux V4L2 YUYV。
    成功时 actual 返回宽、高和有效位。 */
 IR_STATION_API int32_t IR_OpenFrames(int32_t backend, const char *name_or_directory,

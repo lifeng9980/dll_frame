@@ -17,7 +17,6 @@ const char *backendName(int backend)
     case IR_RAW_REPLAY: return "raw_replay";
     case IR_DIRECTSHOW: return "directshow";
     case IR_V4L2: return "v4l2";
-    case IR_NI_IMAQ: return "ni_imaq";
     default: return "unknown";
     }
 }
@@ -36,7 +35,9 @@ static void writeFile(const QString &name, const char *bytes, qint64 length)
 }
 void saveNoiseRun(const QString &path, const IRNoiseRecipe &r, int backend,
     const std::string &sourceName, IRGeometry g,
-    const std::vector<uint16_t> &frames, const std::vector<IRFrameStamp> &stamps, const IRNoiseResult &result)
+    const std::vector<uint16_t> &frames, const std::vector<IRFrameStamp> &stamps,
+    const IRNoiseResult &result, double blackbodySetpointReadback,
+    const IRBlackbodyReading *blackbodyReading)
 {
     static_assert(std::endian::native == std::endian::little);
     const QFileInfo dest(path);
@@ -71,8 +72,13 @@ void saveNoiseRun(const QString &path, const IRNoiseRecipe &r, int backend,
         {"mean_dn",result.mean_dn},{"temporal_noise_dn",result.temporal_noise_dn},
         {"estimator","mean_pixel_sample_std"},{"unit","DN"}};
     if (r.detector) record["detector"] = QJsonObject{{"integration_us",r.integration_us},{"frame_hz",r.frame_hz},{"empty_us",r.empty_us}};
-    if (r.blackbody) record["blackbody"] = QJsonObject{{"temperature_c",r.temperature_c},{"tolerance_c",r.tolerance_c},
-        {"stable_window_ms",r.stable_window_ms},{"stable_timeout_ms",r.stable_timeout_ms},{"require_device_stable",bool(r.require_device_stable)}};
+    if (r.blackbody) {
+        record["blackbody"] = QJsonObject{{"temperature_c",r.temperature_c},
+            {"setpoint_readback_c",blackbodySetpointReadback},
+            {"actual_c",blackbodyReading->actual_c}, {"device_stable",bool(blackbodyReading->stable)},
+            {"tolerance_c",r.tolerance_c}, {"stable_window_ms",r.stable_window_ms},
+            {"stable_timeout_ms",r.stable_timeout_ms}, {"require_device_stable",bool(r.require_device_stable)}};
+    }
     const auto json = QJsonDocument(record).toJson();
     writeFile(stage.filePath("result.json"), json.constData(), json.size());
     require(QDir().rename(stage.path(), dest.absoluteFilePath()), IR_IO_ERROR,"Cannot publish capture directory");

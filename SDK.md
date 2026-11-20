@@ -4,7 +4,7 @@
 
 | 库 | Windows | Linux | 职责 |
 |---|---|---|---|
-| Station | `IR_station.dll` | `libIR_station.so` | 仪器控制、原始帧回放、固定噪声流程与结果保存 |
+| Station | `IR_station.dll` | `libIR_station.so` | 仪器控制、原始帧采集、固定噪声流程与结果保存 |
 | Analysis | `IR_analysis.dll` | `libIR_analysis.so` | 帧均值和时域噪声 |
 
 应用包含 `IR_station.h`、`IR_device.h` 或 `IR_analysis.h`，以 `IR_*` 调用 C 接口。公共状态码与 UTF-8 错误缓冲区约定见 `IR_status.h`。安装包包含 `examples/c_client.c`、`examples/noise_recipe.c` 和 `examples/analysis_conditions.c` 三个纯 C 示例。
@@ -14,7 +14,7 @@
 | 层 | 改动入口 | 输入和输出 |
 |---|---|---|
 | 仪器控制 | `station/instruments/` 按设备型号接入，`transport/asio_link.cpp` 共用 Asio TCP 与串口 | `IR_OpenDevice` 接收型号和连接 JSON，黑体示例提供设温回读和状态读取。新设备需说明哪些命令可以安全重试 |
-| 原始采集 | `station/acquisition/frame_source.h`，具体来源在 `raw_replay/`、`directshow/`、`v4l2/`、可选 `ni_imaq/` | `IR_OpenFrames` 返回几何，`IR_ReadFrames` 输出紧密排列的 RAW16 像素、帧信息和连续完成数 |
+| 原始采集 | `station/acquisition/frame_source.h`，具体来源在 `raw_replay/`、`directshow/`、`v4l2/` | `IR_OpenFrames` 返回几何，`IR_ReadFrames` 输出紧密排列的 RAW16 像素、帧信息和连续完成数 |
 | 指标计算 | `analysis/`，可独立使用 `IR_analysis` | 现有 `IR_FrameStatisticsU16` 接收连续帧组，返回像元均值、标准差及全图汇总，单位 DN。标准算法按所需条件和帧组逐项接入 |
 | 流程编排 | `station/procedures/` | `IR_RunNoise` 依配方设温、等稳、取帧、算指标，并按需保存。量产调用方按产品限值判定 |
 
@@ -43,11 +43,11 @@ cmake --install 实验/build-linux --prefix 实验/sdk-linux
 
 Windows 在 x64 MSVC 终端使用 `windows` preset，将 Qt 路径传给 `CMAKE_PREFIX_PATH`。Python 3 用于模拟通信测试，实际 RAW 指标对照还需要 NumPy。Windows 安装包附带 Qt5Core，应用需要 MSVC 运行库。公共头文件使用 UTF-8，用 MSVC 编译 C 示例时传入 `/utf-8`。Linux 使用系统安装的 QtCore 5.15。
 
-NI PCIe-1433 通过 NI-IMAQ 提供 Windows x64 可选后端，默认不启用。安装 NI-IMAQ SDK 后配置 `-DIR_ENABLE_NI_IMAQ=ON -DIR_NI_IMAQ_ROOT=<NI-IMAQ SDK 根目录>`。根目录需包含 `include/niimaq.h` 或 `Include/niimaq.h` 和对应的 x64 `imaq.lib`。如果头文件与 x64 导入库分开放置，可分别设置 `IR_NI_IMAQ_INCLUDE_DIR` 和 `IR_NI_IMAQ_LIBRARY`；不能把 32 位 `Lib/MSVC/imaq.lib` 用于 x64 目标。部署电脑需安装匹配的 NI-IMAQ 运行组件。接口名由 NI Measurement & Automation Explorer 配置。WSL 和 Linux 不编译此后端。
+PCIe-1433 暂不编入 SDK。公开枚举保留 `IR_NI_IMAQ = 4`，当前调用 `IR_OpenFrames` 会返回 `IR_UNSUPPORTED`。后续确认目标 Windows 设备、NI-IMAQ 版本和接口配置后，可在该采集入口实现后端；这项 Windows API 兼容设计不代表 Linux/WSL 可使用相同驱动。Linux 支持要按具体板卡、驱动和 SDK 组合另行确认。
 
 ## 实时图像采集
 
-`IR_OpenFrames` 按平台选择实时相机或 RAW 回放：Windows 传 `IR_DIRECTSHOW` 和相机名（例如 `FX3`），启用 NI-IMAQ 后可传 `IR_NI_IMAQ` 和配置好的接口名；Linux 传 `IR_V4L2` 和视频节点（例如 `/dev/video0`）；离线数据使用 `IR_RAW_REPLAY` 和目录路径。读取顺序为打开、启动、读取、停止、关闭。
+`IR_OpenFrames` 按平台选择实时相机或 RAW 回放：Windows 传 `IR_DIRECTSHOW` 和相机名（例如 `FX3`）；Linux 传 `IR_V4L2` 和视频节点（例如 `/dev/video0`）；离线数据使用 `IR_RAW_REPLAY` 和目录路径。`IR_NI_IMAQ` 是为 PCIe-1433 预留的编号，当前返回 `IR_UNSUPPORTED`。读取顺序为打开、启动、读取、停止、关闭。
 
 Windows 后端沿用 USB_test 使用的 DirectShow Sample Grabber COM 过滤器，部署电脑需要注册 `qedit.dll`。Microsoft 已将该过滤器标记为旧版并弃用；当前保留它是为了复用现有 FX3 采集路径。[Microsoft Sample Grabber 文档](https://learn.microsoft.com/en-us/windows/win32/directshow/sample-grabber-filter)
 
@@ -72,7 +72,7 @@ Windows 后端沿用 USB_test 使用的 DirectShow Sample Grabber COM 过滤器�
 1. 打开黑体并取得设备句柄。打开时核对控制器型号、序列号和适用的探头信息。用 `IR_SetBlackbody` 设温并读回，用 `IR_ReadBlackbody` 获取实际温度、设定温度和稳定标志。温度单位为 °C。
 2. 用 `IR_OpenFrames` 打开带索引的 RAW 目录，得到宽、高和有效位。直接读帧可依次调用 `IR_StartFrames`、`IR_ReadFrames`、`IR_StopFrames`。
 3. 用 `IR_RunNoise` 运行固定流程。离线配方将两个设备句柄都填 0。带黑体时填已打开的句柄，依次设温、读回、等稳、采集指定帧数、计算像元样本标准差。稳定窗口要求连续读数满足温差和可选的设备稳定标志。失败时保留完成帧数，指标无效。
-4. 指定一个新目录即可保存 `frames.raw`、`frames.csv` 和 `result.json`。三个文件齐备后发布目录。再次打开保存目录可复算同一批数据。
+4. 指定一个新目录即可保存 `frames.raw`、`frames.csv` 和 `result.json`。结果文件记录配方设定、设温回读和达到等稳时的实际温度/设备稳定标志。三个文件齐备后发布目录。再次打开保存目录可复算同一批数据。
 5. 用 `IR_CloseFrames` 和 `IR_CloseDevice` 释放连接。DOC058 黑体的串口和 TCP 读操作在传输失败后都会重新识别设备，最多重试三次。设温应答超时通过回读确认，SDK 不重发该写命令。`IR_RequestStop` 在当前仪器同步调用结束时中止流程。
 
-当前分支提供双平台 RAW 回放、黑体通信、固定时域噪声流程以及 DirectShow/V4L2 后端。NI-IMAQ 仅在 Windows 配置对应 SDK 后启用，尚未在本机硬件验收。Linux UVC 真机已读到 FX3 测试坡度图，但在 WSL USB/IP 下多帧接口检测到序号跳变，因此不计为连续采集通过。探测器参数控制、其他仪器、GB/GJB 和专项算法仍需按实际设备与对照数据验收。见 [验证记录](验证记录.md)。
+当前分支提供双平台 RAW 回放、黑体通信、固定时域噪声流程以及 DirectShow/V4L2 后端。PCIe-1433 的 NI-IMAQ 运行实现暂留空，接口编号已保留；Windows 驱动和 Linux 兼容性都未验收。Linux UVC 真机已读到 FX3 测试坡度图，但在 WSL USB/IP 下多帧接口检测到序号跳变，因此不计为连续采集通过。探测器参数控制、其他仪器、GB/GJB 和专项算法仍需按实际设备与对照数据验收。见 [验证记录](验证记录.md)。
