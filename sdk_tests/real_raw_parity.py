@@ -1,12 +1,10 @@
-"""Validate one RAW recording against the installed Windows DLLs and NumPy."""
+"""Validate one RAW recording against the installed IR SDK and NumPy."""
 import argparse
 import csv
 import ctypes as c
 import hashlib
 import json
 from pathlib import Path
-
-import numpy as np
 
 
 class Geometry(c.Structure):
@@ -35,10 +33,14 @@ def open_api(directory):
             sdk = c.CDLL(str(directory / "IR_station.dll"))
     else:
         sdk = c.CDLL(str(directory / "libIR_station.so"))
+    return configure_frame_api(sdk)
+
+
+def configure_frame_api(sdk):
     error_args = [c.c_char_p, c.c_int32]
-    sdk.OptMeas_OpenFrames.argtypes = [c.c_int32, c.c_char_p, c.c_int32, c.POINTER(Geometry), *error_args]
-    sdk.OptMeas_RunNoise.argtypes = [c.POINTER(NoiseRecipe), c.c_char_p, c.POINTER(Result), *error_args]
-    sdk.OptMeas_CloseFrames.argtypes = error_args
+    sdk.IR_OpenFrames.argtypes = [c.c_int32, c.c_char_p, c.c_int32, c.POINTER(Geometry), *error_args]
+    sdk.IR_RunNoise.argtypes = [c.POINTER(NoiseRecipe), c.c_char_p, c.POINTER(Result), *error_args]
+    sdk.IR_CloseFrames.argtypes = error_args
     return sdk
 
 
@@ -51,17 +53,19 @@ def run(sdk, directory, frames, output=None):
             raise RuntimeError(f"{function.__name__}: {code}: {error.value.decode('utf8', 'replace')}")
 
     g, result = Geometry(), Result()
-    checked(sdk.OptMeas_OpenFrames, 2, str(directory).encode(), 0, c.byref(g))
+    checked(sdk.IR_OpenFrames, 2, str(directory).encode(), 0, c.byref(g))
     try:
         recipe = NoiseRecipe(recipe_id=b"raw-parity", frames=frames)
         name = str(output).encode() if output else None
-        checked(sdk.OptMeas_RunNoise, c.byref(recipe), name, c.byref(result))
+        checked(sdk.IR_RunNoise, c.byref(recipe), name, c.byref(result))
         return (g.width, g.height, g.valid_bits), result
     finally:
-        checked(sdk.OptMeas_CloseFrames)
+        checked(sdk.IR_CloseFrames)
 
 
 def reference(path, frames, width, height, stride):
+    import numpy as np
+
     count = width * height
     totals = np.zeros(count, dtype=np.float64)
     squares = np.zeros_like(totals)
@@ -80,6 +84,8 @@ def reference(path, frames, width, height, stride):
 
 
 def main():
+    import numpy as np
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("sdk_bin", type=Path)
     parser.add_argument("input", type=Path)
@@ -98,6 +104,15 @@ def main():
     assert g == g_replay == (width, height, bits)
     assert result.completed == replay.completed == frames
     assert result.mean_dn == replay.mean_dn and result.temporal_noise_dn == replay.temporal_noise_dn
+
+    with (args.output / "frames.csv").open(encoding="utf-8-sig", newline="") as index:
+        saved_rows = list(csv.DictReader(index))
+    assert len(saved_rows) == frames
+    for incoming, saved in zip(rows, saved_rows):
+        for field in ("frame_index", "application_sequence", "driver_frame_number", "lost_frames",
+                      "source_timestamp_ns", "received_monotonic_ns", "monotonic_ms", "relative_time_ms",
+                      "callback_sequence", "pixels_inverted"):
+            assert incoming[field] == saved[field], (incoming["frame_index"], field)
 
     checksum = args.input / "frames.sha256"
     saved_raw = args.output / "frames.raw"

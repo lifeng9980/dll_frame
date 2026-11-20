@@ -5,13 +5,13 @@
 #include <mutex>
 #include <thread>
 
-namespace optmeas::acquisition {
+namespace ir::acquisition {
 class FrameSource {
 public:
     virtual ~FrameSource() = default;
-    virtual OptMeasGeometry geometry() const = 0;
+    virtual IRGeometry geometry() const = 0;
     virtual void start() = 0;
-    virtual void read(uint16_t *pixels, OptMeasFrameStamp &stamp, int timeoutMs) = 0;
+    virtual void read(uint16_t *pixels, IRFrameStamp &stamp, int timeoutMs) = 0;
     virtual void stop() = 0;
 };
 std::unique_ptr<FrameSource> openReplay(const char *directory);
@@ -29,7 +29,7 @@ public:
     void start();
     void stop();
     void read(int count, int timeoutMs, uint16_t *pixels, int64_t capacity,
-              OptMeasFrameStamp *stamps, int stampCapacity, int &completed);
+              IRFrameStamp *stamps, int stampCapacity, int &completed);
 };
 Capture &capture();
 std::unique_lock<std::mutex> lockCapture();

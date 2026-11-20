@@ -36,45 +36,48 @@ int main()
             "0,10,99,1,0,2,2,6,RAW16_LE,12,little\n"
             "1,11,100,5,0,2,2,6,RAW16_LE,12,little\n");
         char err[1024]{};
-        OptMeasGeometry g{};
+        IRGeometry g{};
+        const auto missing = fixture.filePath(QStringLiteral("不存在的采集目录")).toUtf8();
+        check(IR_OpenFrames(IR_RAW_REPLAY,missing.constData(),0,&g,err,sizeof err)==IR_IO_ERROR, "missing UTF-8 path");
+        check(QByteArray(err).contains(missing), "missing path diagnostic preserves UTF-8");
         const auto path = original.toUtf8();
         auto open = [&](const QByteArray &name) {
-            check(OptMeas_OpenFrames(OPTMEAS_RAW_REPLAY,name.constData(),0,&g,err,sizeof err)==0,err);
+            check(IR_OpenFrames(IR_RAW_REPLAY,name.constData(),0,&g,err,sizeof err)==0,err);
             check(g.width==2 && g.height==2 && g.valid_bits==12,"geometry");
         };
         auto read = [&] {
-            check(OptMeas_StartFrames(err,sizeof err)==0,err);
+            check(IR_StartFrames(err,sizeof err)==0,err);
             uint16_t data[12]{};
-            OptMeasFrameStamp stamps[3]{};
+            IRFrameStamp stamps[3]{};
             int32_t readCount{};
-            check(OptMeas_ReadFrames(3,0,data,12,stamps,3,&readCount,err,sizeof err)==OPTMEAS_END_OF_STREAM,"EOF");
+            check(IR_ReadFrames(3,0,data,12,stamps,3,&readCount,err,sizeof err)==IR_END_OF_STREAM,"EOF");
             check(readCount==2,"partial count");
             const uint16_t expected[]{0x101,0x203,0x401,0x802,0x103,0x207,0x407,0x80a};
             check(std::equal(std::begin(expected),std::end(expected),data),"pixel order or padding");
             check(stamps[0].sequence==10 && stamps[1].driver_sequence==100 &&
-                  stamps[1].time_origin==OPTMEAS_TIME_RECORDED_MONOTONIC &&
+                  stamps[1].time_origin==IR_TIME_RECORDED_MONOTONIC &&
                   stamps[1].timestamp_ns==5000000, "recorded metadata");
-            check(OptMeas_StopFrames(err,sizeof err)==0,err);
+            check(IR_StopFrames(err,sizeof err)==0,err);
         };
         open(path); read();
-        OptMeasNoiseRecipe recipe{};
+        IRNoiseRecipe recipe{};
         recipe.recipe_id = "roundtrip";
         recipe.frames = 2;
-        OptMeasNoiseResult result{};
+        IRNoiseResult result{};
         const auto out = saved.toUtf8();
-        check(OptMeas_RunNoise(&recipe,out.constData(),&result,err,sizeof err)==0,err);
+        check(IR_RunNoise(&recipe,out.constData(),&result,err,sizeof err)==0,err);
         check(result.completed==2 && std::abs(result.temporal_noise_dn-5/std::sqrt(2.0))<1e-12,"sample noise");
-        check(OptMeas_RunNoise(&recipe,out.constData(),&result,err,sizeof err)==OPTMEAS_IO_ERROR,"reject existing output");
-        check(OptMeas_CloseFrames(err,sizeof err)==0,err);
+        check(IR_RunNoise(&recipe,out.constData(),&result,err,sizeof err)==IR_IO_ERROR,"reject existing output");
+        check(IR_CloseFrames(err,sizeof err)==0,err);
         open(out); read();
-        check(OptMeas_StartFrames(err,sizeof err)==0,err);
-        OptMeas_RequestStop();
+        check(IR_StartFrames(err,sizeof err)==0,err);
+        IR_RequestStop();
         uint16_t pixels[4]{};
-        OptMeasFrameStamp stamp{};
+        IRFrameStamp stamp{};
         int32_t completed{};
-        check(OptMeas_ReadFrames(1,0,pixels,4,&stamp,1,&completed,err,sizeof err)==OPTMEAS_CANCELLED && completed==0,
+        check(IR_ReadFrames(1,0,pixels,4,&stamp,1,&completed,err,sizeof err)==IR_CANCELLED && completed==0,
             "cancel read");
-        check(OptMeas_CloseFrames(err,sizeof err)==0,err);
+        check(IR_CloseFrames(err,sizeof err)==0,err);
         return 0;
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';

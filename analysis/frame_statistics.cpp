@@ -2,21 +2,21 @@
 #include "api_common.h"
 #include <vector>
 
-using namespace optmeas::api;
-extern "C" const char *OptMeas_AnalysisVersion(void)
+using namespace ir::api;
+extern "C" const char *IR_AnalysisVersion(void)
 {
-    return OPTMEAS_ANALYSIS_VERSION;
+    return IR_ANALYSIS_VERSION;
 }
 
 // Welford 更新逐像元均值和平方差，避免高直流背景下的减法消差。
-extern "C" int32_t OptMeas_FrameStatisticsU16(const uint16_t *frames, int64_t elements, int32_t t, int32_t rows,
+extern "C" int32_t IR_FrameStatisticsU16(const uint16_t *frames, int64_t elements, int32_t t, int32_t rows,
                                               int32_t cols, int32_t sample, double *means, double *stds,
                                               int64_t capacity, double *summary, int32_t sn, char *err, int32_t en)
 {
     return guarded(err, en, [&] {
         const auto n = pixels(rows, cols);
         needed(frames, elements, stackSize(n, t));
-        require((sample == 0 || sample == 1) && t > sample, OPTMEAS_BAD_ARGUMENT,
+        require((sample == 0 || sample == 1) && t > sample, IR_BAD_ARGUMENT,
                 "Invalid standard deviation convention or frame count");
         needed(means, capacity, n);
         needed(stds, capacity, n);

@@ -8,7 +8,7 @@
 #include <string>
 #include <system_error>
 
-namespace optmeas::api
+namespace ir::api
 {
 struct Error : std::runtime_error
 {
@@ -33,12 +33,12 @@ inline void copyText(char *out, int32_t count, const char *text) noexcept
 template <class Function> int32_t guarded(char *err, int32_t bytes, Function function) noexcept
 {
     if (bytes < 0 || (bytes > 0 && !err))
-        return OPTMEAS_BAD_ARGUMENT;
+        return IR_BAD_ARGUMENT;
     copyText(err, bytes, "");
     try
     {
         function();
-        return OPTMEAS_OK;
+        return IR_OK;
     }
     catch (const Error &e)
     {
@@ -48,39 +48,39 @@ template <class Function> int32_t guarded(char *err, int32_t bytes, Function fun
     catch (const std::system_error &e)
     {
         copyText(err, bytes, e.what());
-        return OPTMEAS_IO_ERROR;
+        return IR_IO_ERROR;
     }
     catch (const std::invalid_argument &e)
     {
         copyText(err, bytes, e.what());
-        return OPTMEAS_BAD_ARGUMENT;
+        return IR_BAD_ARGUMENT;
     }
     catch (const std::exception &e)
     {
         copyText(err, bytes, e.what());
-        return OPTMEAS_COMPUTATION_FAILED;
+        return IR_COMPUTATION_FAILED;
     }
     catch (...)
     {
         copyText(err, bytes, "Unknown DLL exception");
-        return OPTMEAS_COMPUTATION_FAILED;
+        return IR_COMPUTATION_FAILED;
     }
 }
 inline int64_t pixels(int32_t rows, int32_t cols)
 {
-    require(rows > 0 && cols > 0 && cols <= INT32_MAX / 2 && int64_t(rows) * cols <= INT32_MAX, OPTMEAS_BAD_ARGUMENT,
+    require(rows > 0 && cols > 0 && cols <= INT32_MAX / 2 && int64_t(rows) * cols <= INT32_MAX, IR_BAD_ARGUMENT,
             "Invalid image dimensions");
     return int64_t(rows) * cols;
 }
 inline int64_t stackSize(int64_t n, int32_t frames)
 {
     require(frames > 0 && n <= INT64_MAX / frames && uint64_t(n) * frames <= SIZE_MAX / sizeof(double),
-            OPTMEAS_BAD_ARGUMENT, "Invalid frame count or stack size");
+            IR_BAD_ARGUMENT, "Invalid frame count or stack size");
     return n * frames;
 }
 inline void needed(const void *pointer, int64_t count, int64_t required)
 {
-    require(pointer, OPTMEAS_NULL_POINTER, "Required buffer is NULL");
-    require(count >= required, OPTMEAS_BUFFER_TOO_SMALL, "Buffer capacity is too small (in elements)");
+    require(pointer, IR_NULL_POINTER, "Required buffer is NULL");
+    require(count >= required, IR_BUFFER_TOO_SMALL, "Buffer capacity is too small (in elements)");
 }
-} // namespace optmeas::api
+} // namespace ir::api
