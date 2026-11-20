@@ -15,7 +15,11 @@ typedef uint64_t IRHandle;
 #ifdef __cplusplus
 extern "C" {
 #endif
-enum IRBackend { IR_DIRECTSHOW = 1, IR_RAW_REPLAY = 2, IR_V4L2 = 3 };
+enum IRBackend {
+    IR_DIRECTSHOW = 1, /* Windows DirectShow device name, e.g. FX3. */
+    IR_RAW_REPLAY = 2,
+    IR_V4L2 = 3 /* Linux /dev/videoN, for the FX3 YUYV 16-bit raw stream. */
+};
 enum IRFrameFields {
     IR_HAS_SEQUENCE = 1, IR_HAS_DRIVER_SEQUENCE = 2, IR_HAS_LOSS = 4,
     IR_SEQUENCE_IS_CALLBACK = 8, IR_PIXELS_INVERTED = 16
@@ -24,11 +28,12 @@ enum IRTimeOrigin {
     IR_TIME_UNKNOWN, IR_TIME_SOURCE, IR_TIME_HOST,
     IR_TIME_RECORDED_MONOTONIC, IR_TIME_RECORDED_RELATIVE
 };
-/* 实际帧几何，宽高以像元计，valid_bits 为每个 U16 中的有效位。 */
+/* 实际帧几何，宽高以像元计，valid_bits 为每个 U16 中的有效位；0 表示来源没有给出。 */
 typedef struct IRGeometry {
     int32_t width, height, valid_bits;
 } IRGeometry;
-/* 先检查 fields 中的有效位。timestamp_ns 为纳秒，时基由 time_origin 指明。 */
+/* 先检查 fields 中的有效位。DirectShow 的 sequence 标记为 callback 序号；
+   timestamp_ns 为纳秒，时基由 time_origin 指明。 */
 typedef struct IRFrameStamp {
     uint64_t sequence, driver_sequence;
     int64_t timestamp_ns;
@@ -37,7 +42,10 @@ typedef struct IRFrameStamp {
 } IRFrameStamp;
 
 /* 一个进程使用一个采集源。除 RequestStop 外，采集和流程调用使用打开源的线程。
-   打开 RAW 目录，valid_bits 传 0 时读取索引。成功时 actual 返回宽、高和有效位。 */
+   RAW 目录的 valid_bits 传 0 时读取索引。实时源的 valid_bits 由调用方按探测器配置提供，
+   不清楚时传 0。Windows 可传 IR_DIRECTSHOW 和相机名；Linux 可传 IR_V4L2 和 /dev/videoN。
+   FX3 必须提供 16 位原始传输格式：Windows DirectShow RGB565/YUY2，Linux V4L2 YUYV。
+   成功时 actual 返回宽、高和有效位。 */
 IR_STATION_API int32_t IR_OpenFrames(int32_t backend, const char *name_or_directory,
     int32_t valid_bits, IRGeometry *actual, char *err, int32_t err_bytes);
 /* 回放从第 0 帧开始，每次停止后可重新启动。 */
@@ -68,8 +76,8 @@ typedef struct IRNoiseResult {
     int32_t completed;
     double mean_dn, temporal_noise_dn;      /* 像元样本标准差的全图均值 */
 } IRNoiseResult;
-/* 同步运行已打开且未启动的 RAW 源。recipe 和 result 由调用方持有。
-   recipe_id 使用 UTF-8，frames >= 2。指定黑体时，先设温并等待稳定，再读取 RAW。
+/* 在打开源的线程同步运行配方。采集源已打开且未启动，recipe 和 result 由调用方持有。
+   recipe_id 使用 UTF-8，frames >= 2。指定黑体时，先设温并等待稳定，再从当前采集源取帧。
    温度和温差单位 °C，稳定窗口和等待上限单位 ms，以设温回读成功为起点。通信调用结束后检查超时和取消。
    detector 现阶段填 0。
    结果为完成帧数、平均 DN 和样本时域噪声 DN。

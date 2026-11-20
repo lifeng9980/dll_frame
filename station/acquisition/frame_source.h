@@ -15,6 +15,12 @@ public:
     virtual void stop() = 0;
 };
 std::unique_ptr<FrameSource> openReplay(const char *directory);
+#if defined(__linux__)
+std::unique_ptr<FrameSource> openV4l2(const char *devicePath, int validBits);
+#endif
+#if defined(_WIN32)
+std::unique_ptr<FrameSource> openDirectShow(const char *cameraName, int validBits);
+#endif
 
 class Capture {
 public:

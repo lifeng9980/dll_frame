@@ -2,15 +2,16 @@
 import argparse
 import ctypes as c
 import json
+import math
 import os
 from pathlib import Path
 import select
 import socket
+import subprocess
 import threading
 import time
 from tempfile import TemporaryDirectory
 
-from real_raw_parity import configure_frame_api, Geometry, NoiseRecipe, Result
 
 
 class Reading(c.Structure):
@@ -97,7 +98,7 @@ def load_sdk(path, qt_bin):
     return c.CDLL(str(path))
 
 
-def exercise(sdk, controller, config, fixture_parent):
+def exercise(sdk, controller, config):
     handle = c.c_uint64()
     error = c.create_string_buffer(1024)
     io_error, timeout, invalid_handle = 6, 7, 5
@@ -140,37 +141,41 @@ def exercise(sdk, controller, config, fixture_parent):
         check(sdk.IR_SetBlackbody, handle, 31.25, c.byref(readback))
         assert readback.value == 31.25 and controller.writes == 2
 
-        configure_frame_api(sdk)
-        with TemporaryDirectory(prefix="blackbody-", dir=fixture_parent) as temporary:
-            fixture = Path(temporary)
-            (fixture / "frames.raw").write_bytes(b"\x14\x00\x16\x00")
-            (fixture / "frames.csv").write_text(
-                "frame_index,width,height,stride_bytes,pixel_format,bit_depth,endianness\n"
-                "0,1,1,2,RAW16_LE,16,little\n1,1,1,2,RAW16_LE,16,little\n", encoding="utf8")
-            geometry = Geometry()
-            check(sdk.IR_OpenFrames, 2, str(fixture).encode(), 0, c.byref(geometry))
-            try:
-                recipe = NoiseRecipe(recipe_id=b"doc058", blackbody=handle.value, temperature_c=32,
-                                     tolerance_c=0.01, stable_window_ms=100, stable_timeout_ms=5000,
-                                     require_device_stable=1, frames=2)
-                result = Result()
-                check(sdk.IR_RunNoise, c.byref(recipe), None, c.byref(result))
-                assert result.completed == 2 and result.mean_dn == 21 and controller.target == 32
-                controller.stable = False
-                recipe.stable_timeout_ms = 1000
-                check(sdk.IR_RunNoise, c.byref(recipe), None, c.byref(result), expected=timeout)
-                assert result.completed == 0
-            finally:
-                check(sdk.IR_CloseFrames)
     finally:
         check(sdk.IR_CloseDevice, handle)
     check(sdk.IR_ReadBlackbody, handle, c.byref(reading), expected=invalid_handle)
+
+
+def exercise_recipe(args, controller, config):
+    env = os.environ.copy()
+    if os.name == "nt":
+        env["PATH"] = os.pathsep.join([str(args.library.resolve().parent), str(args.qt_bin), env["PATH"]])
+    with TemporaryDirectory(prefix="blackbody-", dir=args.fixture_parent) as temporary:
+        fixture = Path(temporary)
+        (fixture / "frames.raw").write_bytes(b"\x14\x00\x16\x00")
+        (fixture / "frames.csv").write_text(
+            "frame_index,width,height,stride_bytes,pixel_format,bit_depth,endianness\n"
+            "0,1,1,2,RAW16_LE,16,little\n1,1,1,2,RAW16_LE,16,little\n", encoding="utf8")
+        command = [str(args.client.resolve()), args.mode, json.dumps(config)]
+        for stable in (True, False):
+            controller.stable = stable
+            run = subprocess.run(command, cwd=fixture, env=env, capture_output=True, text=True, timeout=12)
+            print(f"{args.mode} stable={stable} status={run.returncode}\n{run.stdout}", flush=True)
+            assert run.returncode == (0 if stable else 7), (run.returncode, run.stderr)
+            values = dict(line.split("=", 1) for line in run.stdout.splitlines())
+            if stable:
+                assert controller.target == 32 and values["completed"] == "2"
+                assert float(values["mean_dn"]) == 21
+                assert math.isclose(float(values["noise_dn"]), math.sqrt(2), rel_tol=0, abs_tol=1e-12)
+            else:
+                assert values == {"completed": "0"}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=["tcp", "serial"])
     parser.add_argument("library", type=Path)
+    parser.add_argument("--client", type=Path, required=True)
     parser.add_argument("--qt-bin", type=Path)
     parser.add_argument("--fixture-parent", type=Path, required=True)
     args = parser.parse_args()
@@ -229,7 +234,8 @@ def main():
     server = threading.Thread(target=worker, daemon=True)
     server.start()
     try:
-        exercise(sdk, controller, config, args.fixture_parent)
+        exercise(sdk, controller, config)
+        exercise_recipe(args, controller, config)
     finally:
         stop.set()
         server.join(5)

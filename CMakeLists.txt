@@ -14,15 +14,29 @@ find_path(IR_ASIO_INCLUDE_DIR asio.hpp REQUIRED)
 add_library(IR_analysis SHARED analysis/frame_statistics.cpp)
 target_compile_definitions(IR_analysis PRIVATE IR_ANALYSIS_BUILD
     IR_ANALYSIS_VERSION="${PROJECT_VERSION}")
-add_library(IR_station SHARED
+add_library(IR_station SHARED)
+# 仪器控制：型号协议使用同一份 Asio TCP / 串口实现。
+target_sources(IR_station PRIVATE
+    station/instruments/device_api.cpp
+    station/instruments/blackbody/doc058.cpp
+    station/instruments/transport/asio_link.cpp)
+
+# 采集：公共入口按来源创建 FrameSource，实时后端随目标平台编译。
+target_sources(IR_station PRIVATE
     station/acquisition/frame_source.cpp
     station/acquisition/raw_replay/source.cpp
-    station/acquisition/raw_replay/RawConversionCore.cpp
+    station/acquisition/raw_replay/RawConversionCore.cpp)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(IR_station PRIVATE station/acquisition/v4l2/source.cpp)
+endif()
+if(WIN32)
+    target_sources(IR_station PRIVATE station/acquisition/directshow/source.cpp)
+    target_link_libraries(IR_station PRIVATE strmiids ole32 oleaut32)
+endif()
+# 流程编排：协调仪器、采集和独立的 IR_analysis 指标库。
+target_sources(IR_station PRIVATE
     station/procedures/noise_run.cpp
-    station/procedures/save_raw.cpp
-    station/instruments/transport/asio_link.cpp
-    station/instruments/blackbody/doc058.cpp
-    station/instruments/device_api.cpp)
+    station/procedures/save_raw.cpp)
 target_compile_definitions(IR_station PRIVATE IR_STATION_BUILD ASIO_STANDALONE)
 target_include_directories(IR_station SYSTEM PRIVATE "${IR_ASIO_INCLUDE_DIR}")
 target_link_libraries(IR_station PRIVATE IR_analysis Qt5::Core Threads::Threads)
@@ -47,16 +61,18 @@ if(BUILD_TESTING)
     add_executable(replay_roundtrip sdk_tests/replay_roundtrip.cpp)
     target_link_libraries(replay_roundtrip PRIVATE IR_station Qt5::Core)
     add_test(NAME replay_roundtrip COMMAND replay_roundtrip)
+    add_executable(noise_recipe sdk_tests/noise_recipe.c)
+    target_link_libraries(noise_recipe PRIVATE IR_station)
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
         add_test(NAME blackbody_tcp COMMAND "${Python3_EXECUTABLE}" -B
             "${PROJECT_SOURCE_DIR}/sdk_tests/blackbody_mock_test.py"
-            tcp "$<TARGET_FILE:IR_station>" --qt-bin "$<TARGET_FILE_DIR:Qt5::Core>" --fixture-parent "${PROJECT_BINARY_DIR}")
+            tcp "$<TARGET_FILE:IR_station>" --client "$<TARGET_FILE:noise_recipe>" --qt-bin "$<TARGET_FILE_DIR:Qt5::Core>" --fixture-parent "${PROJECT_BINARY_DIR}")
         set_tests_properties(blackbody_tcp PROPERTIES TIMEOUT 30)
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             add_test(NAME blackbody_serial COMMAND "${Python3_EXECUTABLE}" -B
                 "${PROJECT_SOURCE_DIR}/sdk_tests/blackbody_mock_test.py"
-                serial "$<TARGET_FILE:IR_station>" --fixture-parent "${PROJECT_BINARY_DIR}")
+                serial "$<TARGET_FILE:IR_station>" --client "$<TARGET_FILE:noise_recipe>" --fixture-parent "${PROJECT_BINARY_DIR}")
             set_tests_properties(blackbody_serial PROPERTIES TIMEOUT 30)
         endif()
     endif()
@@ -70,7 +86,7 @@ install(TARGETS IR_station IR_analysis RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib ARCHIVE DESTINATION lib)
 install(DIRECTORY include/ DESTINATION include)
 install(FILES SDK.md DESTINATION .)
-install(FILES sdk_tests/c_client.c DESTINATION examples)
+install(FILES sdk_tests/c_client.c sdk_tests/noise_recipe.c DESTINATION examples)
 if(WIN32)
     install(FILES "$<TARGET_FILE:Qt5::Core>" DESTINATION bin)
 endif()

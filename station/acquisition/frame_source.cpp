@@ -69,6 +69,16 @@ extern "C" int32_t IR_OpenFrames(int32_t backend, const char *name, int32_t bits
             source = openReplay(name);
             require(!bits || bits == source->geometry().valid_bits, IR_BAD_ARGUMENT, "Depth differs from RAW index");
         }
+#if defined(__linux__)
+        else if (backend == IR_V4L2) {
+            source = openV4l2(name, bits);
+        }
+#endif
+#if defined(_WIN32)
+        else if (backend == IR_DIRECTSHOW) {
+            source = openDirectShow(name, bits);
+        }
+#endif
         else throw Error(IR_UNSUPPORTED, "Frame backend is not available on this platform");
         *actual = source->geometry();
         c.source = std::move(source);
