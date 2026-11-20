@@ -2,6 +2,7 @@
 #include "IR_analysis.h"
 #include "api_common.h"
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -9,6 +10,18 @@
 #include <bit>
 namespace ir::procedures {
 using namespace ir::api;
+namespace {
+const char *backendName(int backend)
+{
+    switch (backend) {
+    case IR_RAW_REPLAY: return "raw_replay";
+    case IR_DIRECTSHOW: return "directshow";
+    case IR_V4L2: return "v4l2";
+    case IR_NI_IMAQ: return "ni_imaq";
+    default: return "unknown";
+    }
+}
+}
 void checkDestination(const QString &path)
 {
     QFileInfo target(path);
@@ -21,7 +34,8 @@ static void writeFile(const QString &name, const char *bytes, qint64 length)
     require(file.open(QIODevice::WriteOnly | QIODevice::NewOnly), IR_IO_ERROR, "Cannot create capture file");
     require(file.write(bytes, length) == length && file.flush(), IR_IO_ERROR, "Cannot write capture file");
 }
-void saveNoiseRun(const QString &path, const IRNoiseRecipe &r, int backend, IRGeometry g,
+void saveNoiseRun(const QString &path, const IRNoiseRecipe &r, int backend,
+    const std::string &sourceName, IRGeometry g,
     const std::vector<uint16_t> &frames, const std::vector<IRFrameStamp> &stamps, const IRNoiseResult &result)
 {
     static_assert(std::endian::native == std::endian::little);
@@ -50,7 +64,8 @@ void saveNoiseRun(const QString &path, const IRNoiseRecipe &r, int backend, IRGe
     }
     writeFile(stage.filePath("frames.csv"), csv.constData(), csv.size());
     QJsonObject record{{"recipe_id",QString::fromUtf8(r.recipe_id)},{"analysis_version",IR_AnalysisVersion()},
-        {"backend",backend == IR_RAW_REPLAY ? "raw_replay" : "directshow"},
+        {"backend",backendName(backend)},
+        {"source_name",QString::fromUtf8(sourceName.data(), int(sourceName.size()))},
         {"width",g.width},{"height",g.height},{"valid_bits",g.valid_bits},{"requested_frames",r.frames},
         {"completed_frames",result.completed},{"frame_timeout_ms",r.frame_timeout_ms},
         {"mean_dn",result.mean_dn},{"temporal_noise_dn",result.temporal_noise_dn},

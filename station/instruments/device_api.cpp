@@ -1,12 +1,18 @@
 #include "IR_device.h"
 #include "api_common.h"
 #include "station/instruments/blackbody/doc058.h"
+#include "station/instruments/device_lease.h"
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <algorithm>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <set>
+#include <thread>
 #include <utility>
+#include <vector>
 
 namespace {
 using ir::instruments::BlackbodyConfig;
@@ -17,9 +23,11 @@ struct Session {
     std::string endpoint;
     std::mutex mutex;
     std::unique_ptr<Doc058Blackbody> blackbody;
+    std::thread::id workflowOwner;
 };
 std::mutex devicesMutex;
 std::map<IRHandle, std::shared_ptr<Session>> devices;
+std::set<std::string> openingEndpoints;
 IRHandle nextHandle{1};
 
 std::string text(const QJsonObject &json, const char *key, bool required)
@@ -92,9 +100,61 @@ template<class Action> void useDevice(IRHandle handle, Action action)
         std::lock_guard lock(devicesMutex);
         device = findDevice(handle)->second;
     }
-    std::lock_guard lock(device->mutex);
+    std::unique_lock operationLock(device->mutex, std::try_to_lock);
+    require(operationLock.owns_lock(), IR_BUSY, "Another instrument operation is active");
+    require(device->workflowOwner == std::thread::id{} ||
+            device->workflowOwner == std::this_thread::get_id(),
+            IR_BUSY, "Instrument is reserved by a measurement procedure");
     require(bool(device->blackbody), IR_INVALID_HANDLE, "Device is closed");
     action(*device->blackbody);
+}
+}
+
+namespace ir::instruments {
+using ir::api::require;
+
+DeviceLease::DeviceLease(const IRHandle *handles, std::size_t count)
+{
+    require(handles || count == 0, IR_NULL_POINTER, "Instrument handle list is NULL");
+    const auto owner = std::this_thread::get_id();
+    std::lock_guard lock(devicesMutex);
+
+    for (std::size_t index = 0; index < count; ++index) {
+        if (!handles[index]) continue;
+        require(std::find(handles_.begin(), handles_.end(), handles[index]) == handles_.end(),
+                IR_BAD_ARGUMENT, "A procedure specifies the same instrument more than once");
+        findDevice(handles[index]);
+        handles_.push_back(handles[index]);
+    }
+
+    std::vector<std::shared_ptr<Session>> sessions;
+    sessions.reserve(handles_.size());
+    for (const auto handle : handles_)
+        sessions.push_back(findDevice(handle)->second);
+    std::sort(sessions.begin(), sessions.end(), [](const auto &left, const auto &right) {
+        return left->endpoint < right->endpoint;
+    });
+
+    std::vector<std::unique_lock<std::mutex>> sessionLocks;
+    sessionLocks.reserve(sessions.size());
+    for (const auto &session : sessions) {
+        sessionLocks.emplace_back(session->mutex, std::try_to_lock);
+        require(sessionLocks.back().owns_lock(), IR_BUSY, "An instrument operation is active");
+        require(session->workflowOwner == std::thread::id{}, IR_BUSY, "Instrument is already reserved");
+    }
+    for (const auto &session : sessions) session->workflowOwner = owner;
+}
+
+DeviceLease::~DeviceLease()
+{
+    const auto owner = std::this_thread::get_id();
+    std::lock_guard lock(devicesMutex);
+    for (const auto handle : handles_) {
+        const auto pos = devices.find(handle);
+        if (pos == devices.end()) continue;
+        std::lock_guard sessionLock(pos->second->mutex);
+        if (pos->second->workflowOwner == owner) pos->second->workflowOwner = {};
+    }
 }
 }
 
@@ -105,12 +165,27 @@ extern "C" int32_t IR_OpenDevice(int32_t kind, const char *config, IRHandle *out
         needed(out, 1, 1);
         require(kind == IR_PCN7LT || kind == IR_DCN1000, IR_UNSUPPORTED, "Unsupported instrument kind");
         auto [options, endpoint] = parseConfig(kind, config);
+        {
+            std::lock_guard lock(devicesMutex);
+            for (const auto &[handle, session] : devices)
+                require(session->endpoint != endpoint, IR_BUSY, "Instrument endpoint is already open");
+            require(openingEndpoints.insert(endpoint).second, IR_BUSY,
+                    "Instrument endpoint is being opened");
+        }
+
+        std::shared_ptr<Session> device;
+        try {
+            device = std::make_shared<Session>();
+            device->endpoint = endpoint;
+            device->blackbody = std::make_unique<Doc058Blackbody>(std::move(options));
+        } catch (...) {
+            std::lock_guard lock(devicesMutex);
+            openingEndpoints.erase(endpoint);
+            throw;
+        }
+
         std::lock_guard lock(devicesMutex);
-        for (const auto &[handle, session] : devices)
-            require(session->endpoint != endpoint, IR_BUSY, "Instrument endpoint is already open");
-        auto device = std::make_shared<Session>();
-        device->endpoint = std::move(endpoint);
-        device->blackbody = std::make_unique<Doc058Blackbody>(std::move(options));
+        openingEndpoints.erase(endpoint);
         const auto handle = nextHandle++;
         devices.emplace(handle, std::move(device));
         *out = handle;
@@ -120,12 +195,28 @@ extern "C" int32_t IR_OpenDevice(int32_t kind, const char *config, IRHandle *out
 extern "C" int32_t IR_CloseDevice(IRHandle handle, char *err, int32_t bytes)
 {
     return guarded(err, bytes, [&] {
-        std::lock_guard registryLock(devicesMutex);
-        const auto pos = findDevice(handle);
-        const auto device = pos->second;
-        std::lock_guard deviceLock(device->mutex);
-        device->blackbody.reset();
-        devices.erase(pos);
+        std::shared_ptr<Session> device;
+        std::unique_ptr<Doc058Blackbody> closing;
+        std::unique_lock<std::mutex> deviceLock;
+        std::string endpoint;
+        {
+            std::lock_guard registryLock(devicesMutex);
+            const auto pos = findDevice(handle);
+            device = pos->second;
+            deviceLock = std::unique_lock<std::mutex>(device->mutex, std::try_to_lock);
+            require(deviceLock.owns_lock(), IR_BUSY, "Instrument operation is active");
+            require(device->workflowOwner == std::thread::id{}, IR_BUSY, "Instrument is in use");
+            endpoint = device->endpoint;
+            openingEndpoints.insert(endpoint);
+            closing = std::move(device->blackbody);
+            devices.erase(pos);
+        }
+        closing.reset();
+        deviceLock.unlock();
+        {
+            std::lock_guard registryLock(devicesMutex);
+            openingEndpoints.erase(endpoint);
+        }
     });
 }
 

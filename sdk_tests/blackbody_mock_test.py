@@ -18,6 +18,24 @@ class Reading(c.Structure):
     _fields_ = [("actual_c", c.c_double), ("setpoint_c", c.c_double), ("stable", c.c_int32)]
 
 
+class NoiseRecipe(c.Structure):
+    _fields_ = [
+        ("recipe_id", c.c_char_p), ("detector", c.c_uint64), ("blackbody", c.c_uint64),
+        ("integration_us", c.c_int32), ("frame_hz", c.c_int32), ("empty_us", c.c_int32),
+        ("temperature_c", c.c_double), ("tolerance_c", c.c_double),
+        ("stable_window_ms", c.c_int32), ("stable_timeout_ms", c.c_int32),
+        ("require_device_stable", c.c_int32), ("frames", c.c_int32),
+        ("frame_timeout_ms", c.c_int32),
+    ]
+
+
+class NoiseResult(c.Structure):
+    _fields_ = [
+        ("completed", c.c_int32), ("mean_dn", c.c_double), ("noise_dn", c.c_double),
+        ("failed_step", c.c_int32), ("cleanup_status", c.c_int32),
+    ]
+
+
 class Controller:
     def __init__(self, tcp):
         self.tcp = tcp
@@ -25,9 +43,11 @@ class Controller:
         self.fail_read = False
         self.fail_write = False
         self.reject_write = False
+        self.disconnect_reads = 0
         self.stable = True
         self.writes = 0
         self.error = None
+        self.stable_reply = threading.Event()
 
     def reply(self, request, send):
         assert request[:1] == b"\x1b"
@@ -55,6 +75,9 @@ class Controller:
                 if not self.tcp:
                     return True  # Omit one response and trigger the serial deadline.
                 return False  # Disconnect and require fresh controller identification.
+            if function == 114 and self.disconnect_reads:
+                self.disconnect_reads -= 1
+                return not self.tcp
             payload = {
                 135: b"PCN7-LT" if self.tcp else b"DCN1000",
                 136: b"DOC058-MOCK",
@@ -76,6 +99,8 @@ class Controller:
             send(payload + b"\r")
         else:
             send(b"\x1b" + bytes([function]) + payload + b"\r")
+        if function == 92:
+            self.stable_reply.set()
         return True
 
     def serve(self, read, send, stop):
@@ -132,8 +157,13 @@ def exercise(sdk, controller, config):
         assert readback.value == 30.125
 
         controller.fail_read = True
-        if not controller.tcp:
-            check(sdk.IR_ReadBlackbody, handle, c.byref(reading), expected=timeout)
+        check(sdk.IR_ReadBlackbody, handle, c.byref(reading))
+        assert reading.actual_c == reading.setpoint_c == 30.125
+
+        controller.disconnect_reads = 4
+        retry_exhausted_status = io_error if controller.tcp else timeout
+        check(sdk.IR_ReadBlackbody, handle, c.byref(reading), expected=retry_exhausted_status)
+        assert controller.disconnect_reads == 0
         check(sdk.IR_ReadBlackbody, handle, c.byref(reading))
         assert reading.actual_c == reading.setpoint_c == 30.125
 
@@ -165,10 +195,100 @@ def exercise_recipe(args, controller, config):
             values = dict(line.split("=", 1) for line in run.stdout.splitlines())
             if stable:
                 assert controller.target == 32 and values["completed"] == "2"
+                assert values["failed_step"] == "0" and values["cleanup_status"] == "0"
                 assert float(values["mean_dn"]) == 21
                 assert math.isclose(float(values["noise_dn"]), math.sqrt(2), rel_tol=0, abs_tol=1e-12)
             else:
-                assert values == {"completed": "0"}
+                assert values == {"completed": "0", "failed_step": "4", "cleanup_status": "0"}
+
+
+def exercise_recipe_ownership(args, sdk, controller, config):
+    error_args = [c.c_char_p, c.c_int32]
+    sdk.IR_OpenDevice.argtypes = [c.c_int32, c.c_char_p, c.POINTER(c.c_uint64), *error_args]
+    sdk.IR_CloseDevice.argtypes = [c.c_uint64, *error_args]
+    sdk.IR_SetBlackbody.argtypes = [c.c_uint64, c.c_double, c.POINTER(c.c_double), *error_args]
+    sdk.IR_ReadBlackbody.argtypes = [c.c_uint64, c.POINTER(Reading), *error_args]
+    sdk.IR_OpenFrames.argtypes = [c.c_int32, c.c_char_p, c.c_int32, c.c_void_p, *error_args]
+    sdk.IR_CloseFrames.argtypes = error_args
+    sdk.IR_RunNoise.argtypes = [c.POINTER(NoiseRecipe), c.c_char_p, c.POINTER(NoiseResult), *error_args]
+    sdk.IR_RequestStop.argtypes = []
+    sdk.IR_RequestStop.restype = None
+
+    with TemporaryDirectory(prefix="ownership-", dir=args.fixture_parent) as temporary:
+        fixture = Path(temporary)
+        (fixture / "frames.raw").write_bytes(b"\x14\x00\x16\x00")
+        (fixture / "frames.csv").write_text(
+            "frame_index,width,height,stride_bytes,pixel_format,bit_depth,endianness\n"
+            "0,1,1,2,RAW16_LE,16,little\n1,1,1,2,RAW16_LE,16,little\n", encoding="utf8")
+        controller.stable = True
+        controller.stable_reply.clear()
+        error = c.create_string_buffer(1024)
+        handle = c.c_uint64()
+        kind = 2 if controller.tcp else 3
+        status = sdk.IR_OpenDevice(kind, json.dumps(config).encode(), c.byref(handle), error, len(error))
+        assert status == 0, error.value
+
+        recipe = NoiseRecipe(b"ownership", 0, handle.value, 0, 0, 0, 32.0, 0.01,
+                             1500, 6000, 1, 2, 0)
+        outcome = {}
+        first_complete = threading.Event()
+        retry_allowed = threading.Event()
+
+        def run_recipe():
+            def execute_attempt(name):
+                worker_error = c.create_string_buffer(1024)
+                geometry = (c.c_int32 * 3)()
+                fixture_name = str(fixture).encode()
+                opened = sdk.IR_OpenFrames(2, fixture_name, 0, geometry, worker_error, len(worker_error))
+                if opened != 0:
+                    outcome[name] = {"open": opened, "error": worker_error.value}
+                    return
+                result = NoiseResult()
+                status = sdk.IR_RunNoise(c.byref(recipe), None, c.byref(result),
+                                         worker_error, len(worker_error))
+                outcome[name] = {"status": status, "error": worker_error.value,
+                                 "result": result, "thread": threading.get_ident()}
+                closed = sdk.IR_CloseFrames(worker_error, len(worker_error))
+                assert closed == 0, worker_error.value
+
+            execute_attempt("first")
+            first_complete.set()
+            if outcome["first"].get("status") != 8:
+                return
+            retry_allowed.wait(5)
+            recipe.stable_window_ms = 0
+            execute_attempt("retry")
+
+        worker = threading.Thread(target=run_recipe)
+        worker.start()
+        assert controller.stable_reply.wait(4), "procedure did not reach blackbody stabilization"
+        time.sleep(0.05)
+
+        readback = c.c_double()
+        reading = Reading()
+        assert sdk.IR_SetBlackbody(handle, 40.0, c.byref(readback), error, len(error)) == 9
+        assert sdk.IR_ReadBlackbody(handle, c.byref(reading), error, len(error)) == 9
+        assert sdk.IR_CloseDevice(handle, error, len(error)) == 9
+
+        sdk.IR_RequestStop()
+        assert first_complete.wait(4), "procedure did not release its resources after cancellation"
+        assert "open" not in outcome["first"], outcome["first"]
+        assert outcome["first"]["status"] == 8, outcome["first"]
+        assert outcome["first"]["result"].failed_step == 4
+        assert outcome["first"]["result"].cleanup_status == 0
+        assert sdk.IR_ReadBlackbody(handle, c.byref(reading), error, len(error)) == 0, error.value
+
+        # Retry on the same worker after proving the cancelled run released its reservation.
+        retry_allowed.set()
+        worker.join(8)
+        assert not worker.is_alive(), "retry did not finish"
+        assert "open" not in outcome["retry"], outcome["retry"]
+        assert outcome["retry"]["status"] == 0, outcome["retry"]
+        assert outcome["retry"]["result"].completed == 2
+        assert outcome["retry"]["result"].failed_step == 0
+        assert outcome["retry"]["result"].cleanup_status == 0
+        assert outcome["retry"]["thread"] == outcome["first"]["thread"]
+        assert sdk.IR_CloseDevice(handle, error, len(error)) == 0, error.value
 
 
 def main():
@@ -236,6 +356,7 @@ def main():
     try:
         exercise(sdk, controller, config)
         exercise_recipe(args, controller, config)
+        exercise_recipe_ownership(args, sdk, controller, config)
     finally:
         stop.set()
         server.join(5)

@@ -1,6 +1,9 @@
 #include "station/acquisition/frame_source.h"
 #include "api_common.h"
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <Windows.h>
 #include <dshow.h>
 #include <dvdmedia.h>
@@ -16,6 +19,7 @@
 #include <cstring>
 #include <deque>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -82,6 +86,11 @@ void freeMediaType(AM_MEDIA_TYPE &type) noexcept
     type = {};
 }
 
+struct OwnedMediaType {
+    AM_MEDIA_TYPE type{};
+    ~OwnedMediaType() { freeMediaType(type); }
+};
+
 void deleteMediaType(AM_MEDIA_TYPE *type) noexcept
 {
     if (!type) return;
@@ -122,10 +131,12 @@ struct FormatInfo {
     LONG width{};
     LONG height{};
     WORD bitCount{};
+    size_t rowStride{};
 };
 
 bool readFormat(const AM_MEDIA_TYPE &type, FormatInfo &format)
 {
+    if (!type.pbFormat) return false;
     const BITMAPINFOHEADER *bitmap = nullptr;
     if (type.formattype == FORMAT_VideoInfo && type.cbFormat >= sizeof(VIDEOINFOHEADER)) {
         bitmap = &reinterpret_cast<const VIDEOINFOHEADER *>(type.pbFormat)->bmiHeader;
@@ -135,9 +146,16 @@ bool readFormat(const AM_MEDIA_TYPE &type, FormatInfo &format)
         return false;
     }
     format.width = bitmap->biWidth;
-    format.height = std::abs(bitmap->biHeight);
+    const auto height = bitmap->biHeight < 0 ? -int64_t(bitmap->biHeight) : int64_t(bitmap->biHeight);
+    if (height > std::numeric_limits<LONG>::max()) return false;
+    format.height = LONG(height);
     format.bitCount = bitmap->biBitCount;
-    return format.width > 0 && format.height > 0;
+    if (format.width <= 0 || format.height <= 0 || format.bitCount == 0) return false;
+    const auto rowBits = uint64_t(format.width) * format.bitCount;
+    const auto rowBytes = ((rowBits + 31) / 32) * 4;
+    if (rowBytes > std::numeric_limits<size_t>::max()) return false;
+    format.rowStride = size_t(rowBytes);
+    return true;
 }
 
 bool isRaw16Subtype(const GUID &subtype)
@@ -271,17 +289,26 @@ public:
         require(running_, IR_BAD_ARGUMENT, "Start DirectShow capture before reading frames");
         const auto deadline = std::chrono::steady_clock::now() +
                               std::chrono::milliseconds(timeoutMs);
-        const size_t frameBytes = size_t(geometry_.width) * size_t(geometry_.height) * sizeof(uint16_t);
+        const size_t rowBytes = size_t(geometry_.width) * sizeof(uint16_t);
+        const size_t frameBytes = rowStride_ * size_t(geometry_.height);
+        bool receivedFrame = false;
 
         for (;;) {
+            if (receivedFrame && std::chrono::steady_clock::now() >= deadline)
+                throw Error(IR_TIMEOUT, "DirectShow frame wait timed out");
             const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - std::chrono::steady_clock::now()).count();
             QueuedFrame frame;
             if (!callback_->next(frame, std::chrono::milliseconds(std::max<int64_t>(0, remaining))))
                 throw Error(IR_TIMEOUT, "DirectShow frame wait timed out");
+            receivedFrame = true;
             if (frame.bytes.size() < frameBytes) continue;
 
-            std::memcpy(pixels, frame.bytes.data(), frameBytes);
+            const auto *source = frame.bytes.data();
+            auto *destination = reinterpret_cast<BYTE *>(pixels);
+            for (LONG row = 0; row < geometry_.height; ++row)
+                std::memcpy(destination + size_t(row) * rowBytes,
+                            source + size_t(row) * rowStride_, rowBytes);
             stamp = {};
             stamp.sequence = frame.sequence;
             if (hasPreviousSequence_ && frame.sequence > previousSequence_ + 1) {
@@ -382,6 +409,16 @@ private:
         checkHr(builder_->RenderStream(&PIN_CATEGORY_CAPTURE, &MEDIATYPE_Video, camera_.Get(),
                                        grabberFilter_.Get(), nullRenderer_.Get()),
                 "Connect DirectShow capture graph");
+        OwnedMediaType connectedType;
+        checkHr(grabber_->GetConnectedMediaType(&connectedType.type),
+                "Read DirectShow connected sample format");
+        FormatInfo connectedFormat{};
+        require(connectedType.type.majortype == MEDIATYPE_Video &&
+                IsEqualGUID(connectedType.type.subtype, selectedSubtype_) &&
+                readFormat(connectedType.type, connectedFormat) && connectedFormat.bitCount == 16 &&
+                connectedFormat.width == width_ && connectedFormat.height == height_,
+                IR_UNSUPPORTED, "DirectShow connected format differs from the selected 16-bit raw format");
+        rowStride_ = connectedFormat.rowStride;
         checkHr(graph_.As(&control_), "Get DirectShow media control");
 
         ComPtr<IMediaFilter> mediaFilter;
@@ -468,6 +505,7 @@ private:
     bool hasPreviousSequence_{};
     GUID selectedSubtype_{};
     IRGeometry geometry_{};
+    size_t rowStride_{};
     ComPtr<IBaseFilter> camera_;
     ComPtr<IGraphBuilder> graph_;
     ComPtr<ICaptureGraphBuilder2> builder_;

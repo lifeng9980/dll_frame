@@ -17,7 +17,8 @@ typedef struct IRBlackbodyReading {
  * 和 expected_head_serial。DCN1000 配置含 port，使用 9600 8N1。
  * 可选 timeout_ms 以毫秒计，默认 3000，覆盖一组指令写入与应答。
  * 打开时确认设备身份。handle 由调用方提供，失败时写 0，成功后由 IR_CloseDevice 释放。
- * 字符串使用 UTF-8。操作为同步调用。同一设备的读写由 SDK 串行处理。
+ * 字符串使用 UTF-8。操作为同步调用。同一设备同时只执行一个操作，并发读写或流程预约时返回 IR_BUSY。
+ * 设备预约只约束当前 SDK 进程内的调用；其他进程的占用由设备或驱动决定。
  */
 IR_STATION_API int32_t IR_OpenDevice(int32_t kind, const char *config_json_utf8, IRHandle *handle,
     char *err, int32_t err_bytes);

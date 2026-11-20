@@ -43,10 +43,11 @@ void ioctlCall(int fd, unsigned long request, Argument *argument, const char *op
 
 class V4l2Source final : public FrameSource {
 public:
-    V4l2Source(const char *path, int validBits) try
+    V4l2Source(const char *path, int validBits)
     {
-        fd_ = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
-        if (fd_ < 0) ioError("Open V4L2 device");
+        try {
+            fd_ = open(path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+            if (fd_ < 0) ioError("Open V4L2 device");
 
         v4l2_capability capabilities{};
         ioctlCall(fd_, VIDIOC_QUERYCAP, &capabilities, "Query V4L2 capabilities");
@@ -71,12 +72,13 @@ public:
                 pixels.sizeimage >= uint64_t(pixels.bytesperline) * pixels.height,
                 IR_IO_ERROR, "V4L2 frame stride or image size is smaller than the image");
 
-        geometry_ = {int32_t(pixels.width), int32_t(pixels.height), validBits};
-        stride_ = pixels.bytesperline;
-    }
-    catch (...) {
-        if (fd_ >= 0) close(fd_);
-        throw;
+            geometry_ = {int32_t(pixels.width), int32_t(pixels.height), validBits};
+            stride_ = pixels.bytesperline;
+        } catch (...) {
+            if (fd_ >= 0) close(fd_);
+            fd_ = -1;
+            throw;
+        }
     }
 
     ~V4l2Source() override
@@ -133,7 +135,11 @@ public:
                               std::chrono::milliseconds(timeoutMs);
 
         pollfd descriptor{fd_, POLLIN, 0};
+        bool receivedBuffer = false;
         for (;;) {
+            if (receivedBuffer && std::chrono::steady_clock::now() >= deadline)
+                throw Error(IR_TIMEOUT, "V4L2 frame wait timed out");
+            descriptor.revents = 0;
             const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                 deadline - std::chrono::steady_clock::now()).count();
             const int waitMs = int(std::clamp<int64_t>(remaining, 0, INT32_MAX));
@@ -148,6 +154,7 @@ public:
             buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
             buffer.memory = V4L2_MEMORY_MMAP;
             ioctlCall(fd_, VIDIOC_DQBUF, &buffer, "Dequeue V4L2 capture buffer");
+            receivedBuffer = true;
             require(buffer.index < mappings_.size(), IR_IO_ERROR,
                     "V4L2 returned an invalid capture buffer");
 

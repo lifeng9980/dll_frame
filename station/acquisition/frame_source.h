@@ -3,6 +3,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 
 namespace ir::acquisition {
@@ -21,11 +22,15 @@ std::unique_ptr<FrameSource> openV4l2(const char *devicePath, int validBits);
 #if defined(_WIN32)
 std::unique_ptr<FrameSource> openDirectShow(const char *cameraName, int validBits);
 #endif
+#if defined(_WIN32) && defined(IR_STATION_HAS_NI_IMAQ)
+std::unique_ptr<FrameSource> openNiImaq(const char *interfaceName, int validBits);
+#endif
 
 class Capture {
 public:
     std::mutex mutex;
     std::unique_ptr<FrameSource> source;
+    std::string sourceName;
     std::thread::id owner;
     int backend{};
     bool running{};

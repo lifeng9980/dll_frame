@@ -14,6 +14,8 @@ using Clock = std::chrono::steady_clock;
 constexpr auto Escape = '\x1b';
 constexpr auto Return = '\r';
 constexpr auto NegativeAck = '\x15';
+constexpr int ReconnectRetries = 3;
+constexpr auto ReconnectDelay = std::chrono::milliseconds(500);
 constexpr uint8_t Name = 135, Serial = 136, HeadSerial = 56, Mode = 73, Temperature = 114,
                   Setpoint = 97, LowLimit = 67, HighLimit = 66, Stable = 92;
 
@@ -62,11 +64,16 @@ bool Doc058Blackbody::tcp() const { return std::holds_alternative<transport::Tcp
 
 void Doc058Blackbody::open()
 {
-    if (tcp())
-        link_ = std::make_unique<transport::AsioLink>(std::get<transport::TcpEndpoint>(config_.endpoint),
-                                                     Clock::now() + config_.timeout);
-    else
-        link_ = std::make_unique<transport::AsioLink>(std::get<transport::SerialEndpoint>(config_.endpoint));
+    try {
+        if (tcp())
+            link_ = std::make_unique<transport::AsioLink>(std::get<transport::TcpEndpoint>(config_.endpoint),
+                                                         Clock::now() + config_.timeout);
+        else
+            link_ = std::make_unique<transport::AsioLink>(std::get<transport::SerialEndpoint>(config_.endpoint));
+    } catch (...) {
+        reconnectable_ = true;
+        throw;
+    }
     try {
         const auto name = request(Name);
         require(tcp() ? pcnIdentity(name) : uppercase(name).find("DCN1000") != std::string::npos,
@@ -83,6 +90,7 @@ void Doc058Blackbody::open()
             require(!headId.empty() && (config_.expectedHead.empty() || uppercase(headId) == uppercase(config_.expectedHead)),
                     IR_IO_ERROR, "Blackbody head serial mismatch");
         }
+        reconnectable_ = false;
     } catch (...) {
         link_.reset();
         throw;
@@ -118,10 +126,12 @@ std::string Doc058Blackbody::request(uint8_t function, std::string argument, boo
             payload = reply.substr(start + 2, reply.size() - start - 3);
             break;
         }
+        reconnectable_ = false;
     } catch (...) {
         nextCommand_ = Clock::now() + config_.commandInterval;
         // A partial or late reply belongs to the old connection.
         link_.reset();
+        reconnectable_ = true;
         throw;
     }
     require(payload != std::string(1, NegativeAck), IR_IO_ERROR, "Blackbody rejected the DOC058 command");
@@ -129,6 +139,19 @@ std::string Doc058Blackbody::request(uint8_t function, std::string argument, boo
 }
 
 double Doc058Blackbody::number(uint8_t function) { return numeric(request(function)); }
+
+double Doc058Blackbody::numberWithReconnect(uint8_t function)
+{
+    for (int retry = 0;; ++retry) {
+        try {
+            if (!link_) open();
+            return number(function);
+        } catch (...) {
+            if (!reconnectable_ || retry == ReconnectRetries) throw;
+            std::this_thread::sleep_for(ReconnectDelay);
+        }
+    }
+}
 
 IRBlackbodyReading Doc058Blackbody::readOnce()
 {
@@ -143,11 +166,13 @@ IRBlackbodyReading Doc058Blackbody::readOnce()
 
 IRBlackbodyReading Doc058Blackbody::read()
 {
-    try {
-        return readOnce();
-    } catch (const Error &error) {
-        if (!tcp() || link_ || !transportError(error)) throw;
-        return readOnce(); // Reidentify and retry a read, never repeat a write.
+    for (int retry = 0;; ++retry) {
+        try {
+            return readOnce();
+        } catch (...) {
+            if (!reconnectable_ || retry == ReconnectRetries) throw;
+            std::this_thread::sleep_for(ReconnectDelay);
+        }
     }
 }
 
@@ -156,10 +181,9 @@ double Doc058Blackbody::set(double target)
     const auto minimum = tcp() ? -60.0 : -5.0;
     require(std::isfinite(target) && target >= minimum && target <= 100.0,
             IR_BAD_ARGUMENT, "Blackbody target is outside the software range");
-    if (!link_) open();
-    require(number(Mode) == 0, IR_IO_ERROR, "Blackbody is outside absolute temperature mode");
-    const auto low = number(LowLimit);
-    const auto high = number(HighLimit);
+    require(numberWithReconnect(Mode) == 0, IR_IO_ERROR, "Blackbody is outside absolute temperature mode");
+    const auto low = numberWithReconnect(LowLimit);
+    const auto high = numberWithReconnect(HighLimit);
     require(target >= low && target <= high, IR_BAD_ARGUMENT, "Blackbody target is outside device limits");
 
     char digits[32];
@@ -168,10 +192,11 @@ double Doc058Blackbody::set(double target)
     try {
         request(Setpoint, std::string(digits, converted.ptr), true);
     } catch (const Error &error) {
-        if (link_ || !transportError(error)) throw;
-        open(); // Confirm a possibly applied setpoint by readback only.
+        if (!reconnectable_ || !transportError(error)) throw;
+        // The controller may have applied the setpoint before the link failed.
+        // Reconnect and confirm it without sending the write a second time.
     }
-    const auto readback = number(Setpoint);
+    const auto readback = numberWithReconnect(Setpoint);
     require(std::abs(readback - target) <= 0.01, IR_IO_ERROR, "Blackbody setpoint readback mismatch");
     return readback;
 }

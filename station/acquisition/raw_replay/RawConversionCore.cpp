@@ -32,7 +32,7 @@ Geometry validateGeometry(Geometry g)
 {
     if (g.width <= 0 || g.height <= 0 || g.width > INT32_MAX / 2 ||
         uint64_t(g.width) * g.height > INT32_MAX || g.stride < g.width * 2 || g.stride % 2 ||
-        g.bitDepth < 1 || g.bitDepth > 16 || g.frameBytes() > INT32_MAX)
+        g.bitDepth < 0 || g.bitDepth > 16 || g.frameBytes() > INT32_MAX)
         throw AppError("Invalid RAW width/height/stride/depth or frame size");
     return g;
 }

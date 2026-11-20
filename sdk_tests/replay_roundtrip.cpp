@@ -26,15 +26,25 @@ int main()
         check(fixture.isValid(), "fixture directory");
         const auto original = fixture.filePath(QStringLiteral("原始帧"));
         const auto saved = fixture.filePath(QStringLiteral("保存帧"));
+        const auto unknownBits = fixture.filePath(QStringLiteral("有效位未知"));
+        const auto unknownBitsSaved = fixture.filePath(QStringLiteral("有效位未知_往返"));
         check(QDir().mkpath(original), "fixture input directory");
+        check(QDir().mkpath(unknownBits), "unknown-bit fixture directory");
         // Distinct row positions, high/low byte patterns, 12 effective bits and padding.
         const std::array<uint16_t,12> input{0x101,0x203,0xffff,0x401,0x802,0xffff,
                                            0x103,0x207,0xffff,0x407,0x80a,0xffff};
+        const std::array<uint16_t,8> unknownInput{0x101,0x203,0x401,0x802,
+                                                  0x103,0x207,0x407,0x80a};
         write(original + "/frames.raw", QByteArray(reinterpret_cast<const char *>(input.data()),sizeof input));
         write(original + "/frames.csv",
             "frame_index,application_sequence,driver_frame_number,monotonic_ms,lost_frames,width,height,stride_bytes,pixel_format,bit_depth,endianness\n"
             "0,10,99,1,0,2,2,6,RAW16_LE,12,little\n"
             "1,11,100,5,0,2,2,6,RAW16_LE,12,little\n");
+        write(unknownBits + "/frames.raw",
+              QByteArray(reinterpret_cast<const char *>(unknownInput.data()), sizeof unknownInput));
+        write(unknownBits + "/frames.csv",
+            "frame_index,width,height,stride_bytes,pixel_format,bit_depth,endianness\n"
+            "0,2,2,4,RAW16_LE,0,little\n1,2,2,4,RAW16_LE,0,little\n");
         char err[1024]{};
         IRGeometry g{};
         const auto missing = fixture.filePath(QStringLiteral("不存在的采集目录")).toUtf8();
@@ -70,6 +80,23 @@ int main()
         check(IR_RunNoise(&recipe,out.constData(),&result,err,sizeof err)==IR_IO_ERROR,"reject existing output");
         check(IR_CloseFrames(err,sizeof err)==0,err);
         open(out); read();
+        check(IR_CloseFrames(err,sizeof err)==0,err);
+        const auto unknownPath = unknownBits.toUtf8();
+        check(IR_OpenFrames(IR_RAW_REPLAY, unknownPath.constData(), 0, &g, err, sizeof err) == 0, err);
+        check(g.valid_bits == 0, "unknown valid bits");
+        IRNoiseRecipe unknownRecipe{};
+        unknownRecipe.recipe_id = "unknown-valid-bits";
+        unknownRecipe.frames = 2;
+        IRNoiseResult unknownResult{};
+        const auto unknownSavedPath = unknownBitsSaved.toUtf8();
+        check(IR_RunNoise(&unknownRecipe, unknownSavedPath.constData(), &unknownResult,
+                          err, sizeof err) == 0, err);
+        check(IR_CloseFrames(err, sizeof err) == 0, err);
+        check(IR_OpenFrames(IR_RAW_REPLAY, unknownSavedPath.constData(), 0, &g, err, sizeof err) == 0, err);
+        check(g.valid_bits == 0, "saved unknown valid bits");
+        check(IR_CloseFrames(err, sizeof err) == 0, err);
+
+        open(out);
         check(IR_StartFrames(err,sizeof err)==0,err);
         IR_RequestStop();
         uint16_t pixels[4]{};

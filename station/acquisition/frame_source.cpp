@@ -1,5 +1,7 @@
 #include "frame_source.h"
 #include "api_common.h"
+#include <algorithm>
+#include <chrono>
 using namespace ir::api;
 namespace ir::acquisition {
 Capture &capture() { static Capture value; return value; }
@@ -39,9 +41,25 @@ void Capture::read(int count, int timeoutMs, uint16_t *out, int64_t capacity,
     needed(stamps, stampCapacity, count);
     while (completed < count) {
         checkStop();
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(timeoutMs);
         IRFrameStamp stamp{};
-        source->read(out + completed * n, stamp, timeoutMs);
-        checkStop();
+        bool attempted = false;
+        for (;;) {
+            checkStop();
+            const auto now = std::chrono::steady_clock::now();
+            if (attempted && now >= deadline)
+                throw Error(IR_TIMEOUT, "Frame wait timed out");
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+            const auto wait = std::clamp<int64_t>(remaining, 0, 50);
+            try {
+                source->read(out + completed * n, stamp, int(wait));
+                break;
+            } catch (const Error &error) {
+                if (error.code != IR_TIMEOUT || std::chrono::steady_clock::now() >= deadline) throw;
+            }
+            attempted = true;
+        }
         bool gap = stamp.lost_frames != 0;
         if (completed) {
             const auto &last = stamps[completed - 1];
@@ -51,6 +69,7 @@ void Capture::read(int count, int timeoutMs, uint16_t *out, int64_t capacity,
         }
         require(!gap, IR_FRAME_GAP, "Frame sequence discontinuity");
         stamps[completed++] = stamp;
+        checkStop();
     }
 }
 }
@@ -78,10 +97,16 @@ extern "C" int32_t IR_OpenFrames(int32_t backend, const char *name, int32_t bits
         else if (backend == IR_DIRECTSHOW) {
             source = openDirectShow(name, bits);
         }
+#if defined(IR_STATION_HAS_NI_IMAQ)
+        else if (backend == IR_NI_IMAQ) {
+            source = openNiImaq(name, bits);
+        }
+#endif
 #endif
         else throw Error(IR_UNSUPPORTED, "Frame backend is not available on this platform");
         *actual = source->geometry();
         c.source = std::move(source);
+        c.sourceName = name;
         c.owner = std::this_thread::get_id();
         c.backend = backend;
     });
@@ -118,6 +143,11 @@ extern "C" int32_t IR_CloseFrames(char *err, int32_t size)
 {
     return guarded(err, size, [&] {
         auto lock = lockCapture(); auto &c = capture();
-        if (c.source) { c.checkOwner(); c.stop(); c.source.reset(); }
+        if (c.source) {
+            c.checkOwner();
+            c.stop();
+            c.source.reset();
+            c.sourceName.clear();
+        }
     });
 }

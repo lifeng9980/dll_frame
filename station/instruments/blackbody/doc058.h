@@ -26,10 +26,12 @@ private:
     IRBlackbodyReading readOnce();
     std::string request(uint8_t function, std::string argument = {}, bool write = false);
     double number(uint8_t function);
+    double numberWithReconnect(uint8_t function);
     bool tcp() const;
 
     BlackbodyConfig config_;
     std::unique_ptr<transport::AsioLink> link_;
     transport::Deadline nextCommand_{};
+    bool reconnectable_{};
 };
 }

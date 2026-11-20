@@ -40,7 +40,8 @@ int main(int argc, char **argv)
     }
     int close_status = IR_CloseDevice(blackbody, NULL, 0);
     if (status == IR_OK) status = close_status;
-    printf("completed=%d\n", (int)result.completed);
+    printf("completed=%d\nfailed_step=%d\ncleanup_status=%d\n",
+           (int)result.completed, result.failed_step, result.cleanup_status);
     if (status != IR_OK) {
         fprintf(stderr, "%s\n", error);
         return status;

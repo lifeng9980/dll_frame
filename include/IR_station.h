@@ -18,7 +18,8 @@ extern "C" {
 enum IRBackend {
     IR_DIRECTSHOW = 1, /* Windows DirectShow device name, e.g. FX3. */
     IR_RAW_REPLAY = 2,
-    IR_V4L2 = 3 /* Linux /dev/videoN, for the FX3 YUYV 16-bit raw stream. */
+    IR_V4L2 = 3, /* Linux /dev/videoN, for the FX3 YUYV 16-bit raw stream. */
+    IR_NI_IMAQ = 4 /* Optional Windows NI-IMAQ Camera Link interface name. */
 };
 enum IRFrameFields {
     IR_HAS_SEQUENCE = 1, IR_HAS_DRIVER_SEQUENCE = 2, IR_HAS_LOSS = 4,
@@ -42,8 +43,10 @@ typedef struct IRFrameStamp {
 } IRFrameStamp;
 
 /* 一个进程使用一个采集源。除 RequestStop 外，采集和流程调用使用打开源的线程。
+   打开、启动、读取、停止和关闭必须由同一个工作线程执行；并发操作返回 IR_BUSY。
    RAW 目录的 valid_bits 传 0 时读取索引。实时源的 valid_bits 由调用方按探测器配置提供，
-   不清楚时传 0。Windows 可传 IR_DIRECTSHOW 和相机名；Linux 可传 IR_V4L2 和 /dev/videoN。
+   不清楚时传 0。Windows 可传 IR_DIRECTSHOW 和相机名，启用 NI-IMAQ 后可传 IR_NI_IMAQ 和接口名；
+   Linux 可传 IR_V4L2 和 /dev/videoN。
    FX3 必须提供 16 位原始传输格式：Windows DirectShow RGB565/YUY2，Linux V4L2 YUYV。
    成功时 actual 返回宽、高和有效位。 */
 IR_STATION_API int32_t IR_OpenFrames(int32_t backend, const char *name_or_directory,
@@ -57,7 +60,8 @@ IR_STATION_API int32_t IR_StartFrames(char *err, int32_t err_bytes);
 IR_STATION_API int32_t IR_ReadFrames(int32_t count, int32_t timeout_ms, uint16_t *pixels,
     int64_t pixel_capacity, IRFrameStamp *stamps, int32_t stamp_capacity, int32_t *completed,
     char *err, int32_t err_bytes);
-/* 可以从其他线程请求停止。此调用返回后，采集线程仍须完成当前操作并释放资源。 */
+/* 可以从其他线程请求停止。等待取帧时会分段检查取消；当前同步设备命令结束后也会检查。
+   采集线程负责停止后端并释放资源。 */
 IR_STATION_API void IR_RequestStop(void);
 /* 在采集线程停止源，保留打开状态，可再次启动。 */
 IR_STATION_API int32_t IR_StopFrames(char *err, int32_t err_bytes);
@@ -72,9 +76,23 @@ typedef struct IRNoiseRecipe {
     int32_t stable_window_ms, stable_timeout_ms, require_device_stable;
     int32_t frames, frame_timeout_ms;
 } IRNoiseRecipe;
+enum IRNoiseStep {
+    IR_NOISE_STEP_NONE = 0,
+    IR_NOISE_STEP_VALIDATE = 1,
+    IR_NOISE_STEP_RESERVE = 2,
+    IR_NOISE_STEP_SET_BLACKBODY = 3,
+    IR_NOISE_STEP_WAIT_BLACKBODY = 4,
+    IR_NOISE_STEP_START_CAPTURE = 5,
+    IR_NOISE_STEP_READ_FRAMES = 6,
+    IR_NOISE_STEP_STOP_CAPTURE = 7,
+    IR_NOISE_STEP_ANALYZE = 8,
+    IR_NOISE_STEP_SAVE = 9
+};
 typedef struct IRNoiseResult {
     int32_t completed;
     double mean_dn, temporal_noise_dn;      /* 像元样本标准差的全图均值 */
+    int32_t failed_step;                    /* 失败时为 IRNoiseStep，成功为 NONE。 */
+    int32_t cleanup_status;                 /* 收尾状态，成功为 IR_OK。 */
 } IRNoiseResult;
 /* 在打开源的线程同步运行配方。采集源已打开且未启动，recipe 和 result 由调用方持有。
    recipe_id 使用 UTF-8，frames >= 2。指定黑体时，先设温并等待稳定，再从当前采集源取帧。
@@ -82,7 +100,9 @@ typedef struct IRNoiseResult {
    detector 现阶段填 0。
    结果为完成帧数、平均 DN 和样本时域噪声 DN。
    目录传 NULL 时只计算。传 UTF-8 路径时须是同级父目录下尚未存在的新目录。
-   失败时 completed 仍报告已连续交付的帧数，指标字段无效。 */
+   流程运行期间占用配方指定的仪器，其他线程对这些设备的操作返回 IR_BUSY。
+   失败时 completed 仍报告已连续交付的帧数，指标字段无效；failed_step 标明失败步骤，
+   cleanup_status 报告失败后停止采集的结果。黑体保持配方设置值，流程不擅自恢复温度。 */
 IR_STATION_API int32_t IR_RunNoise(const IRNoiseRecipe *recipe,
     const char *new_output_directory, IRNoiseResult *result, char *err, int32_t err_bytes);
 
