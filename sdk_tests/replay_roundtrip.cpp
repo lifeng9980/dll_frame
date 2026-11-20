@@ -1,4 +1,4 @@
-#include "optmeas_station.h"
+#include "IR_station.h"
 #include <QDir>
 #include <QFile>
 #include <QTemporaryDir>

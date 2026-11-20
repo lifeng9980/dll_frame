@@ -1,5 +1,5 @@
 #pragma once
-#include "optmeas_status.h"
+#include "IR_status.h"
 
 #if defined(_WIN32) && defined(OPTMEAS_DEVICE_BUILD)
 #define OPTMEAS_DEVICE_API __declspec(dllexport)

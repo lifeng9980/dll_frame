@@ -1,5 +1,5 @@
-#include "optmeas_station.h"
-#include "optmeas_analysis.h"
+#include "IR_station.h"
+#include "IR_analysis.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>

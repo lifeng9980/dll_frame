@@ -1,5 +1,5 @@
 #pragma once
-#include "optmeas_station.h"
+#include "IR_station.h"
 #include <atomic>
 #include <memory>
 #include <mutex>

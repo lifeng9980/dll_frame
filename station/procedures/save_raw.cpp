@@ -1,5 +1,5 @@
 #include "save_raw.h"
-#include "optmeas_analysis.h"
+#include "IR_analysis.h"
 #include "api_common.h"
 #include <QDir>
 #include <QFileInfo>
@@ -26,7 +26,7 @@ void saveNoiseRun(const QString &path, const OptMeasNoiseRecipe &r, int backend,
 {
     static_assert(std::endian::native == std::endian::little);
     const QFileInfo dest(path);
-    QTemporaryDir stage(dest.dir().absoluteFilePath(".optmeas-XXXXXX"));
+    QTemporaryDir stage(dest.dir().absoluteFilePath(".IR-XXXXXX"));
     require(stage.isValid(), OPTMEAS_IO_ERROR, "Cannot create capture staging directory");
     writeFile(stage.filePath("frames.raw"), reinterpret_cast<const char *>(frames.data()), qint64(frames.size()) * 2);
     QByteArray csv = "frame_index,application_sequence,driver_frame_number,lost_frames,width,height,stride_bytes,pixel_format,bit_depth,endianness,"

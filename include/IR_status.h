@@ -1,7 +1,7 @@
 #pragma once
 #include <stdint.h>
 
-/* 公共返回码。err 可传 NULL 且 err_bytes=0 以省略错误文本。
+/* IR SDK 公共返回码。err 可传 NULL 且 err_bytes=0 以省略错误文本。
  * 有缓冲区时 err_bytes 为字节数，错误文本为以 NUL 结束的 UTF-8。
  */
 enum OptMeasStatus

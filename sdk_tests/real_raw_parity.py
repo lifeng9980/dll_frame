@@ -32,9 +32,9 @@ def open_api(directory):
 
     if os.name == "nt":
         with os.add_dll_directory(str(directory)):
-            sdk = c.CDLL(str(directory / "optmeas_station.dll"))
+            sdk = c.CDLL(str(directory / "IR_station.dll"))
     else:
-        sdk = c.CDLL(str(directory / "liboptmeas_station.so"))
+        sdk = c.CDLL(str(directory / "libIR_station.so"))
     error_args = [c.c_char_p, c.c_int32]
     sdk.OptMeas_OpenFrames.argtypes = [c.c_int32, c.c_char_p, c.c_int32, c.POINTER(Geometry), *error_args]
     sdk.OptMeas_RunNoise.argtypes = [c.POINTER(NoiseRecipe), c.c_char_p, c.POINTER(Result), *error_args]

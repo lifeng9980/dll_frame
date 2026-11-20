@@ -1,5 +1,5 @@
 #pragma once
-#include "optmeas_status.h"
+#include "IR_status.h"
 
 #if defined(_WIN32) && defined(OPTMEAS_API_BUILD)
 #define OPTMEAS_API __declspec(dllexport)
@@ -20,7 +20,7 @@ OPTMEAS_API const char *OptMeas_AnalysisVersion(void);
  * mean_map、std_map 各需 rows*cols 个 double，summary 需 2 个 double。
  * 输出单位均为 DN，summary 依次是全图均值、各像元时域标准差的全图均值。
  * 输入和输出缓冲区由调用方提供且不重叠，失败时输出无效。
- * 此调用同步等待计算完成，可在应用的工作线程执行。错误文本的约定见 optmeas_status.h。
+ * 此调用同步等待计算完成，可在应用的工作线程执行。错误文本的约定见 IR_status.h。
  */
 OPTMEAS_API int32_t OptMeas_FrameStatisticsU16(const uint16_t *frames, int64_t frame_elements,
     int32_t frame_count, int32_t rows, int32_t cols, int32_t sample_std, double *mean_map,

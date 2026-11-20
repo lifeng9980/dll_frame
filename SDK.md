@@ -1,8 +1,17 @@
-# OptMeas SDK 跨平台重建
+# IR SDK 跨平台重建
 
-本分支从独立空提交开始。Windows x64 与 Ubuntu 24.04 x86-64 使用同一份源码和公共 C 头文件，构建 Station 与 Analysis 两个库。
+本分支从独立空提交开始。Windows x64 与 Ubuntu 24.04 x86-64 使用同一份源码和公共 C 头文件，构建 `IR_station` 与 `IR_analysis` 两个库。
 
 当前首个闭环支持 RAW 目录打开、读帧、时域噪声计算、结果保存和回放。采集索引解码和逐像元时域统计复用既有 SDK 中已验证的逻辑。串口、TCP、实时取帧和专项算法按工位验收顺序接入。
+
+## 构建产物
+
+| 平台 | 库文件 |
+|---|---|
+| Windows | `IR_station.dll`、`IR_analysis.dll` 和对应的 `.lib` 导入库 |
+| Linux | `libIR_station.so`、`libIR_analysis.so` |
+
+应用通过 `IR_station.h` 或 `IR_analysis.h` 引用 C 接口。公共状态码定义在 `IR_status.h`，导出函数使用 `OptMeas_*`。
 
 ## 构建
 

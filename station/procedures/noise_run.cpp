@@ -1,7 +1,7 @@
 #include "save_raw.h"
 #include "station/acquisition/frame_source.h"
 #include "api_common.h"
-#include "optmeas_analysis.h"
+#include "IR_analysis.h"
 using namespace optmeas;
 using namespace optmeas::api;
 namespace {
