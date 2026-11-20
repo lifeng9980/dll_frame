@@ -29,7 +29,9 @@ int main(int argc, char **argv)
         recipe.temperature_c = 32.0;
         recipe.tolerance_c = 0.01;
         recipe.stable_window_ms = 100;
-        recipe.stable_timeout_ms = 1500;
+        /* 每轮读取 4 个 DOC058 状态量，串口命令相隔 200 ms。
+         * 等稳需连续两轮回读，示例给两种连接统一预留 5 秒。 */
+        recipe.stable_timeout_ms = 5000;
         recipe.require_device_stable = 1;
         recipe.frames = 2;
         status = IR_RunNoise(&recipe, NULL, &result, error, sizeof error);
