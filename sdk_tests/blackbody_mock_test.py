@@ -120,9 +120,9 @@ class Controller:
                     return
 
 
-def load_sdk(path, qt_bin):
+def load_sdk(path):
     if os.name == "nt":
-        with os.add_dll_directory(str(path.parent)), os.add_dll_directory(str(qt_bin)):
+        with os.add_dll_directory(str(path.parent)):
             return c.CDLL(str(path))
     return c.CDLL(str(path))
 
@@ -193,7 +193,7 @@ def exercise(sdk, controller, config):
 def exercise_recipe(args, sdk, controller, config):
     env = os.environ.copy()
     if os.name == "nt":
-        env["PATH"] = os.pathsep.join([str(args.library.resolve().parent), str(args.qt_bin), env["PATH"]])
+        env["PATH"] = os.pathsep.join([str(args.library.resolve().parent), env["PATH"]])
     with TemporaryDirectory(prefix="blackbody-", dir=args.fixture_parent) as temporary:
         fixture = Path(temporary)
         (fixture / "frames.raw").write_bytes(b"\x14\x00\x16\x00")
@@ -349,10 +349,9 @@ def main():
     parser.add_argument("mode", choices=["tcp", "serial"])
     parser.add_argument("library", type=Path)
     parser.add_argument("--client", type=Path, required=True)
-    parser.add_argument("--qt-bin", type=Path)
     parser.add_argument("--fixture-parent", type=Path, required=True)
     args = parser.parse_args()
-    sdk = load_sdk(args.library.resolve(), args.qt_bin)
+    sdk = load_sdk(args.library.resolve())
     controller = Controller(args.mode == "tcp")
     stop = threading.Event()
 

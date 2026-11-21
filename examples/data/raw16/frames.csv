@@ -1,0 +1,3 @@
+frame_index,width,height,stride_bytes,pixel_format,bit_depth,endianness
+0,1,1,2,RAW16_LE,16,little
+1,1,1,2,RAW16_LE,16,little

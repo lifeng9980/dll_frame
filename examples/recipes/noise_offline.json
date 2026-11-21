@@ -1,0 +1,13 @@
+{
+  "capture": {
+    "backend": "raw_replay",
+    "source": "../data/raw16",
+    "valid_bits": 16
+  },
+  "noise": {
+    "recipe_id": "offline-noise-example-1",
+    "frames": 2,
+    "frame_timeout_ms": 0
+  },
+  "output_directory": "../output/offline-noise-example"
+}

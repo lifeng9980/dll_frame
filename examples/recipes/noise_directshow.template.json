@@ -1,0 +1,25 @@
+{
+  "capture": {
+    "backend": "directshow",
+    "source": "FX3 UVC device name from the Windows device list",
+    "valid_bits": 16
+  },
+  "noise": {
+    "recipe_id": "replace-with-product-recipe-version",
+    "frames": 100,
+    "frame_timeout_ms": 1000
+  },
+  "output_directory": "../output/directshow-run",
+  "blackbody": {
+    "kind": "dcn1000",
+    "connection": {
+      "port": "COM4",
+      "timeout_ms": 3000
+    },
+    "temperature_c": 32.0,
+    "tolerance_c": 0.1,
+    "stable_window_ms": 1000,
+    "stable_timeout_ms": 300000,
+    "require_device_stable": true
+  }
+}

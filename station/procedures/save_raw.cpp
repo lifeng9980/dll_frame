@@ -1,15 +1,30 @@
 #include "save_raw.h"
 #include "IR_analysis.h"
 #include "api_common.h"
-#include <QDir>
-#include <QFile>
-#include <QFileInfo>
-#include <QJsonDocument>
-#include <QJsonObject>
-#include <QTemporaryDir>
+#include <nlohmann/json.hpp>
+#include <atomic>
 #include <bit>
+#include <cerrno>
+#include <chrono>
+#include <fstream>
+#include <iomanip>
+#include <locale>
+#include <random>
+#include <sstream>
+#include <system_error>
+
+#ifdef _WIN32
+#include <Windows.h>
+#else
+#include <fcntl.h>
+#include <linux/fs.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+
 namespace ir::procedures {
 using namespace ir::api;
+namespace fs = std::filesystem;
 namespace {
 const char *backendName(int backend)
 {
@@ -20,68 +35,194 @@ const char *backendName(int backend)
     default: return "unknown";
     }
 }
-}
-void checkDestination(const QString &path)
+
+std::string integerText(uint64_t value)
 {
-    QFileInfo target(path);
-    require(!path.isEmpty() && !target.exists() && !target.isSymLink() && target.dir().exists(),
-        IR_IO_ERROR, "Specify a new capture directory under an existing parent");
+    return std::to_string(value);
 }
-static void writeFile(const QString &name, const char *bytes, qint64 length)
+
+std::string integerText(int64_t value)
 {
-    QFile file(name);
-    require(file.open(QIODevice::WriteOnly | QIODevice::NewOnly), IR_IO_ERROR, "Cannot create capture file");
-    require(file.write(bytes, length) == length && file.flush(), IR_IO_ERROR, "Cannot write capture file");
+    return std::to_string(value);
 }
-void saveNoiseRun(const QString &path, const IRNoiseRecipe &r, int backend,
-    const std::string &sourceName, IRGeometry g,
+
+std::string decimalMilliseconds(int64_t nanoseconds)
+{
+    std::ostringstream text;
+    text.imbue(std::locale::classic());
+    text << std::fixed << std::setprecision(6) << static_cast<double>(nanoseconds) / 1'000'000.0;
+    return text.str();
+}
+
+void writeFile(const fs::path &path, const char *bytes, size_t length)
+{
+    std::ofstream file(path, std::ios::binary | std::ios::out);
+    require(file.is_open(), IR_IO_ERROR, "Cannot create capture file");
+    file.write(bytes, static_cast<std::streamsize>(length));
+    file.flush();
+    require(file.good(), IR_IO_ERROR, "Cannot write capture file");
+    file.close();
+    require(file.good(), IR_IO_ERROR, "Cannot close capture file");
+}
+
+class StagingDirectory {
+public:
+    explicit StagingDirectory(const fs::path &parent)
+    {
+        static std::atomic<uint64_t> sequence{};
+        const auto timestamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        std::random_device random;
+        for (int attempt = 0; attempt < 16; ++attempt) {
+            const auto suffix = std::to_string(timestamp) + "-" +
+                std::to_string(sequence.fetch_add(1, std::memory_order_relaxed)) + "-" +
+                std::to_string(random());
+            path_ = parent / (".IR-" + suffix);
+            std::error_code error;
+            if (fs::create_directory(path_, error)) return;
+            if (error && error != std::errc::file_exists)
+                throw fs::filesystem_error("Cannot create capture staging directory", path_, error);
+        }
+        throw std::system_error(std::make_error_code(std::errc::file_exists),
+                                "Cannot choose a unique capture staging directory");
+    }
+
+    StagingDirectory(const StagingDirectory &) = delete;
+    StagingDirectory &operator=(const StagingDirectory &) = delete;
+
+    ~StagingDirectory()
+    {
+        if (!path_.empty()) {
+            std::error_code error;
+            fs::remove_all(path_, error);
+        }
+    }
+
+    const fs::path &path() const noexcept { return path_; }
+
+    void publish(const fs::path &destination)
+    {
+#ifdef _WIN32
+        if (!MoveFileW(path_.c_str(), destination.c_str()))
+            throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
+                                    "Cannot publish capture directory");
+#else
+        if (::syscall(SYS_renameat2, AT_FDCWD, path_.c_str(), AT_FDCWD,
+                      destination.c_str(), RENAME_NOREPLACE) != 0) {
+            const auto renameError = errno;
+            if (renameError != EINVAL && renameError != ENOSYS && renameError != EOPNOTSUPP)
+                throw std::system_error(renameError, std::system_category(),
+                                        "Cannot publish capture directory");
+
+            // WSL's /mnt filesystems may not implement renameat2(RENAME_NOREPLACE).
+            // Reserve the new name, then rename the complete staging directory over it.
+            std::error_code createError;
+            if (!fs::create_directory(destination, createError)) {
+                if (createError)
+                    throw fs::filesystem_error("Cannot reserve capture destination", destination, createError);
+                throw std::system_error(std::make_error_code(std::errc::file_exists),
+                                        "Capture destination already exists");
+            }
+            try {
+                fs::rename(path_, destination);
+            } catch (...) {
+                std::error_code removeError;
+                fs::remove(destination, removeError);
+                throw;
+            }
+        }
+#endif
+        path_.clear();
+    }
+
+private:
+    fs::path path_;
+};
+}
+
+void checkDestination(const fs::path &path)
+{
+    require(!path.empty(), IR_IO_ERROR, "Specify a new capture directory under an existing parent");
+    std::error_code error;
+    const auto target = fs::symlink_status(path, error);
+    if (error == std::errc::no_such_file_or_directory) error.clear();
+    require(!error, IR_IO_ERROR, "Cannot inspect capture destination");
+    require(target.type() == fs::file_type::not_found, IR_IO_ERROR,
+            "Capture destination already exists");
+
+    auto parent = path.parent_path();
+    if (parent.empty()) parent = fs::current_path(error);
+    require(!error && fs::is_directory(parent, error) && !error, IR_IO_ERROR,
+            "Specify a new capture directory under an existing parent");
+}
+
+void saveNoiseRun(const fs::path &path, const IRNoiseRecipe &recipe, int backend,
+    const std::string &sourceName, IRGeometry geometry,
     const std::vector<uint16_t> &frames, const std::vector<IRFrameStamp> &stamps,
     const IRNoiseResult &result, double blackbodySetpointReadback,
     const IRBlackbodyReading *blackbodyReading)
 {
     static_assert(std::endian::native == std::endian::little);
-    const QFileInfo dest(path);
-    QTemporaryDir stage(dest.dir().absoluteFilePath(".IR-XXXXXX"));
-    require(stage.isValid(), IR_IO_ERROR, "Cannot create capture staging directory");
-    writeFile(stage.filePath("frames.raw"), reinterpret_cast<const char *>(frames.data()), qint64(frames.size()) * 2);
-    QByteArray csv = "frame_index,application_sequence,driver_frame_number,lost_frames,width,height,stride_bytes,pixel_format,bit_depth,endianness,"
-        "source_timestamp_ns,received_monotonic_ns,monotonic_ms,relative_time_ms,callback_sequence,pixels_inverted\n";
-    for (size_t i = 0; i < stamps.size(); ++i) {
-        const auto &s = stamps[i];
-        const auto ns = QByteArray::number(qlonglong(s.timestamp_ns));
-        const auto ms = QByteArray::number(s.timestamp_ns / 1e6, 'f', 6);
-        const QList<QByteArray> row{QByteArray::number(qulonglong(i)),
-            s.fields & IR_HAS_SEQUENCE ? QByteArray::number(qulonglong(s.sequence)) : QByteArray{},
-            s.fields & IR_HAS_DRIVER_SEQUENCE ? QByteArray::number(qulonglong(s.driver_sequence)) : QByteArray{},
-            s.fields & IR_HAS_LOSS ? QByteArray::number(s.lost_frames) : QByteArray{},
-            QByteArray::number(g.width), QByteArray::number(g.height), QByteArray::number(g.width * 2),
-            "RAW16_LE", QByteArray::number(g.valid_bits), "little",
-            s.time_origin == IR_TIME_SOURCE ? ns : QByteArray{},
-            s.time_origin == IR_TIME_HOST ? ns : QByteArray{},
-            s.time_origin == IR_TIME_RECORDED_MONOTONIC ? ms : QByteArray{},
-            s.time_origin == IR_TIME_RECORDED_RELATIVE ? ms : QByteArray{},
-            s.fields & IR_SEQUENCE_IS_CALLBACK ? "1" : "0", s.fields & IR_PIXELS_INVERTED ? "1" : "0"};
-        csv += row.join(',') + '\n';
+    checkDestination(path);
+    StagingDirectory stage(path.parent_path().empty() ? fs::current_path() : path.parent_path());
+
+    writeFile(stage.path() / "frames.raw", reinterpret_cast<const char *>(frames.data()),
+              frames.size() * sizeof(uint16_t));
+
+    std::ostringstream csv;
+    csv.imbue(std::locale::classic());
+    csv << "frame_index,application_sequence,driver_frame_number,lost_frames,width,height,stride_bytes,pixel_format,bit_depth,endianness,"
+           "source_timestamp_ns,received_monotonic_ns,monotonic_ms,relative_time_ms,callback_sequence,pixels_inverted\n";
+    for (size_t index = 0; index < stamps.size(); ++index) {
+        const auto &stamp = stamps[index];
+        const auto sourceTime = stamp.time_origin == IR_TIME_SOURCE ? integerText(stamp.timestamp_ns) : "";
+        const auto hostTime = stamp.time_origin == IR_TIME_HOST ? integerText(stamp.timestamp_ns) : "";
+        const auto monotonic = stamp.time_origin == IR_TIME_RECORDED_MONOTONIC
+            ? decimalMilliseconds(stamp.timestamp_ns) : "";
+        const auto relative = stamp.time_origin == IR_TIME_RECORDED_RELATIVE
+            ? decimalMilliseconds(stamp.timestamp_ns) : "";
+
+        csv << index << ','
+            << (stamp.fields & IR_HAS_SEQUENCE ? integerText(stamp.sequence) : "") << ','
+            << (stamp.fields & IR_HAS_DRIVER_SEQUENCE ? integerText(stamp.driver_sequence) : "") << ','
+            << (stamp.fields & IR_HAS_LOSS ? std::to_string(stamp.lost_frames) : "") << ','
+            << geometry.width << ',' << geometry.height << ',' << geometry.width * 2 << ",RAW16_LE,"
+            << geometry.valid_bits << ",little," << sourceTime << ',' << hostTime << ',' << monotonic << ','
+            << relative << ',' << ((stamp.fields & IR_SEQUENCE_IS_CALLBACK) ? 1 : 0) << ','
+            << ((stamp.fields & IR_PIXELS_INVERTED) ? 1 : 0) << '\n';
     }
-    writeFile(stage.filePath("frames.csv"), csv.constData(), csv.size());
-    QJsonObject record{{"recipe_id",QString::fromUtf8(r.recipe_id)},{"analysis_version",IR_AnalysisVersion()},
-        {"backend",backendName(backend)},
-        {"source_name",QString::fromUtf8(sourceName.data(), int(sourceName.size()))},
-        {"width",g.width},{"height",g.height},{"valid_bits",g.valid_bits},{"requested_frames",r.frames},
-        {"completed_frames",result.completed},{"frame_timeout_ms",r.frame_timeout_ms},
-        {"mean_dn",result.mean_dn},{"temporal_noise_dn",result.temporal_noise_dn},
-        {"estimator","mean_pixel_sample_std"},{"unit","DN"}};
-    if (r.detector) record["detector"] = QJsonObject{{"integration_us",r.integration_us},{"frame_hz",r.frame_hz},{"empty_us",r.empty_us}};
-    if (r.blackbody) {
-        record["blackbody"] = QJsonObject{{"temperature_c",r.temperature_c},
-            {"setpoint_readback_c",blackbodySetpointReadback},
-            {"actual_c",blackbodyReading->actual_c}, {"device_stable",bool(blackbodyReading->stable)},
-            {"tolerance_c",r.tolerance_c}, {"stable_window_ms",r.stable_window_ms},
-            {"stable_timeout_ms",r.stable_timeout_ms}, {"require_device_stable",bool(r.require_device_stable)}};
+    const auto csvText = csv.str();
+    writeFile(stage.path() / "frames.csv", csvText.data(), csvText.size());
+
+    nlohmann::json record{
+        {"recipe_id", recipe.recipe_id},
+        {"analysis_version", IR_AnalysisVersion()},
+        {"backend", backendName(backend)},
+        {"source_name", sourceName},
+        {"width", geometry.width}, {"height", geometry.height},
+        {"valid_bits", geometry.valid_bits}, {"requested_frames", recipe.frames},
+        {"completed_frames", result.completed}, {"frame_timeout_ms", recipe.frame_timeout_ms},
+        {"mean_dn", result.mean_dn}, {"temporal_noise_dn", result.temporal_noise_dn},
+        {"estimator", "mean_pixel_sample_std"}, {"unit", "DN"}
+    };
+    if (recipe.detector) {
+        record["detector"] = {{"integration_us", recipe.integration_us},
+                              {"frame_hz", recipe.frame_hz}, {"empty_us", recipe.empty_us}};
     }
-    const auto json = QJsonDocument(record).toJson();
-    writeFile(stage.filePath("result.json"), json.constData(), json.size());
-    require(QDir().rename(stage.path(), dest.absoluteFilePath()), IR_IO_ERROR,"Cannot publish capture directory");
-    stage.setAutoRemove(false);
+    if (recipe.blackbody) {
+        record["blackbody"] = {
+            {"temperature_c", recipe.temperature_c},
+            {"setpoint_readback_c", blackbodySetpointReadback},
+            {"actual_c", blackbodyReading->actual_c},
+            {"device_stable", bool(blackbodyReading->stable)},
+            {"tolerance_c", recipe.tolerance_c},
+            {"stable_window_ms", recipe.stable_window_ms},
+            {"stable_timeout_ms", recipe.stable_timeout_ms},
+            {"require_device_stable", bool(recipe.require_device_stable)}
+        };
+    }
+    auto jsonText = record.dump(2);
+    jsonText.push_back('\n');
+    writeFile(stage.path() / "result.json", jsonText.data(), jsonText.size());
+    stage.publish(path);
 }
 }

@@ -6,6 +6,7 @@
 #include "station/instruments/device_lease.h"
 #include <chrono>
 #include <exception>
+#include <filesystem>
 #include <optional>
 #include <thread>
 using namespace ir;
@@ -79,7 +80,14 @@ extern "C" int32_t IR_RunNoise(const IRNoiseRecipe *recipe, const char *output,
             require(recipe->recipe_id && *recipe->recipe_id && recipe->frames >= 2 && recipe->frame_timeout_ms >= 0,
                     IR_BAD_ARGUMENT, "Specify recipe ID, at least two frames, and a nonnegative timeout");
             require(!recipe->detector, IR_UNSUPPORTED, "Detector control is not available in this build");
-            const auto directory = QString::fromUtf8(output);
+            std::filesystem::path directory;
+            if (output) {
+#ifdef _WIN32
+                directory = std::filesystem::u8path(output);
+#else
+                directory = std::filesystem::path(output);
+#endif
+            }
             if (output) procedures::checkDestination(directory);
 
             step = IR_NOISE_STEP_RESERVE;

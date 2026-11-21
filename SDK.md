@@ -7,7 +7,7 @@
 | Station | `IR_station.dll` | `libIR_station.so` | 仪器控制、原始帧采集、固定噪声流程与结果保存 |
 | Analysis | `IR_analysis.dll` | `libIR_analysis.so` | 帧均值和时域噪声 |
 
-应用包含 `IR_station.h`、`IR_device.h` 或 `IR_analysis.h`，以 `IR_*` 调用 C 接口。公共状态码与 UTF-8 错误缓冲区约定见 `IR_status.h`。安装包包含 `examples/c_client.c`、`examples/noise_recipe.c` 和 `examples/analysis_conditions.c` 三个纯 C 示例。
+应用包含 `IR_station.h`、`IR_device.h` 或 `IR_analysis.h`，以 `IR_*` 调用 C 接口。公共状态码与 UTF-8 错误缓冲区约定见 `IR_status.h`。当前发行结构提供 C、C++、C#、Python 示例和 JSON 配方命令行。客户程序只需要两个 SDK 库及所用语言的运行环境。
 
 ## 四层代码入口
 
@@ -30,18 +30,22 @@ DOC058 黑体连接中断或应答超时后最多重连三次，每次间隔 500
 
 安装包的 `examples/analysis_conditions.c` 演示同一个分析入口如何接收不同积分时间下的两组帧，并逐组返回均值和噪声。它只验证数据组织方式，不代表 GJB 或 EMVA 的指标实现。
 
-## 构建和依赖
+## SDK 依赖和构建
 
-使用 CMake 3.21 或更新版本、Ninja、C++20 编译器、QtCore 5.15 开发包和 standalone Asio 头文件。Asio 只在编译 Station 时使用。找不到 `asio.hpp` 时传入 `-DIR_ASIO_INCLUDE_DIR=<目录>`。QtCore 用于 Station 的连接 JSON 和结果文件。RAW 解码和 Analysis 无 Qt 依赖。
+SDK 运行时不依赖 Qt。Asio 和 nlohmann/json 只参与 `IR_station` 与配方命令行的编译，分别以头文件形式链接进目标程序，不需要安装 Asio 或 JSON 动态库。nlohmann/json 3.12.0 单头文件及其 MIT 许可证随源码和交接包提供。Asio 使用 standalone 1.36.0；构建时需要指向其 `asio.hpp` 所在目录。
+
+Windows 客户程序部署 `IR_station.dll`、`IR_analysis.dll` 和相应的 MSVC 运行库。Linux 部署 `libIR_station.so`、`libIR_analysis.so` 和系统 C/C++ 运行库。`IR_station` 会在同目录加载 `IR_analysis`。这两个平台包都不携带 Qt。
+
+构建 SDK 需要 CMake 3.21 或更新版本、Ninja 和 C++20 编译器。Python 3 用于 TCP 模拟和 Linux 虚拟串口自动检查，NumPy 仅用于真实 RAW 指标对照。C# 示例面向 .NET 10；Python 示例只用标准库。找不到 `asio.hpp` 时传入 `-DIR_ASIO_INCLUDE_DIR=<目录>`。
 
 ```text
-cmake --preset linux -DPython3_EXECUTABLE=/usr/bin/python3
+cmake --preset linux -DIR_ASIO_INCLUDE_DIR=<asio-include-dir> -DPython3_EXECUTABLE=/usr/bin/python3
 cmake --build --preset linux
 ctest --preset linux
 cmake --install 实验/build-linux --prefix 实验/sdk-linux
 ```
 
-Windows 在 x64 MSVC 终端使用 `windows` preset，将 Qt 路径传给 `CMAKE_PREFIX_PATH`。Python 3 用于模拟通信测试，实际 RAW 指标对照还需要 NumPy。Windows 安装包附带 Qt5Core，应用需要 MSVC 运行库。公共头文件使用 UTF-8，用 MSVC 编译 C 示例时传入 `/utf-8`。Linux 使用系统安装的 QtCore 5.15。
+Windows 在 x64 MSVC 开发终端使用 `windows` preset，并给 `IR_ASIO_INCLUDE_DIR` 指定 standalone Asio 头文件目录。公共头文件和字符串参数使用 UTF-8；MSVC 编译 C/C++ 示例时启用 `/utf-8`。示例的独立编译和调用方法见 [`examples/README.zh-CN.md`](examples/README.zh-CN.md)。
 
 PCIe-1433 暂不编入 SDK。公开枚举保留 `IR_NI_IMAQ = 4`，当前调用 `IR_OpenFrames` 会返回 `IR_UNSUPPORTED`。后续确认目标 Windows 设备、NI-IMAQ 版本和接口配置后，可在该采集入口实现后端；这项 Windows API 兼容设计不代表 Linux/WSL 可使用相同驱动。Linux 支持要按具体板卡、驱动和 SDK 组合另行确认。
 

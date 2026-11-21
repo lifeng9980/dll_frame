@@ -2,9 +2,10 @@
 #include "api_common.h"
 #include "station/instruments/blackbody/doc058.h"
 #include "station/instruments/device_lease.h"
-#include <QJsonDocument>
-#include <QJsonObject>
+#include <nlohmann/json.hpp>
 #include <algorithm>
+#include <cmath>
+#include <cctype>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -15,6 +16,7 @@
 #include <vector>
 
 namespace {
+using Json = nlohmann::json;
 using ir::instruments::BlackbodyConfig;
 using ir::instruments::Doc058Blackbody;
 using namespace ir::api;
@@ -30,22 +32,31 @@ std::map<IRHandle, std::shared_ptr<Session>> devices;
 std::set<std::string> openingEndpoints;
 IRHandle nextHandle{1};
 
-std::string text(const QJsonObject &json, const char *key, bool required)
+std::string text(const Json &json, const char *key, bool required)
 {
-    const auto value = json.value(QLatin1String(key));
-    require((!required && value.isUndefined()) || value.isString(), IR_BAD_ARGUMENT, key);
-    const auto bytes = value.toString().trimmed().toUtf8();
-    require(!required || !bytes.isEmpty(), IR_BAD_ARGUMENT, key);
-    require(!bytes.contains('\0'), IR_BAD_ARGUMENT, key);
-    return bytes.toStdString();
+    const auto value = json.find(key);
+    if (value == json.end()) {
+        require(!required, IR_BAD_ARGUMENT, key);
+        return {};
+    }
+    require(value->is_string(), IR_BAD_ARGUMENT, key);
+    auto result = value->get<std::string>();
+    const auto whitespace = [](unsigned char character) { return std::isspace(character) != 0; };
+    const auto first = std::find_if_not(result.begin(), result.end(), whitespace);
+    const auto last = std::find_if_not(result.rbegin(), result.rend(), whitespace).base();
+    result = first < last ? std::string(first, last) : std::string{};
+    require(!required || !result.empty(), IR_BAD_ARGUMENT, key);
+    require(result.find('\0') == std::string::npos, IR_BAD_ARGUMENT, key);
+    return result;
 }
 
-int integer(const QJsonObject &json, const char *key, int fallback, int low, int high)
+int integer(const Json &json, const char *key, int fallback, int low, int high)
 {
-    const auto value = json.value(QLatin1String(key));
-    if (value.isUndefined()) return fallback;
-    const auto number = value.toDouble();
-    require(value.isDouble() && std::isfinite(number) && number >= low && number <= high &&
+    const auto value = json.find(key);
+    if (value == json.end()) return fallback;
+    require(value->is_number(), IR_BAD_ARGUMENT, key);
+    const auto number = value->get<double>();
+    require(std::isfinite(number) && number >= low && number <= high &&
             std::trunc(number) == number, IR_BAD_ARGUMENT, key);
     return int(number);
 }
@@ -54,10 +65,13 @@ std::pair<BlackbodyConfig, std::vector<std::string>> parseConfig(int kind, const
 {
     using namespace ir::transport;
     require(config && *config, IR_BAD_ARGUMENT, "Missing connection JSON");
-    QJsonParseError error{};
-    const auto doc = QJsonDocument::fromJson(QByteArray(config), &error);
-    require(error.error == QJsonParseError::NoError && doc.isObject(), IR_BAD_ARGUMENT, "Invalid connection JSON");
-    const auto json = doc.object();
+    Json json;
+    try {
+        json = Json::parse(config);
+    } catch (const Json::parse_error &) {
+        throw Error(IR_BAD_ARGUMENT, "Invalid connection JSON");
+    }
+    require(json.is_object(), IR_BAD_ARGUMENT, "Connection JSON must contain an object");
 
     BlackbodyConfig result;
     result.timeout = std::chrono::milliseconds(integer(json, "timeout_ms", 3000, 1, 60000));
@@ -85,7 +99,10 @@ std::pair<BlackbodyConfig, std::vector<std::string>> parseConfig(int kind, const
     const auto name = text(json, "port", true);
     result.endpoint = SerialEndpoint{name, 9600};
 #ifdef _WIN32
-    auto key = QString::fromStdString(name).toCaseFolded().toStdString();
+    auto key = name;
+    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char character) {
+        return character >= 'a' && character <= 'z' ? char(character - 'a' + 'A') : char(character);
+    });
     if (key.starts_with(R"(\\.\)")) key.erase(0, 4);
 #else
     std::error_code errorCode;
