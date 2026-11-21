@@ -45,7 +45,7 @@ endfunction()
 add_ir_client(ir_c_client "${IR_SDK_ROOT}/examples/c_client.c")
 add_ir_client(ir_cpp_client "${CMAKE_CURRENT_LIST_DIR}/cpp_client.cpp")
 
-add_executable(ir_run_recipe "${CMAKE_CURRENT_LIST_DIR}/ir_run_recipe.cpp")
+add_executable(ir_run_recipe "${CMAKE_CURRENT_LIST_DIR}/ir_recipe_cli.cpp")
 if(MSVC)
     target_compile_options(ir_run_recipe PRIVATE /utf-8)
 endif()

@@ -31,13 +31,22 @@ public:
     std::thread::id owner;
     int backend{};
     bool running{};
-    std::atomic_bool cancelled{};
+    IRGeometry open(int backend, const char *name, int validBits);
+    void close();
     void checkOwner() const;
+    // 采集启动和流程开始各建立一次停止范围。取帧阶段不重置流程的停止请求。
+    void beginOperation() noexcept;
+    void endOperation() noexcept;
+    void requestStop() noexcept;
     void checkStop() const;
     void start();
     void stop();
     void read(int count, int timeoutMs, uint16_t *pixels, int64_t capacity,
               IRFrameStamp *stamps, int stampCapacity, int &completed);
+
+private:
+    enum class StopState { idle, active, requested };
+    std::atomic<StopState> stopState_{StopState::idle};
 };
 Capture &capture();
 std::unique_lock<std::mutex> lockCapture();

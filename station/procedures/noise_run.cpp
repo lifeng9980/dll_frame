@@ -1,27 +1,19 @@
 #include "save_raw.h"
-#include "station/acquisition/frame_source.h"
+#include "measurement.h"
 #include "api_common.h"
 #include "IR_analysis.h"
 #include "IR_device.h"
+#include "station/acquisition/frame_source.h"
 #include "station/instruments/device_lease.h"
-#include <chrono>
 #include <exception>
 #include <filesystem>
-#include <optional>
-#include <thread>
 using namespace ir;
 using namespace ir::api;
 namespace {
-void checked(int32_t code, const char *message)
-{
-    if (code != IR_OK) throw Error(code,message);
-}
-
 void settleBlackbody(const IRNoiseRecipe &recipe, acquisition::Capture &capture,
                      int32_t &step, double &setpointReadback,
                      IRBlackbodyReading &stableReading)
 {
-    using namespace std::chrono;
     require(std::isfinite(recipe.temperature_c) && std::isfinite(recipe.tolerance_c) &&
             recipe.tolerance_c > 0 && recipe.stable_window_ms >= 0 &&
             recipe.stable_timeout_ms > 0 && recipe.stable_timeout_ms >= recipe.stable_window_ms &&
@@ -30,29 +22,11 @@ void settleBlackbody(const IRNoiseRecipe &recipe, acquisition::Capture &capture,
     char detail[1024]{};
     capture.checkStop();
     step = IR_NOISE_STEP_SET_BLACKBODY;
-    checked(IR_SetBlackbody(recipe.blackbody, recipe.temperature_c, &setpointReadback, detail, sizeof detail), detail);
+    checkStatus(IR_SetBlackbody(recipe.blackbody, recipe.temperature_c, &setpointReadback, detail, sizeof detail), detail);
     step = IR_NOISE_STEP_WAIT_BLACKBODY;
-    const auto deadline = steady_clock::now() + milliseconds(recipe.stable_timeout_ms);
-    std::optional<steady_clock::time_point> stableSince;
-    for (;;) {
-        capture.checkStop();
-        require(steady_clock::now() < deadline, IR_TIMEOUT, "Blackbody did not stabilize before the deadline");
-        IRBlackbodyReading reading{};
-        checked(IR_ReadBlackbody(recipe.blackbody, &reading, detail, sizeof detail), detail);
-        capture.checkStop();
-        const auto now = steady_clock::now();
-        require(now <= deadline, IR_TIMEOUT, "Blackbody did not stabilize before the deadline");
-        const bool inRange = std::abs(reading.actual_c - recipe.temperature_c) <= recipe.tolerance_c &&
-                             (!recipe.require_device_stable || reading.stable);
-        if (inRange) {
-            stableReading = reading;
-            if (!stableSince) stableSince = now;
-            if (now - *stableSince >= milliseconds(recipe.stable_window_ms)) return;
-        } else {
-            stableSince.reset();
-        }
-        std::this_thread::sleep_until(std::min(deadline, now + milliseconds(100)));
-    }
+    stableReading = procedures::waitForBlackbody(capture, recipe.blackbody,
+        {recipe.temperature_c, recipe.tolerance_c, recipe.stable_window_ms,
+         recipe.stable_timeout_ms, recipe.require_device_stable != 0});
 }
 
 int32_t currentExceptionStatus() noexcept
@@ -91,11 +65,9 @@ extern "C" int32_t IR_RunNoise(const IRNoiseRecipe *recipe, const char *output,
             if (output) procedures::checkDestination(directory);
 
             step = IR_NOISE_STEP_RESERVE;
-            auto lock = acquisition::lockCapture();
-            auto &capture = acquisition::capture();
+            procedures::Measurement measurement;
+            auto &capture = measurement.frames();
             capture.checkOwner();
-            require(!capture.running, IR_BUSY, "Stop the stream before starting a measurement");
-            capture.cancelled = false;
             const IRHandle requestedDevices[]{recipe->blackbody};
             ir::instruments::DeviceLease deviceLease(requestedDevices, recipe->blackbody ? 1 : 0);
 
@@ -130,7 +102,7 @@ extern "C" int32_t IR_RunNoise(const IRNoiseRecipe *recipe, const char *output,
                 step = IR_NOISE_STEP_ANALYZE;
                 char detail[1024]{};
                 double summary[2]{};
-                checked(IR_FrameStatisticsU16(frames.data(), elements, recipe->frames, geometry.height,
+                checkStatus(IR_FrameStatisticsU16(frames.data(), elements, recipe->frames, geometry.height,
                     geometry.width, 1, means.data(), deviations.data(), pixelCount, summary, 2,
                     detail, sizeof detail), detail);
                 capture.checkStop();

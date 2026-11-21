@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Validate or run a JSON measurement recipe through the IR C ABI."""
+
+import argparse
+import ctypes as c
+import json
+import os
+from pathlib import Path
+import sys
+
+
+class RecipeResult(c.Structure):
+    _fields_ = [
+        ("completed_frames", c.c_int32),
+        ("failed_stage", c.c_int32),
+        ("failed_step_index", c.c_int32),
+        ("cleanup_status", c.c_int32),
+    ]
+
+
+def sdk_library_directory():
+    configured = os.environ.get("IR_SDK_LIB_DIR")
+    if configured:
+        return Path(configured).resolve()
+    package_root = Path(__file__).resolve().parents[2]
+    return package_root / ("windows-x64/bin" if os.name == "nt" else "linux-x86_64/lib")
+
+
+def load_station(directory):
+    if os.name == "nt":
+        dll_directory = os.add_dll_directory(str(directory))
+        try:
+            return c.CDLL(str(directory / "IR_station.dll")), dll_directory
+        except Exception:
+            dll_directory.close()
+            raise
+    return c.CDLL(str(directory / "libIR_station.so")), None
+
+
+def station_text(path):
+    station = json.loads(path.read_text(encoding="utf-8"))
+    acquisition = station["acquisition"]
+    if acquisition["backend"] == "raw_replay":
+        source = Path(acquisition["source"])
+        if not source.is_absolute():
+            source = path.parent / source
+        acquisition["source"] = str(source.resolve())
+    return json.dumps(station, ensure_ascii=False, separators=(",", ":"))
+
+
+def check_output_directory(path):
+    if path.exists():
+        raise ValueError(f"Output already exists: {path}")
+    if not path.parent.is_dir():
+        raise ValueError(f"Output parent directory does not exist: {path.parent}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--check", dest="mode", action="store_const", const="check")
+    mode.add_argument("--run", dest="mode", action="store_const", const="run")
+    parser.add_argument("station", type=Path)
+    parser.add_argument("recipe", type=Path)
+    parser.add_argument("output", type=Path, help="new output directory; resolved relative to the recipe")
+    parser.add_argument("--library-dir", type=Path, default=sdk_library_directory())
+    args = parser.parse_args()
+
+    station_path = args.station.resolve()
+    recipe_path = args.recipe.resolve()
+    output = args.output if args.output.is_absolute() else recipe_path.parent / args.output
+    output = output.resolve()
+    check_output_directory(output)
+
+    sdk, dll_directory = load_station(args.library_dir.resolve())
+    error_args = [c.c_char_p, c.c_int32]
+    sdk.IR_CheckRecipeJson.argtypes = [c.c_char_p, c.c_char_p, *error_args]
+    sdk.IR_RunRecipeJson.argtypes = [c.c_char_p, c.c_char_p, c.c_char_p, c.POINTER(RecipeResult), *error_args]
+    station_json = station_text(station_path).encode("utf-8")
+    recipe_json = recipe_path.read_text(encoding="utf-8").encode("utf-8")
+    error = c.create_string_buffer(2048)
+
+    status = sdk.IR_CheckRecipeJson(station_json, recipe_json, error, len(error))
+    if status != 0:
+        print(f"IR_CheckRecipeJson status={status}: {error.value.decode('utf-8', errors='replace')}", file=sys.stderr)
+        if dll_directory:
+            dll_directory.close()
+        return status
+    if args.mode == "check":
+        print("recipe=VALID")
+        if dll_directory:
+            dll_directory.close()
+        return 0
+
+    run = RecipeResult()
+    status = sdk.IR_RunRecipeJson(station_json, recipe_json, os.fsencode(output), c.byref(run), error, len(error))
+    if status != 0:
+        print(f"IR_RunRecipeJson status={status} stage={run.failed_stage} step_index={run.failed_step_index} "
+              f"completed_frames={run.completed_frames} cleanup_status={run.cleanup_status} "
+              f"{error.value.decode('utf-8', errors='replace')}", file=sys.stderr)
+        if dll_directory:
+            dll_directory.close()
+        return status
+
+    result = json.loads((output / "result.json").read_text(encoding="utf-8"))
+    print(f"run_status={result['run_status']}")
+    print(f"completed_frames={result['completed_frames']}")
+    for name, metric in result["metrics"].items():
+        print(f"metric.{name}={metric['value']:.17g} {metric['unit']}")
+    if dll_directory:
+        dll_directory.close()
+    return 20 if result["run_status"] == "NG" else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

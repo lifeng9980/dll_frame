@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "acquisition": {
+    "backend": "raw_replay",
+    "source": "../data/raw16",
+    "valid_bits": 16
+  },
+  "devices": {
+    "supply": {
+      "kind": "it6332a",
+      "connection": {
+        "port": "REPLACE_WITH_SIMULATOR_COM_OR_PTY",
+        "baud_rate": 115200,
+        "timeout_ms": 1200
+      }
+    }
+  }
+}

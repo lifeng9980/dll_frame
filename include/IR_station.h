@@ -60,8 +60,8 @@ IR_STATION_API int32_t IR_StartFrames(char *err, int32_t err_bytes);
 IR_STATION_API int32_t IR_ReadFrames(int32_t count, int32_t timeout_ms, uint16_t *pixels,
     int64_t pixel_capacity, IRFrameStamp *stamps, int32_t stamp_capacity, int32_t *completed,
     char *err, int32_t err_bytes);
-/* 可以从其他线程请求停止。等待取帧时会分段检查取消；当前同步设备命令结束后也会检查。
-   采集线程负责停止后端并释放资源。 */
+/* 可以从其他线程请求停止当前采集或自动流程。等待取帧时分段检查取消，
+   同步设备事务结束后也会检查。原工作线程负责停流和收尾。空闲时的请求不影响下一次运行。 */
 IR_STATION_API void IR_RequestStop(void);
 /* 在采集线程停止源，保留打开状态，可再次启动。 */
 IR_STATION_API int32_t IR_StopFrames(char *err, int32_t err_bytes);

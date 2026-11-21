@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "recipe_id": "offline-noise-and-roi-v1",
+  "steps": [
+    {"id": "batch", "type": "capture", "frames": 2, "frame_timeout_ms": 0},
+    {"id": "noise", "type": "analyze", "method": "temporal_noise", "name": "noise", "input": "batch"},
+    {"id": "roi", "type": "analyze", "method": "roi_mean", "name": "roi", "input": "batch",
+     "x": 0, "y": 0, "width": 1, "height": 1},
+    {"id": "archive", "type": "save_raw", "input": "batch"}
+  ],
+  "limits": [
+    {"metric": "noise.temporal_noise_dn", "operator": "max", "value": 2.0, "unit": "DN"}
+  ]
+}

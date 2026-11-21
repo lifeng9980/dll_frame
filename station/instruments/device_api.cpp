@@ -2,6 +2,7 @@
 #include "api_common.h"
 #include "station/instruments/blackbody/doc058.h"
 #include "station/instruments/device_lease.h"
+#include "station/instruments/power/it6332a.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cmath>
@@ -25,6 +26,7 @@ struct Session {
     std::vector<std::string> endpointKeys;
     std::mutex mutex;
     std::unique_ptr<Doc058Blackbody> blackbody;
+    std::unique_ptr<ir::instruments::It6332aPower> power;
     std::thread::id workflowOwner;
 };
 std::mutex devicesMutex;
@@ -61,9 +63,24 @@ int integer(const Json &json, const char *key, int fallback, int low, int high)
     return int(number);
 }
 
-std::pair<BlackbodyConfig, std::vector<std::string>> parseConfig(int kind, const char *config)
+std::string serialEndpointKey(const std::string &name)
 {
-    using namespace ir::transport;
+#ifdef _WIN32
+    auto key = name;
+    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char character) {
+        return character >= 'a' && character <= 'z' ? char(character - 'a' + 'A') : char(character);
+    });
+    if (key.starts_with(R"(\\.\)")) key.erase(0, 4);
+    return "serial:" + key;
+#else
+    std::error_code errorCode;
+    const auto resolved = std::filesystem::canonical(std::filesystem::path(name), errorCode);
+    return "serial:" + (errorCode ? name : resolved.string());
+#endif
+}
+
+Json parseConfigJson(const char *config)
+{
     require(config && *config, IR_BAD_ARGUMENT, "Missing connection JSON");
     Json json;
     try {
@@ -72,6 +89,13 @@ std::pair<BlackbodyConfig, std::vector<std::string>> parseConfig(int kind, const
         throw Error(IR_BAD_ARGUMENT, "Invalid connection JSON");
     }
     require(json.is_object(), IR_BAD_ARGUMENT, "Connection JSON must contain an object");
+    return json;
+}
+
+std::pair<BlackbodyConfig, std::vector<std::string>> parseBlackbodyConfig(int kind, const char *config)
+{
+    using namespace ir::transport;
+    const auto json = parseConfigJson(config);
 
     BlackbodyConfig result;
     result.timeout = std::chrono::milliseconds(integer(json, "timeout_ms", 3000, 1, 60000));
@@ -98,18 +122,17 @@ std::pair<BlackbodyConfig, std::vector<std::string>> parseConfig(int kind, const
 
     const auto name = text(json, "port", true);
     result.endpoint = SerialEndpoint{name, 9600};
-#ifdef _WIN32
-    auto key = name;
-    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char character) {
-        return character >= 'a' && character <= 'z' ? char(character - 'a' + 'A') : char(character);
-    });
-    if (key.starts_with(R"(\\.\)")) key.erase(0, 4);
-#else
-    std::error_code errorCode;
-    const auto resolved = std::filesystem::canonical(std::filesystem::path(name), errorCode);
-    const auto key = errorCode ? name : resolved.string();
-#endif
-    return {std::move(result), {"serial:" + key}};
+    return {std::move(result), {serialEndpointKey(name)}};
+}
+
+std::pair<ir::instruments::It6332aConfig, std::vector<std::string>> parsePowerConfig(const char *config)
+{
+    const auto json = parseConfigJson(config);
+    ir::instruments::It6332aConfig result;
+    result.port = text(json, "port", true);
+    result.baud = static_cast<unsigned>(integer(json, "baud_rate", 115200, 1200, 921600));
+    result.timeout = std::chrono::milliseconds(integer(json, "timeout_ms", 1200, 1, 60000));
+    return {std::move(result), {serialEndpointKey(text(json, "port", true))}};
 }
 
 auto findDevice(IRHandle handle)
@@ -119,7 +142,7 @@ auto findDevice(IRHandle handle)
     return pos;
 }
 
-template<class Action> void useDevice(IRHandle handle, Action action)
+template<class Action> void useBlackbody(IRHandle handle, Action action)
 {
     std::shared_ptr<Session> device;
     {
@@ -131,8 +154,24 @@ template<class Action> void useDevice(IRHandle handle, Action action)
     require(device->workflowOwner == std::thread::id{} ||
             device->workflowOwner == std::this_thread::get_id(),
             IR_BUSY, "Instrument is reserved by a measurement procedure");
-    require(bool(device->blackbody), IR_INVALID_HANDLE, "Device is closed");
+    require(bool(device->blackbody), IR_BAD_ARGUMENT, "Device handle is not a blackbody");
     action(*device->blackbody);
+}
+
+template<class Action> void usePower(IRHandle handle, Action action)
+{
+    std::shared_ptr<Session> device;
+    {
+        std::lock_guard lock(devicesMutex);
+        device = findDevice(handle)->second;
+    }
+    std::unique_lock operationLock(device->mutex, std::try_to_lock);
+    require(operationLock.owns_lock(), IR_BUSY, "Another instrument operation is active");
+    require(device->workflowOwner == std::thread::id{} ||
+            device->workflowOwner == std::this_thread::get_id(),
+            IR_BUSY, "Instrument is reserved by a measurement procedure");
+    require(bool(device->power), IR_BAD_ARGUMENT, "Device handle is not an IT6332A power supply");
+    action(*device->power);
 }
 }
 
@@ -189,8 +228,20 @@ extern "C" int32_t IR_OpenDevice(int32_t kind, const char *config, IRHandle *out
     if (out) *out = 0;
     return guarded(err, bytes, [&] {
         needed(out, 1, 1);
-        require(kind == IR_PCN7LT || kind == IR_DCN1000, IR_UNSUPPORTED, "Unsupported instrument kind");
-        auto [options, endpointKeys] = parseConfig(kind, config);
+        require(kind == IR_PCN7LT || kind == IR_DCN1000 || kind == IR_IT6332A,
+                IR_UNSUPPORTED, "Unsupported instrument kind");
+        BlackbodyConfig blackbodyOptions;
+        ir::instruments::It6332aConfig powerOptions;
+        std::vector<std::string> endpointKeys;
+        if (kind == IR_IT6332A) {
+            auto parsed = parsePowerConfig(config);
+            powerOptions = std::move(parsed.first);
+            endpointKeys = std::move(parsed.second);
+        } else {
+            auto parsed = parseBlackbodyConfig(kind, config);
+            blackbodyOptions = std::move(parsed.first);
+            endpointKeys = std::move(parsed.second);
+        }
         {
             std::lock_guard lock(devicesMutex);
             for (const auto &endpoint : endpointKeys) {
@@ -208,7 +259,10 @@ extern "C" int32_t IR_OpenDevice(int32_t kind, const char *config, IRHandle *out
         try {
             device = std::make_shared<Session>();
             device->endpointKeys = endpointKeys;
-            device->blackbody = std::make_unique<Doc058Blackbody>(std::move(options));
+            if (kind == IR_IT6332A)
+                device->power = std::make_unique<ir::instruments::It6332aPower>(std::move(powerOptions));
+            else
+                device->blackbody = std::make_unique<Doc058Blackbody>(std::move(blackbodyOptions));
         } catch (...) {
             std::lock_guard lock(devicesMutex);
             for (const auto &endpoint : endpointKeys) openingEndpoints.erase(endpoint);
@@ -227,7 +281,8 @@ extern "C" int32_t IR_CloseDevice(IRHandle handle, char *err, int32_t bytes)
 {
     return guarded(err, bytes, [&] {
         std::shared_ptr<Session> device;
-        std::unique_ptr<Doc058Blackbody> closing;
+        std::unique_ptr<Doc058Blackbody> closingBlackbody;
+        std::unique_ptr<ir::instruments::It6332aPower> closingPower;
         std::unique_lock<std::mutex> deviceLock;
         std::vector<std::string> endpointKeys;
         {
@@ -239,10 +294,12 @@ extern "C" int32_t IR_CloseDevice(IRHandle handle, char *err, int32_t bytes)
             require(device->workflowOwner == std::thread::id{}, IR_BUSY, "Instrument is in use");
             endpointKeys = device->endpointKeys;
             openingEndpoints.insert(endpointKeys.begin(), endpointKeys.end());
-            closing = std::move(device->blackbody);
+            closingBlackbody = std::move(device->blackbody);
+            closingPower = std::move(device->power);
             devices.erase(pos);
         }
-        closing.reset();
+        closingBlackbody.reset();
+        closingPower.reset();
         deviceLock.unlock();
         {
             std::lock_guard registryLock(devicesMutex);
@@ -255,7 +312,7 @@ extern "C" int32_t IR_SetBlackbody(IRHandle handle, double target, double *readb
 {
     return guarded(err, bytes, [&] {
         needed(readback, 1, 1);
-        useDevice(handle, [&](auto &blackbody) { *readback = blackbody.set(target); });
+        useBlackbody(handle, [&](auto &blackbody) { *readback = blackbody.set(target); });
     });
 }
 
@@ -263,6 +320,49 @@ extern "C" int32_t IR_ReadBlackbody(IRHandle handle, IRBlackbodyReading *reading
 {
     return guarded(err, bytes, [&] {
         needed(reading, 1, 1);
-        useDevice(handle, [&](auto &blackbody) { *reading = blackbody.read(); });
+        useBlackbody(handle, [&](auto &blackbody) { *reading = blackbody.read(); });
+    });
+}
+
+extern "C" int32_t IR_SetPowerChannel(IRHandle handle, int32_t channel,
+    double voltage, double currentLimit, IRPowerReading *readback, char *err, int32_t bytes)
+{
+    if (readback) *readback = {};
+    return guarded(err, bytes, [&] {
+        needed(readback, 1, 1);
+        usePower(handle, [&](auto &power) {
+            const auto value = power.setChannel(channel, voltage, currentLimit);
+            *readback = {value.setpointVoltageV, value.currentLimitA, value.measuredVoltageV,
+                         value.measuredCurrentA, value.outputEnabled ? 1 : 0};
+        });
+    });
+}
+
+extern "C" int32_t IR_SetPowerOutput(IRHandle handle, int32_t channel, int32_t enabled,
+    IRPowerReading *readback, char *err, int32_t bytes)
+{
+    if (readback) *readback = {};
+    return guarded(err, bytes, [&] {
+        needed(readback, 1, 1);
+        require(enabled == 0 || enabled == 1, IR_BAD_ARGUMENT, "enabled must be 0 or 1");
+        usePower(handle, [&](auto &power) {
+            const auto value = power.setOutput(channel, enabled != 0);
+            *readback = {value.setpointVoltageV, value.currentLimitA, value.measuredVoltageV,
+                         value.measuredCurrentA, value.outputEnabled ? 1 : 0};
+        });
+    });
+}
+
+extern "C" int32_t IR_ReadPower(IRHandle handle, int32_t channel,
+    IRPowerReading *reading, char *err, int32_t bytes)
+{
+    if (reading) *reading = {};
+    return guarded(err, bytes, [&] {
+        needed(reading, 1, 1);
+        usePower(handle, [&](auto &power) {
+            const auto value = power.read(channel);
+            *reading = {value.setpointVoltageV, value.currentLimitA, value.measuredVoltageV,
+                        value.measuredCurrentA, value.outputEnabled ? 1 : 0};
+        });
     });
 }

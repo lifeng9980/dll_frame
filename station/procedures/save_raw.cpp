@@ -155,11 +155,9 @@ void checkDestination(const fs::path &path)
             "Specify a new capture directory under an existing parent");
 }
 
-void saveNoiseRun(const fs::path &path, const IRNoiseRecipe &recipe, int backend,
-    const std::string &sourceName, IRGeometry geometry,
+void saveFrameBatch(const fs::path &path, IRGeometry geometry,
     const std::vector<uint16_t> &frames, const std::vector<IRFrameStamp> &stamps,
-    const IRNoiseResult &result, double blackbodySetpointReadback,
-    const IRBlackbodyReading *blackbodyReading)
+    const std::string &resultJson)
 {
     static_assert(std::endian::native == std::endian::little);
     checkDestination(path);
@@ -192,7 +190,16 @@ void saveNoiseRun(const fs::path &path, const IRNoiseRecipe &recipe, int backend
     }
     const auto csvText = csv.str();
     writeFile(stage.path() / "frames.csv", csvText.data(), csvText.size());
+    writeFile(stage.path() / "result.json", resultJson.data(), resultJson.size());
+    stage.publish(path);
+}
 
+void saveNoiseRun(const fs::path &path, const IRNoiseRecipe &recipe, int backend,
+    const std::string &sourceName, IRGeometry geometry,
+    const std::vector<uint16_t> &frames, const std::vector<IRFrameStamp> &stamps,
+    const IRNoiseResult &result, double blackbodySetpointReadback,
+    const IRBlackbodyReading *blackbodyReading)
+{
     nlohmann::json record{
         {"recipe_id", recipe.recipe_id},
         {"analysis_version", IR_AnalysisVersion()},
@@ -222,7 +229,7 @@ void saveNoiseRun(const fs::path &path, const IRNoiseRecipe &recipe, int backend
     }
     auto jsonText = record.dump(2);
     jsonText.push_back('\n');
-    writeFile(stage.path() / "result.json", jsonText.data(), jsonText.size());
-    stage.publish(path);
+    saveFrameBatch(path, geometry, frames, stamps, jsonText);
 }
+
 }

@@ -4,8 +4,8 @@
 
 | 库 | Windows | Linux | 职责 |
 |---|---|---|---|
-| Station | `IR_station.dll` | `libIR_station.so` | 仪器控制、原始帧采集、固定噪声流程与结果保存 |
-| Analysis | `IR_analysis.dll` | `libIR_analysis.so` | 帧均值和时域噪声 |
+| Station | `IR_station.dll` | `libIR_station.so` | 仪器控制、原始帧采集、JSON 测试流程与结果保存 |
+| Analysis | `IR_analysis.dll` | `libIR_analysis.so` | 帧均值、时域噪声和 ROI 均值 |
 
 应用包含 `IR_station.h`、`IR_device.h` 或 `IR_analysis.h`，以 `IR_*` 调用 C 接口。公共状态码与 UTF-8 错误缓冲区约定见 `IR_status.h`。当前发行结构提供 C、C++、C#、Python 示例和 JSON 配方命令行。客户程序只需要两个 SDK 库及所用语言的运行环境。
 
@@ -16,7 +16,7 @@
 | 仪器控制 | `station/instruments/` 按设备型号接入，`transport/asio_link.cpp` 共用 Asio TCP 与串口 | `IR_OpenDevice` 接收型号和连接 JSON，黑体示例提供设温回读和状态读取。新设备需说明哪些命令可以安全重试 |
 | 原始采集 | `station/acquisition/frame_source.h`，具体来源在 `raw_replay/`、`directshow/`、`v4l2/` | `IR_OpenFrames` 返回几何，`IR_ReadFrames` 输出紧密排列的 RAW16 像素、帧信息和连续完成数 |
 | 指标计算 | `analysis/`，可独立使用 `IR_analysis` | 现有 `IR_FrameStatisticsU16` 接收连续帧组，返回像元均值、标准差及全图汇总，单位 DN。标准算法按所需条件和帧组逐项接入 |
-| 流程编排 | `station/procedures/` | `IR_RunNoise` 依配方设温、等稳、取帧、算指标，并按需保存。量产调用方按产品限值判定 |
+| 流程编排 | `station/procedures/` | `IR_RunRecipeJson` 按测试 JSON 执行设备、采集、多个分析和归档步骤。量产配方提供产品限值 |
 
 ## 线程和设备占用
 
@@ -24,28 +24,34 @@
 
 `IR_RunNoise` 在第一次设备命令前预约配方指定的仪器。预约期间，其他线程对这些句柄执行读、写或关闭都会得到 `IR_BUSY`。配方释放资源后即可再次操作。未被配方使用的仪器不需要打开。预约只约束当前 SDK 进程内的调用；其他进程的占用由设备或驱动决定。`IR_RequestStop` 可从其他线程调用，设备命令仍由工作线程收尾。实时取帧按最多 50 ms 的等待段检查取消，每帧仍遵守调用方指定的总超时。
 
+`IR_RunRecipeJson` 为 C/C# / Python 提供统一的 UTF-8 工位与流程 JSON 入口。`IR_CheckRecipeJson` 做静态预检。运行入口用实际画幅检查 ROI 和 RAW 容量，准备成功后才打开并预约配方引用的仪器。取帧结束后先停流、执行声明的设备收尾并释放连接，计算和归档继续复用同一批只读像素。一进程同时运行一条配方，RAW 像素默认上限为 256 MiB，帧标记和算法临时数组另计。
+
+跨线程停止作用于整次配方，由原工作线程在当前同步事务结束后检查并收尾。启用电源输出时，配方须同时声明 `off_after_run: true`。`IRRecipeResult` 报告失败阶段、步骤下标、完成帧数和收尾状态。完整结果归档会保留实际配方及指标方法版本。详见[测试人员配方指南](docs/测试人员配方指南.md)。
+
 DOC058 黑体连接中断或应答超时后最多重连三次，每次间隔 500 ms。重复读命令可在重新识别设备后执行。设温应答丢失时，只重连并读回目标温度，不重复发送设温命令。重试耗尽或设备身份不符时，流程停止并返回异常。流程失败时 `IRNoiseResult.completed` 保留连续完成帧数，`failed_step` 标明失败步骤，`cleanup_status` 报告采集停止结果。黑体保留流程设定值，当前配方没有自动恢复温度的动作。
 
-安装包的 `examples/noise_recipe.c` 给出了四层联用的纯 C 示例。它从当前目录读取 RAW，使用第一个参数 `tcp` 或 `serial` 选择黑体，第二个参数传连接 JSON。示例会向所选设备发送 32 °C 设温命令。自动测试用本机模拟黑体配合 RAW 回放，输入为 20 和 22 DN，预期均值 21 DN，样本时域噪声约 1.4142135623730951 DN。设备未稳定时示例返回超时和零帧。
+安装包的 `examples/noise_recipe.c` 演示固定噪声 C API。`ir_run_recipe` 与 C#/Python 的配方例子通过 `IR_RunRecipeJson` 使用同一执行器，覆盖设备等稳、取帧、多个指标和归档。自动测试使用 RAW16 小数组以及 TCP/PTY 模拟器。
 
 安装包的 `examples/analysis_conditions.c` 演示同一个分析入口如何接收不同积分时间下的两组帧，并逐组返回均值和噪声。它只验证数据组织方式，不代表 GJB 或 EMVA 的指标实现。
 
+`IR_ROIMeanU16` 是新人算法扩展样板：用两帧 `2×2` 数据验证左列 ROI 均值 41 DN、整图均值 51 DN。添加新指标参见 [`docs/算法接入指南.md`](docs/算法接入指南.md)。
+
 ## SDK 依赖和构建
 
-SDK 运行时不依赖 Qt。Asio 和 nlohmann/json 只参与 `IR_station` 与配方命令行的编译，分别以头文件形式链接进目标程序，不需要安装 Asio 或 JSON 动态库。nlohmann/json 3.12.0 单头文件及其 MIT 许可证随源码和交接包提供。Asio 使用 standalone 1.36.0；构建时需要指向其 `asio.hpp` 所在目录。
+SDK 运行时不依赖 Qt。Asio 和 nlohmann/json 只参与 `IR_station` 与配方命令行的编译，分别以头文件形式编入目标程序，不需要安装 Asio 或 JSON 动态库。nlohmann/json 3.12.0 单头文件及其 MIT 许可证随源码和交接包提供。standalone Asio 1.36.0 及 Boost Software License 1.0 位于 `third_party/asio/`，干净检出即可构建；客户 SDK 安装包不复制 Asio 源码。
 
 Windows 客户程序部署 `IR_station.dll`、`IR_analysis.dll` 和相应的 MSVC 运行库。Linux 部署 `libIR_station.so`、`libIR_analysis.so` 和系统 C/C++ 运行库。`IR_station` 会在同目录加载 `IR_analysis`。这两个平台包都不携带 Qt。
 
-构建 SDK 需要 CMake 3.21 或更新版本、Ninja 和 C++20 编译器。Python 3 用于 TCP 模拟和 Linux 虚拟串口自动检查，NumPy 仅用于真实 RAW 指标对照。C# 示例面向 .NET 10；Python 示例只用标准库。找不到 `asio.hpp` 时传入 `-DIR_ASIO_INCLUDE_DIR=<目录>`。
+构建 SDK 需要 CMake 3.21 或更新版本、Ninja 和 C++20 编译器。Python 3 用于 TCP 模拟和 Linux 虚拟串口自动检查，NumPy 仅用于真实 RAW 指标对照。C# 示例面向 .NET 10；Python 示例只用标准库。CMake 默认使用仓库内 Asio；需要验证另一份 Asio 时可传入 `-DIR_ASIO_INCLUDE_DIR=<目录>`。
 
 ```text
-cmake --preset linux -DIR_ASIO_INCLUDE_DIR=<asio-include-dir> -DPython3_EXECUTABLE=/usr/bin/python3
+cmake --preset linux -DPython3_EXECUTABLE=/usr/bin/python3
 cmake --build --preset linux
 ctest --preset linux
 cmake --install 实验/build-linux --prefix 实验/sdk-linux
 ```
 
-Windows 在 x64 MSVC 开发终端使用 `windows` preset，并给 `IR_ASIO_INCLUDE_DIR` 指定 standalone Asio 头文件目录。公共头文件和字符串参数使用 UTF-8；MSVC 编译 C/C++ 示例时启用 `/utf-8`。示例的独立编译和调用方法见 [`examples/README.zh-CN.md`](examples/README.zh-CN.md)。
+Windows 在 x64 MSVC 开发终端使用 `windows` preset。公共头文件和字符串参数使用 UTF-8；MSVC 编译 C/C++ 示例时启用 `/utf-8`。示例的独立编译和调用方法见 [`examples/README.zh-CN.md`](examples/README.zh-CN.md)。
 
 PCIe-1433 暂不编入 SDK。公开枚举保留 `IR_NI_IMAQ = 4`，当前调用 `IR_OpenFrames` 会返回 `IR_UNSUPPORTED`。后续确认目标 Windows 设备、NI-IMAQ 版本和接口配置后，可在该采集入口实现后端；这项 Windows API 兼容设计不代表 Linux/WSL 可使用相同驱动。Linux 支持要按具体板卡、驱动和 SDK 组合另行确认。
 

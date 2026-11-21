@@ -28,6 +28,14 @@ IR_ANALYSIS_API int32_t IR_FrameStatisticsU16(const uint16_t *frames, int64_t fr
     int32_t frame_count, int32_t rows, int32_t cols, int32_t sample_std, double *mean_map,
     double *std_map, int64_t pixel_capacity, double *summary, int32_t summary_count,
     char *err, int32_t err_bytes);
+
+/* 计算所有输入帧中矩形 ROI 的像元均值，输出单位 DN。
+ * 输入为紧密排列的 [帧][行][列] uint16_t 数据；x/y 为左上角坐标，宽高必须大于 0 且位于图像内。
+ * 可用于离线数据或采集后的同一帧组；调用同步完成，输入由调用方持有且调用期间不可修改。
+ */
+IR_ANALYSIS_API int32_t IR_ROIMeanU16(const uint16_t *frames, int64_t frame_elements,
+    int32_t frame_count, int32_t rows, int32_t cols, int32_t x, int32_t y,
+    int32_t roi_width, int32_t roi_height, double *mean_dn, char *err, int32_t err_bytes);
 #ifdef __cplusplus
 }
 #endif

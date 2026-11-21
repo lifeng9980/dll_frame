@@ -39,6 +39,15 @@ internal static class IRStation
         public int CleanupStatus;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct RecipeResult
+    {
+        public int CompletedFrames;
+        public int FailedStage;
+        public int FailedStepIndex;
+        public int CleanupStatus;
+    }
+
     [DllImport("IR_station", EntryPoint = "IR_OpenFrames", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int OpenFrames(int backend, byte[] source, int validBits,
         out Geometry geometry, byte[] error, int errorBytes);
@@ -49,6 +58,19 @@ internal static class IRStation
 
     [DllImport("IR_station", EntryPoint = "IR_CloseFrames", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int CloseFrames(byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_CheckRecipeJson", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int CheckRecipeJson(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string stationJson,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string recipeJson,
+        byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_RunRecipeJson", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int RunRecipeJson(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string stationJson,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string recipeJson,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string outputDirectory,
+        out RecipeResult result, byte[] error, int errorBytes);
 
     internal static void ConfigureNativeLibraries(string directory)
     {
@@ -75,6 +97,9 @@ internal static class Program
 
     private static int Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "--recipe")
+            return RecipeRunner.Run(args);
+
         if (args.Length is < 1 or > 2)
         {
             Console.Error.WriteLine("Usage: IRSdkSample <raw16-directory> [new-output-directory]");

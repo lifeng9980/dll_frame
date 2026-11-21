@@ -8,20 +8,68 @@ Capture &capture() { static Capture value; return value; }
 std::unique_lock<std::mutex> lockCapture()
 {
     std::unique_lock lock(capture().mutex, std::try_to_lock);
-    require(lock.owns_lock(), IR_BUSY, "Another capture call is active");
+    require(lock.owns_lock(), IR_BUSY, "Another capture or measurement is active");
     return lock;
+}
+IRGeometry Capture::open(int kind, const char *name, int bits)
+{
+    require(!source, IR_BUSY, "A frame source is open");
+    require(name && *name && bits >= 0 && bits <= 16, IR_BAD_ARGUMENT, "Invalid source name or valid bits");
+    std::unique_ptr<FrameSource> opened;
+    if (kind == IR_RAW_REPLAY) {
+        opened = openReplay(name);
+        require(!bits || bits == opened->geometry().valid_bits, IR_BAD_ARGUMENT, "Depth differs from RAW index");
+    }
+#if defined(__linux__)
+    else if (kind == IR_V4L2) {
+        opened = openV4l2(name, bits);
+    }
+#endif
+#if defined(_WIN32)
+    else if (kind == IR_DIRECTSHOW) {
+        opened = openDirectShow(name, bits);
+    }
+#endif
+    else throw Error(IR_UNSUPPORTED, "Frame backend is not available on this platform");
+    const auto geometry = opened->geometry();
+    sourceName = name;
+    source = std::move(opened);
+    owner = std::this_thread::get_id();
+    backend = kind;
+    return geometry;
+}
+void Capture::close()
+{
+    if (!source) return;
+    checkOwner();
+    // 即使后端报告停流失败，离开作用域时也要释放采集源。
+    auto closing = std::move(source);
+    const bool wasRunning = running;
+    running = false;
+    sourceName.clear();
+    owner = {};
+    backend = 0;
+    if (wasRunning) closing->stop();
 }
 void Capture::checkOwner() const
 {
     require(bool(source), IR_BAD_ARGUMENT, "Open a frame source first");
     require(owner == std::this_thread::get_id(), IR_BAD_ARGUMENT, "Use the opening thread");
 }
+void Capture::beginOperation() noexcept { stopState_.store(StopState::active); }
+void Capture::endOperation() noexcept { stopState_.store(StopState::idle); }
+void Capture::requestStop() noexcept
+{
+    auto expected = StopState::active;
+    stopState_.compare_exchange_strong(expected, StopState::requested);
+}
 void Capture::checkStop() const
 {
-    require(!cancelled.load(), IR_CANCELLED, "Acquisition cancelled");
+    require(stopState_.load() != StopState::requested, IR_CANCELLED, "Measurement or acquisition cancelled");
 }
 void Capture::start()
 {
+    checkStop();
     require(!running, IR_BUSY, "Source is already running");
     source->start();
     running = true;
@@ -79,31 +127,8 @@ extern "C" int32_t IR_OpenFrames(int32_t backend, const char *name, int32_t bits
 {
     return guarded(err, size, [&] {
         auto lock = lockCapture();
-        auto &c = capture();
         needed(actual, 1, 1);
-        require(!c.source, IR_BUSY, "A frame source is open");
-        require(name && *name && bits >= 0 && bits <= 16, IR_BAD_ARGUMENT, "Invalid source name or valid bits");
-        std::unique_ptr<FrameSource> source;
-        if (backend == IR_RAW_REPLAY) {
-            source = openReplay(name);
-            require(!bits || bits == source->geometry().valid_bits, IR_BAD_ARGUMENT, "Depth differs from RAW index");
-        }
-#if defined(__linux__)
-        else if (backend == IR_V4L2) {
-            source = openV4l2(name, bits);
-        }
-#endif
-#if defined(_WIN32)
-        else if (backend == IR_DIRECTSHOW) {
-            source = openDirectShow(name, bits);
-        }
-#endif
-        else throw Error(IR_UNSUPPORTED, "Frame backend is not available on this platform");
-        *actual = source->geometry();
-        c.source = std::move(source);
-        c.sourceName = name;
-        c.owner = std::this_thread::get_id();
-        c.backend = backend;
+        *actual = capture().open(backend, name, bits);
     });
 }
 extern "C" int32_t IR_StartFrames(char *err, int32_t size)
@@ -112,8 +137,13 @@ extern "C" int32_t IR_StartFrames(char *err, int32_t size)
         auto lock = lockCapture(); auto &c = capture();
         c.checkOwner();
         require(!c.running, IR_BUSY, "Source is already running");
-        c.cancelled = false;
-        c.start();
+        c.beginOperation();
+        try {
+            c.start();
+        } catch (...) {
+            c.endOperation();
+            throw;
+        }
     });
 }
 extern "C" int32_t IR_ReadFrames(int32_t count, int32_t ms, uint16_t *out, int64_t cap,
@@ -126,23 +156,23 @@ extern "C" int32_t IR_ReadFrames(int32_t count, int32_t ms, uint16_t *out, int64
         c.checkOwner(); c.read(count, ms, out, cap, stamps, sc, *completed);
     });
 }
-extern "C" void IR_RequestStop(void) { capture().cancelled = true; }
+extern "C" void IR_RequestStop(void) { capture().requestStop(); }
 extern "C" int32_t IR_StopFrames(char *err, int32_t size)
 {
     return guarded(err, size, [&] {
         auto lock = lockCapture(); auto &c = capture();
-        c.checkOwner(); c.stop();
+        c.checkOwner();
+        c.stop();
+        c.endOperation();
     });
 }
 extern "C" int32_t IR_CloseFrames(char *err, int32_t size)
 {
     return guarded(err, size, [&] {
         auto lock = lockCapture(); auto &c = capture();
-        if (c.source) {
-            c.checkOwner();
-            c.stop();
-            c.source.reset();
-            c.sourceName.clear();
-        }
+        if (!c.source) return;
+        c.checkOwner();
+        c.endOperation();
+        c.close();
     });
 }

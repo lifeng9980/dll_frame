@@ -40,6 +40,13 @@ class NoiseResult(c.Structure):
     ]
 
 
+class RecipeResult(c.Structure):
+    _fields_ = [
+        ("completed_frames", c.c_int32), ("failed_stage", c.c_int32),
+        ("failed_step_index", c.c_int32), ("cleanup_status", c.c_int32),
+    ]
+
+
 class Controller:
     def __init__(self, tcp):
         self.tcp = tcp
@@ -216,6 +223,7 @@ def exercise_recipe(args, sdk, controller, config):
                 assert values == {"completed": "0", "failed_step": "4", "cleanup_status": "0"}
 
         exercise_saved_recipe(sdk, controller, config, fixture)
+        exercise_json_recipe(sdk, controller, config, fixture)
 
 
 def exercise_saved_recipe(sdk, controller, config, fixture):
@@ -253,6 +261,67 @@ def exercise_saved_recipe(sdk, controller, config, fixture):
     finally:
         status = sdk.IR_CloseDevice(handle, error, len(error))
         assert status == 0, error.value
+
+
+def exercise_json_recipe(sdk, controller, config, fixture):
+    error_args = [c.c_char_p, c.c_int32]
+    sdk.IR_CheckRecipeJson.argtypes = [c.c_char_p, c.c_char_p, *error_args]
+    sdk.IR_RunRecipeJson.argtypes = [c.c_char_p, c.c_char_p, c.c_char_p, c.POINTER(RecipeResult), *error_args]
+    error = c.create_string_buffer(1024)
+    kind = "pcn7-lt" if controller.tcp else "dcn1000"
+    station = {
+        "schema_version": 1,
+        "acquisition": {"backend": "raw_replay", "source": str(fixture), "valid_bits": 16},
+        "devices": {"bb": {"kind": kind, "connection": config}},
+    }
+    recipe = {
+        "schema_version": 1,
+        "recipe_id": "mock-json-blackbody-noise",
+        "steps": [
+            {"id": "stable", "type": "blackbody_stabilize", "device": "bb",
+             "target_c": 32.0, "tolerance_c": 0.01, "stable_window_ms": 0,
+             "timeout_ms": 1500, "require_device_stable": True},
+            {"id": "batch", "type": "capture", "frames": 2, "frame_timeout_ms": 0},
+            {"id": "noise", "type": "analyze", "method": "temporal_noise",
+             "name": "noise", "input": "batch"},
+            {"id": "roi", "type": "analyze", "method": "roi_mean", "name": "roi",
+             "input": "batch", "x": 0, "y": 0, "width": 1, "height": 1},
+            {"id": "archive", "type": "save_raw", "input": "batch"},
+        ],
+        "limits": [{"metric": "noise.temporal_noise_dn", "operator": "max",
+                    "value": 2.0, "unit": "DN"}],
+    }
+    station_json = json.dumps(station).encode()
+    recipe_json = json.dumps(recipe).encode()
+    status = sdk.IR_CheckRecipeJson(station_json, recipe_json, error, len(error))
+    assert status == 0, error.value
+
+    output = fixture / "json-run"
+    controller.stable = True
+    result = RecipeResult()
+    status = sdk.IR_RunRecipeJson(station_json, recipe_json, str(output).encode(),
+                                  c.byref(result), error, len(error))
+    assert status == 0, error.value
+    assert (result.completed_frames, result.failed_stage, result.failed_step_index, result.cleanup_status) == (2, 0, -1, 0)
+    record = json.loads((output / "result.json").read_text(encoding="utf8"))
+    assert record["run_status"] == "PASS" and record["completed_frames"] == 2
+    assert record["conditions"][0]["setpoint_readback_c"] == 32.0
+    assert math.isclose(record["metrics"]["noise.temporal_noise_dn"]["value"],
+                        math.sqrt(2), rel_tol=0, abs_tol=1e-12)
+    assert record["metrics"]["roi.mean_dn"]["value"] == 21
+
+    unstable = dict(recipe)
+    unstable["recipe_id"] = "mock-json-blackbody-timeout"
+    unstable["steps"] = [dict(step) for step in recipe["steps"]]
+    unstable["steps"][0]["timeout_ms"] = 350
+    controller.stable = False
+    timeout_output = fixture / "json-timeout"
+    status = sdk.IR_RunRecipeJson(station_json, json.dumps(unstable).encode(),
+                                  str(timeout_output).encode(), c.byref(result), error, len(error))
+    assert status == 7 and b"stable" in error.value.lower(), (status, error.value)
+    assert (result.completed_frames, result.failed_stage, result.failed_step_index, result.cleanup_status) == (0, 4, 0, 0)
+    assert not timeout_output.exists()
+    controller.stable = True
 
 
 def exercise_recipe_ownership(args, sdk, controller, config):
@@ -344,6 +413,103 @@ def exercise_recipe_ownership(args, sdk, controller, config):
         assert sdk.IR_CloseDevice(handle, error, len(error)) == 0, error.value
 
 
+def exercise_json_recipe_ownership(args, sdk, controller, config):
+    error_args = [c.c_char_p, c.c_int32]
+    sdk.IR_OpenDevice.argtypes = [c.c_int32, c.c_char_p, c.POINTER(c.c_uint64), *error_args]
+    sdk.IR_RunRecipeJson.argtypes = [c.c_char_p, c.c_char_p, c.c_char_p, c.POINTER(RecipeResult), *error_args]
+    sdk.IR_RequestStop.argtypes = []
+    sdk.IR_RequestStop.restype = None
+
+    with TemporaryDirectory(prefix="json-ownership-", dir=args.fixture_parent) as temporary:
+        fixture = Path(temporary)
+        (fixture / "frames.raw").write_bytes(b"\x14\x00\x16\x00")
+        (fixture / "frames.csv").write_text(
+            "frame_index,width,height,stride_bytes,pixel_format,bit_depth,endianness\n"
+            "0,1,1,2,RAW16_LE,16,little\n1,1,1,2,RAW16_LE,16,little\n", encoding="utf8")
+
+        kind = "pcn7-lt" if controller.tcp else "dcn1000"
+        station = {
+            "schema_version": 1,
+            "acquisition": {"backend": "raw_replay", "source": str(fixture), "valid_bits": 16},
+            "devices": {"bb": {"kind": kind, "connection": config}},
+        }
+        recipe = {
+            "schema_version": 1,
+            "recipe_id": "json-cancel-and-retry",
+            "steps": [
+                {"id": "stable", "type": "blackbody_stabilize", "device": "bb",
+                 "target_c": 32.0, "tolerance_c": 0.01, "stable_window_ms": 3000,
+                 "timeout_ms": 5000, "require_device_stable": True},
+                {"id": "batch", "type": "capture", "frames": 2, "frame_timeout_ms": 0},
+                {"id": "noise", "type": "analyze", "method": "temporal_noise",
+                 "name": "noise", "input": "batch"},
+                {"id": "archive", "type": "save_raw", "input": "batch"},
+            ],
+        }
+        retry_recipe = json.loads(json.dumps(recipe))
+        retry_recipe["recipe_id"] = "json-retry-after-cancel"
+        retry_recipe["steps"][0]["stable_window_ms"] = 0
+        station_json = json.dumps(station).encode()
+        recipe_json = json.dumps(recipe).encode()
+        retry_json = json.dumps(retry_recipe).encode()
+
+        controller.stable = True
+        controller.stable_reply.clear()
+        first_output = fixture / "cancelled-run"
+        retry_output = fixture / "retry-run"
+        outcome = {}
+        first_finished = threading.Event()
+        retry_allowed = threading.Event()
+
+        def run_recipe():
+            error = c.create_string_buffer(1024)
+            details = RecipeResult()
+            status = sdk.IR_RunRecipeJson(station_json, recipe_json, str(first_output).encode(),
+                                          c.byref(details), error, len(error))
+            outcome["first"] = status, error.value, details
+            first_finished.set()
+            if status != 8:
+                return
+
+            if not retry_allowed.wait(5):
+                outcome["retry"] = -1, b"test did not allow the retry"
+                return
+            error = c.create_string_buffer(1024)
+            status = sdk.IR_RunRecipeJson(station_json, retry_json, str(retry_output).encode(),
+                                          None, error, len(error))
+            outcome["retry"] = status, error.value
+
+        worker = threading.Thread(target=run_recipe)
+        worker.start()
+        assert controller.stable_reply.wait(4), "JSON recipe did not reach blackbody stabilization"
+
+        blocked_handle = c.c_uint64()
+        error = c.create_string_buffer(1024)
+        status = sdk.IR_OpenDevice(2 if controller.tcp else 3, json.dumps(config).encode(),
+                                   c.byref(blocked_handle), error, len(error))
+        assert status == 9 and blocked_handle.value == 0, (status, error.value)
+
+        second = RecipeResult()
+        second_output = fixture / "concurrent-run"
+        status = sdk.IR_RunRecipeJson(station_json, retry_json, str(second_output).encode(),
+                                      c.byref(second), error, len(error))
+        assert status == 9 and second.failed_stage == 2 and not second_output.exists(), (status, error.value)
+
+        sdk.IR_RequestStop()
+        assert first_finished.wait(5), "JSON recipe did not finish cancellation"
+        assert outcome["first"][0] == 8 and b"stable" in outcome["first"][1].lower(), outcome["first"]
+        details = outcome["first"][2]
+        assert (details.completed_frames, details.failed_stage, details.failed_step_index, details.cleanup_status) == (0, 4, 0, 0)
+        assert not first_output.exists()
+
+        retry_allowed.set()
+        worker.join(8)
+        assert not worker.is_alive(), "JSON recipe did not finish after cancellation"
+        assert outcome["retry"][0] == 0, outcome["retry"]
+        result = json.loads((retry_output / "result.json").read_text(encoding="utf8"))
+        assert result["completed_frames"] == 2 and result["run_status"] == "COMPLETED"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=["tcp", "serial"])
@@ -409,6 +575,7 @@ def main():
         exercise(sdk, controller, config)
         exercise_recipe(args, sdk, controller, config)
         exercise_recipe_ownership(args, sdk, controller, config)
+        exercise_json_recipe_ownership(args, sdk, controller, config)
     finally:
         stop.set()
         server.join(5)

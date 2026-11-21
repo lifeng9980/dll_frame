@@ -22,6 +22,16 @@ inline void require(bool ok, int32_t code, const char *text)
     if (!ok)
         throw Error(code, text);
 }
+inline void require(bool ok, int32_t code, const std::string &text)
+{
+    if (!ok)
+        throw Error(code, text);
+}
+inline void checkStatus(int32_t status, const char *detail)
+{
+    if (status != IR_OK)
+        throw Error(status, detail);
+}
 inline void copyText(char *out, int32_t count, const char *text) noexcept
 {
     if (!out || count <= 0)
