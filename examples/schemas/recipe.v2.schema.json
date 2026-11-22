@@ -247,6 +247,33 @@
         }
       }
     },
+    "powerWaitStableStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "device",
+        "channel"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyIdentifier" },
+        "type": { "const": "power_wait_stable" },
+        "device": { "$ref": "#/$defs/nonEmptyIdentifier" },
+        "channel": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "expected_voltage_v": { "type": "number", "minimum": 0.0, "default": 0.0 },
+        "voltage_tolerance_v": { "type": "number", "minimum": 0.0, "default": 0.15 },
+        "max_current_a": { "type": "number", "minimum": 0.0, "default": 0.0 },
+        "startup_threshold_a": { "type": "number", "minimum": 0.0, "default": 0.3 },
+        "startup_required_samples": { "type": "integer", "minimum": 0, "maximum": 100000, "default": 3 },
+        "startup_timeout_ms": { "type": "integer", "minimum": 0, "maximum": 86400000, "default": 30000 },
+        "stable_threshold_a": { "type": "number", "exclusiveMinimum": 0.0, "default": 0.3 },
+        "max_variation_a": { "type": "number", "minimum": 0.0, "default": 0.02 },
+        "stable_required_samples": { "type": "integer", "minimum": 1, "maximum": 100000, "default": 5 },
+        "sample_interval_ms": { "type": "integer", "minimum": 0, "maximum": 60000, "default": 200 },
+        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 86400000, "default": 600000 }
+      }
+    },
     "ovenStabilizeStep": {
       "type": "object",
       "additionalProperties": false,
@@ -457,7 +484,8 @@
             "gjb_burst",
             "noise3d_compute",
             "channel_spectrum",
-            "flicker_detect"
+            "flicker_detect",
+            "fft2d"
           ]
         },
         "version": {
@@ -525,6 +553,9 @@
         },
         {
           "$ref": "#/$defs/powerReadStep"
+        },
+        {
+          "$ref": "#/$defs/powerWaitStableStep"
         },
         {
           "$ref": "#/$defs/ovenStabilizeStep"
@@ -625,6 +656,9 @@
         },
         {
           "$ref": "#/$defs/powerReadStep"
+        },
+        {
+          "$ref": "#/$defs/powerWaitStableStep"
         },
         {
           "$ref": "#/$defs/ovenStabilizeStep"

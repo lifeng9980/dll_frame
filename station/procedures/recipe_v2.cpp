@@ -126,6 +126,39 @@ VariantType parseSharedControlOrCaptureOrFlushOrAnalyze(
         usedDevices.insert(step.device);
         return step;
     }
+    if (type == "power_wait_stable") {
+        allowFields(fields, {"id", "type", "device", "channel",
+                             "expected_voltage_v", "voltage_tolerance_v", "max_current_a",
+                             "startup_threshold_a", "startup_required_samples", "startup_timeout_ms",
+                             "stable_threshold_a", "max_variation_a", "stable_required_samples",
+                             "sample_interval_ms", "timeout_ms"}, path);
+        const auto alias = stringField(fields, "device", path);
+        requireDeviceKind(station, alias, IR_IT6332A, path, "it6332a");
+        const int32_t channel = integerField(fields, "channel", 1, 3, path);
+        IRPowerCurrentStableSpec spec{};
+        spec.expected_voltage_v = optionalNumber(fields, "expected_voltage_v", 0.0, path);
+        spec.voltage_tolerance_v = optionalNumber(fields, "voltage_tolerance_v", 0.15, path);
+        spec.max_current_a = optionalNumber(fields, "max_current_a", 0.0, path);
+        spec.startup_threshold_a = optionalNumber(fields, "startup_threshold_a", 0.3, path);
+        spec.stable_threshold_a = optionalNumber(fields, "stable_threshold_a", 0.3, path);
+        spec.max_variation_a = optionalNumber(fields, "max_variation_a", 0.02, path);
+        spec.startup_required_samples = optionalInteger(fields, "startup_required_samples", 3, 0, 100000, path);
+        spec.startup_timeout_ms = optionalInteger(fields, "startup_timeout_ms", 30000, 0, 86400000, path);
+        spec.stable_required_samples = optionalInteger(fields, "stable_required_samples", 5, 1, 100000, path);
+        spec.sample_interval_ms = optionalInteger(fields, "sample_interval_ms", 200, 0, 60000, path);
+        spec.timeout_ms = optionalInteger(fields, "timeout_ms", 600000, 1, 86400000, path);
+        spec.reserved = 0;
+        require(spec.expected_voltage_v >= 0.0 && spec.voltage_tolerance_v >= 0.0 &&
+                spec.max_current_a >= 0.0 && spec.startup_threshold_a >= 0.0 &&
+                spec.stable_threshold_a > 0.0 && spec.max_variation_a >= 0.0,
+                IR_BAD_ARGUMENT, path + " has invalid power stabilization thresholds");
+        if (spec.startup_required_samples > 0) {
+            require(spec.startup_threshold_a > 0.0 && spec.startup_timeout_ms >= 1,
+                    IR_BAD_ARGUMENT, path + " requires startup_threshold_a > 0 and startup_timeout_ms >= 1");
+        }
+        usedDevices.insert(alias);
+        return PowerWaitStableStep{std::move(ref), alias, channel, spec};
+    }
     if (type == "oven_stabilize") {
         allowFields(fields, {"id", "type", "device", "target_c", "tolerance_c",
                              "stable_window_ms", "timeout_ms", "require_no_alarm", "standby_after_run"}, path);
@@ -394,6 +427,18 @@ void runControlPower(IRHandle handle, const PowerStep &step, V2Readbacks &readba
         {"step", step.ref.id},
         {"device", step.device},
         {"operation", action},
+        {"reading", powerJson(reading, step.channel)}
+    });
+}
+
+void runControlPowerWaitStable(const ir::acquisition::Capture &capture, IRHandle handle,
+                               const PowerWaitStableStep &step, V2Readbacks &readbacks)
+{
+    const auto reading = waitForPowerCurrentStable(capture, handle, step.channel, step.spec);
+    readbacks.instruments.push_back({
+        {"step", step.ref.id},
+        {"device", step.device},
+        {"operation", "power_wait_stable"},
         {"reading", powerJson(reading, step.channel)}
     });
 }
@@ -863,6 +908,11 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
                     progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
                     capture.checkStop();
                     runControlPower(devices.at(s.device), s, readbacks, powerToSwitchOff);
+                    capture.checkStop();
+                } else if constexpr (std::is_same_v<T, PowerWaitStableStep>) {
+                    progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
+                    capture.checkStop();
+                    runControlPowerWaitStable(capture, devices.at(s.device), s, readbacks);
                     capture.checkStop();
                 } else if constexpr (std::is_same_v<T, OvenStabilizeStep>) {
                     progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);

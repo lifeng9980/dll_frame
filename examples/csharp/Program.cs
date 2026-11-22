@@ -122,6 +122,23 @@ internal static class IRStation
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    internal struct PowerCurrentStableSpec
+    {
+        public double ExpectedVoltageV;
+        public double VoltageToleranceV;
+        public double MaxCurrentA;
+        public double StartupThresholdA;
+        public double StableThresholdA;
+        public double MaxVariationA;
+        public int StartupRequiredSamples;
+        public int StartupTimeoutMs;
+        public int StableRequiredSamples;
+        public int SampleIntervalMs;
+        public int TimeoutMs;
+        public int Reserved;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     internal struct DetectorCurrentReading
     {
         public uint RawCode;
@@ -244,6 +261,11 @@ internal static class IRStation
 
     [DllImport("IR_station", EntryPoint = "IR_ReadPower", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int ReadPower(ulong handle, int channel, out PowerReading reading,
+        byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_WaitPowerCurrentStable", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int WaitPowerCurrentStable(ulong handle, int channel,
+        ref PowerCurrentStableSpec spec, out PowerReading reading,
         byte[] error, int errorBytes);
 
     [DllImport("IR_station", EntryPoint = "IR_MeasureDetectorCurrent", CallingConvention = CallingConvention.Cdecl)]
@@ -398,12 +420,28 @@ internal static class Program
             if (status != 0 || flickSum.FlickerCount != 1 || flickMask[3] != 1)
                 throw new InvalidOperationException($"IR_FlickerDetectU16 status={status}: {ErrorText(err)}");
 
+            var fft2dIn = new double[16];
+            for (var r = 0; r < 4; ++r)
+            {
+                for (var col = 0; col < 4; ++col)
+                    fft2dIn[r * 4 + col] = 10.0 + Math.Cos(2.0 * Math.PI * col / 4.0);
+            }
+            var fft2dMag = new double[16];
+            status = IRAnalysis.Fft2dMagnitudeF64(fft2dIn, null, 4, 4, 16,
+                IRAnalysis.WindowRectangular, 0, 1, out var fft2dSum, fft2dMag, null, err, err.Length);
+            if (status != 0 || Math.Abs(fft2dSum.DcMagnitude - 10.0) > 1e-9 ||
+                Math.Abs(fft2dSum.PeakAcMagnitude - 0.5) > 1e-9 ||
+                Math.Abs(fft2dSum.TotalAcPower - 0.5) > 1e-9 ||
+                Math.Abs(fft2dMag[2 * 4 + 2] - 10.0) > 1e-9)
+                throw new InvalidOperationException($"IR_Fft2dMagnitudeF64 status={status}: {ErrorText(err)}");
+
             Console.WriteLine($"analysis_version={version}");
             Console.WriteLine($"gb_grade={gb.BadPixels.ChipGrade}");
             Console.WriteLine($"gjb_bad_count={gjb.BadPixels.TotalBadCount}");
             Console.WriteLine("fft_ok=1");
             Console.WriteLine("gaussian_ok=1");
             Console.WriteLine("flicker_ok=1");
+            Console.WriteLine("fft2d_ok=1");
             return 0;
         }
         catch (Exception ex)
@@ -440,6 +478,7 @@ internal static class Program
                 Marshal.SizeOf<IRStation.OvenReading>() != 24 ||
                 Marshal.SizeOf<IRStation.DmmReading>() != 16 ||
                 Marshal.SizeOf<IRStation.PowerReading>() != 40 ||
+                Marshal.SizeOf<IRStation.PowerCurrentStableSpec>() != 72 ||
                 Marshal.SizeOf<IRStation.DetectorCurrentReading>() != 24 ||
                 Marshal.SizeOf<IRStation.CoolerReading>() != 16 ||
                 Marshal.SizeOf<IRStation.FrameStamp>() != 40 ||

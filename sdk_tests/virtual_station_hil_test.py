@@ -301,6 +301,13 @@ def main():
             assert math.isclose(record["metrics"]["cooler.voltage_mv"]["value"], 1080.0, abs_tol=1e-6)
             assert math.isclose(record["metrics"]["det_curr.current_ma"]["value"], 15.0, abs_tol=1e-2)
             assert math.isclose(record["metrics"]["stats.mean_dn"]["value"], 21.0, abs_tol=1e-9)
+            assert math.isclose(record["metrics"]["spatial_fft.dc_magnitude"]["value"], 21.0, abs_tol=1e-9)
+            assert math.isclose(record["metrics"]["spatial_fft.peak_ac_magnitude"]["value"], 0.0, abs_tol=1e-9)
+            wait_rows = [
+                r for r in record.get("instrument_readings", [])
+                if r.get("step") == "pwr_ch1_wait" and r.get("operation") == "power_wait_stable"
+            ]
+            assert len(wait_rows) == 1 and wait_rows[0]["reading"]["measured_a"] < 0.3, wait_rows
 
             snap = http_json(f"{control_url}/state")
             assert snap["power"]["output"] == [False, False, False], snap["power"]

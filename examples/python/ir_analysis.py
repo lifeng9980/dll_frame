@@ -326,6 +326,22 @@ class IRFlickerSummary(c.Structure):
     ]
 
 
+class IRFft2dSummary(c.Structure):
+    _fields_ = [
+        ("dc_magnitude", c.c_double),
+        ("peak_ac_magnitude", c.c_double),
+        ("total_ac_power", c.c_double),
+        ("low_freq_power_ratio", c.c_double),
+        ("high_freq_power_ratio", c.c_double),
+        ("peak_ac_row", c.c_int32),
+        ("peak_ac_col", c.c_int32),
+        ("rows", c.c_int32),
+        ("cols", c.c_int32),
+        ("valid_pixel_count", c.c_int32),
+        ("reserved", c.c_int32),
+    ]
+
+
 def sdk_library_directory() -> Path:
     configured = os.environ.get("IR_SDK_LIB_DIR")
     if configured:
@@ -362,6 +378,7 @@ def verify_abi_sizes() -> None:
         (IRGjbDriftContext, 64),
         (IRGjbBurstMetrics, 168),
         (IRFlickerSummary, 48),
+        (IRFft2dSummary, 64),
     ]
     if c.sizeof(c.c_void_p) == 8:
         expected.extend([
@@ -491,6 +508,13 @@ def main() -> int:
                 c.c_double, c.c_int32, c.POINTER(IRFlickerSummary),
                 c.POINTER(c.c_int32), c.POINTER(c.c_uint8), c.c_int64,
                 c.POINTER(c.c_double), c.POINTER(c.c_double), c.c_int32,
+                *err_args,
+            ]),
+            ("IR_Fft2dMagnitudeF64", [
+                c.POINTER(c.c_double), c.POINTER(c.c_uint8),
+                c.c_int32, c.c_int32, c.c_int64,
+                c.c_int32, c.c_int32, c.c_int32,
+                c.POINTER(IRFft2dSummary), c.POINTER(c.c_double), c.POINTER(c.c_double),
                 *err_args,
             ]),
         ]
@@ -672,6 +696,24 @@ def main() -> int:
         if st != 0 or flick_sum.flicker_count != 1 or flick_mask[3] != 1:
             raise RuntimeError(f"IR_FlickerDetectU16 failed: st={st} {err.value.decode()}")
 
+        fft2d_in = (c.c_double * 16)(
+            *[10.0 + math.cos(2.0 * math.pi * col / 4.0) for _row in range(4) for col in range(4)]
+        )
+        fft2d_sum = IRFft2dSummary()
+        fft2d_mag = (c.c_double * 16)()
+        st = analysis.IR_Fft2dMagnitudeF64(
+            fft2d_in, None, 4, 4, 16,
+            0, 0, 1, c.byref(fft2d_sum), fft2d_mag, None, err, len(err)
+        )
+        if (
+            st != 0
+            or abs(fft2d_sum.dc_magnitude - 10.0) > 1e-9
+            or abs(fft2d_sum.peak_ac_magnitude - 0.5) > 1e-9
+            or abs(fft2d_sum.total_ac_power - 0.5) > 1e-9
+            or abs(fft2d_mag[2 * 4 + 2] - 10.0) > 1e-9
+        ):
+            raise RuntimeError(f"IR_Fft2dMagnitudeF64 failed: st={st} {err.value.decode()}")
+
         grade = {1: "A", 2: "B", 3: "C", 4: "D"}.get(gb.bad_pixels.chip_grade, "?")
         print(f"analysis_version={version}")
         print(f"gb_grade={grade}")
@@ -682,6 +724,7 @@ def main() -> int:
         print("fft_ok=1")
         print("gaussian_ok=1")
         print("flicker_ok=1")
+        print("fft2d_ok=1")
         return 0
     finally:
         if dll_directory is not None:

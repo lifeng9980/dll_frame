@@ -20,6 +20,23 @@
       "off_after_run": true
     },
     {
+      "id": "pwr_ch1_wait",
+      "type": "power_wait_stable",
+      "device": "supply",
+      "channel": 1,
+      "expected_voltage_v": 12.0,
+      "voltage_tolerance_v": 0.2,
+      "max_current_a": 2.02,
+      "startup_threshold_a": 0.3,
+      "startup_required_samples": 3,
+      "startup_timeout_ms": 5000,
+      "stable_threshold_a": 0.3,
+      "max_variation_a": 0.02,
+      "stable_required_samples": 3,
+      "sample_interval_ms": 10,
+      "timeout_ms": 10000
+    },
+    {
       "id": "pwr_ch2_cfg",
       "type": "power_set",
       "device": "supply",
@@ -111,7 +128,22 @@
       "type": "analyze",
       "method": "frame_stats",
       "name": "stats",
-      "input": "b0"
+      "input": "b0",
+      "outputs": {
+        "mean_map": "m0"
+      }
+    },
+    {
+      "id": "spatial_fft",
+      "type": "analyze",
+      "method": "fft2d",
+      "name": "spatial_fft",
+      "input": "m0",
+      "params": {
+        "window": "rect",
+        "detrend_mean": false,
+        "shift_dc_center": true
+      }
     }
   ],
   "safety": {
@@ -166,6 +198,12 @@
       "metric": "stats.mean_dn",
       "operator": "max",
       "value": 60.0,
+      "unit": "DN"
+    },
+    {
+      "metric": "spatial_fft.dc_magnitude",
+      "operator": "min",
+      "value": 20.0,
       "unit": "DN"
     }
   ]

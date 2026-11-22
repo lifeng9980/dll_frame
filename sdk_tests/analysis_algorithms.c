@@ -18,7 +18,8 @@ static int check_abi_sizes(void)
         sizeof(IRMapSummary) != 80 ||
         sizeof(IRGjbDriftContext) != 64 ||
         sizeof(IRGjbBurstMetrics) != 168 ||
-        sizeof(IRFlickerSummary) != 48) {
+        sizeof(IRFlickerSummary) != 48 ||
+        sizeof(IRFft2dSummary) != 64) {
         fprintf(stderr, "Unexpected fixed-width struct size in IR_analysis.h\n");
         return 1;
     }
@@ -306,6 +307,29 @@ int main(void)
     }
     const int flicker_ok = 1;
 
+    double fft2d_in[16] = {0};
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            fft2d_in[r * 4 + c] = 10.0 + cos(2.0 * 3.14159265358979323846 * (double)c / 4.0);
+        }
+    }
+    IRFft2dSummary fft2d_sum = {0};
+    double fft2d_mag[16] = {0};
+    double fft2d_pwr[16] = {0};
+    status = IR_Fft2dMagnitudeF64(fft2d_in, NULL, 4, 4, 16,
+                                  IR_WINDOW_RECTANGULAR, 0, 1,
+                                  &fft2d_sum, fft2d_mag, fft2d_pwr,
+                                  err, (int32_t)sizeof err);
+    if (status != IR_OK ||
+        fabs(fft2d_sum.dc_magnitude - 10.0) > 1e-9 ||
+        fabs(fft2d_sum.peak_ac_magnitude - 0.5) > 1e-9 ||
+        fabs(fft2d_sum.total_ac_power - 0.5) > 1e-9 ||
+        fabs(fft2d_mag[2 * 4 + 2] - 10.0) > 1e-9) {
+        fprintf(stderr, "IR_Fft2dMagnitudeF64 failed: status=%d err=%s\n", status, err);
+        return 1;
+    }
+    const int fft2d_ok = 1;
+
     printf("analysis_version=%s\n", version);
     printf("gb_grade=%c\n", grade_char(gb.bad_pixels.chip_grade));
     printf("gjb_bad_count=%d\n", gjb.bad_pixels.total_bad_count);
@@ -314,5 +338,6 @@ int main(void)
     printf("fft_ok=%d\n", fft_ok);
     printf("gaussian_ok=%d\n", gaussian_ok);
     printf("flicker_ok=%d\n", flicker_ok);
+    printf("fft2d_ok=%d\n", fft2d_ok);
     return 0;
 }

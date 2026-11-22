@@ -1,10 +1,12 @@
 #include "measurement.h"
 #include "api_common.h"
 #include "station/acquisition/frame_source.h"
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <deque>
 #include <optional>
 #include <thread>
 
@@ -75,6 +77,110 @@ IROvenReading waitForOven(const acquisition::Capture &capture, IRHandle handle,
             stableSince.reset();
         }
         std::this_thread::sleep_until(std::min(deadline, now + milliseconds(100)));
+    }
+}
+
+namespace {
+void validatePowerCurrentStableSpec(int32_t channel, const IRPowerCurrentStableSpec &spec)
+{
+    require(channel >= 1 && channel <= 3, IR_BAD_ARGUMENT, "IT6332A channel must be from 1 to 3");
+    require(std::isfinite(spec.expected_voltage_v) &&
+                std::isfinite(spec.voltage_tolerance_v) && spec.voltage_tolerance_v >= 0.0 &&
+                std::isfinite(spec.max_current_a) && spec.max_current_a >= 0.0 &&
+                std::isfinite(spec.startup_threshold_a) && spec.startup_threshold_a >= 0.0 &&
+                std::isfinite(spec.stable_threshold_a) && spec.stable_threshold_a > 0.0 &&
+                std::isfinite(spec.max_variation_a) && spec.max_variation_a >= 0.0,
+            IR_BAD_ARGUMENT, "Invalid power current stabilization thresholds");
+    require(spec.startup_required_samples >= 0 &&
+                spec.stable_required_samples >= 1 &&
+                spec.sample_interval_ms >= 0 &&
+                spec.timeout_ms >= 1,
+            IR_BAD_ARGUMENT, "Invalid power current stabilization sample counts or timeouts");
+    if (spec.startup_required_samples > 0) {
+        require(spec.startup_threshold_a > 0.0 && spec.startup_timeout_ms >= 1,
+                IR_BAD_ARGUMENT, "Power startup confirmation requires startup_threshold_a > 0 and startup_timeout_ms >= 1");
+    }
+}
+} // namespace
+
+IRPowerReading waitForPowerCurrentStable(const acquisition::Capture &capture, IRHandle handle,
+                                         int32_t channel, const IRPowerCurrentStableSpec &spec)
+{
+    static_assert(sizeof(IRPowerCurrentStableSpec) == 72, "Unexpected IRPowerCurrentStableSpec size");
+    validatePowerCurrentStableSpec(channel, spec);
+
+    using namespace std::chrono;
+    const auto started = steady_clock::now();
+    const auto deadline = started + milliseconds(spec.timeout_ms);
+    const auto startupDeadline = started + milliseconds(std::max<int32_t>(spec.startup_timeout_ms, 0));
+    bool startupConfirmed = (spec.startup_required_samples == 0);
+    int32_t startupSamples = 0;
+    std::deque<double> recentCurrents;
+
+    for (;;) {
+        capture.checkStop();
+        require(steady_clock::now() < deadline, IR_TIMEOUT,
+                "Power channel current did not stabilize before deadline");
+
+        IRPowerReading reading{};
+        char detail[1024]{};
+        checkStatus(IR_ReadPower(handle, channel, &reading, detail, sizeof detail), detail);
+        capture.checkStop();
+        const auto now = steady_clock::now();
+
+        require(reading.output_enabled != 0, IR_IO_ERROR,
+                "Power channel output must be enabled while waiting for stabilization");
+        if (spec.max_current_a > 0.0) {
+            require(std::isfinite(reading.measured_a) && reading.measured_a >= 0.0 &&
+                        reading.measured_a <= spec.max_current_a,
+                    IR_IO_ERROR, "Power channel current exceeded max_current_a limit");
+        }
+
+        const bool voltageNormal = (spec.expected_voltage_v <= 0.0) ||
+                                   (std::isfinite(reading.measured_v) &&
+                                    std::abs(reading.measured_v - spec.expected_voltage_v) <= spec.voltage_tolerance_v);
+
+        if (!startupConfirmed) {
+            if (voltageNormal && std::isfinite(reading.measured_a) &&
+                reading.measured_a > spec.startup_threshold_a) {
+                ++startupSamples;
+            } else {
+                startupSamples = 0;
+            }
+            if (startupSamples >= spec.startup_required_samples) {
+                startupConfirmed = true;
+                recentCurrents.clear();
+            } else {
+                require(now < startupDeadline && now < deadline, IR_TIMEOUT,
+                        "Power channel startup load current was not observed before timeout");
+            }
+        } else {
+            if (voltageNormal && std::isfinite(reading.measured_a) &&
+                reading.measured_a < spec.stable_threshold_a) {
+                recentCurrents.push_back(reading.measured_a);
+                while (static_cast<int32_t>(recentCurrents.size()) > spec.stable_required_samples)
+                    recentCurrents.pop_front();
+                if (static_cast<int32_t>(recentCurrents.size()) == spec.stable_required_samples) {
+                    const auto [minIt, maxIt] =
+                        std::minmax_element(recentCurrents.cbegin(), recentCurrents.cend());
+                    if ((*maxIt - *minIt) <= spec.max_variation_a)
+                        return reading;
+                }
+            } else {
+                recentCurrents.clear();
+            }
+        }
+
+        require(now < deadline, IR_TIMEOUT, "Power channel current did not stabilize before deadline");
+        if (spec.sample_interval_ms > 0) {
+            const auto sleepEnd = std::min(deadline, now + milliseconds(spec.sample_interval_ms));
+            while (steady_clock::now() < sleepEnd) {
+                capture.checkStop();
+                const auto remaining = duration_cast<milliseconds>(sleepEnd - steady_clock::now()).count();
+                if (remaining <= 0) break;
+                std::this_thread::sleep_for(milliseconds(std::min<int64_t>(remaining, 50)));
+            }
+        }
     }
 }
 
@@ -168,5 +274,21 @@ extern "C" IR_STATION_API int32_t IR_WaitOvenStable(
         const ir::procedures::OvenTarget target{
             target_c, tolerance_c, stable_window_ms, timeout_ms, require_no_alarm != 0};
         *reading = ir::procedures::waitForOven(cap, handle, target);
+    });
+}
+
+extern "C" IR_STATION_API int32_t IR_WaitPowerCurrentStable(
+    IRHandle handle, int32_t channel,
+    const IRPowerCurrentStableSpec *spec, IRPowerReading *reading,
+    char *err, int32_t err_bytes)
+{
+    if (reading) *reading = IRPowerReading{};
+    return ir::api::guarded(err, err_bytes, [&] {
+        ir::api::require(handle != 0, IR_INVALID_HANDLE, "Invalid power handle");
+        ir::api::needed(spec, 1, 1);
+        ir::api::needed(reading, 1, 1);
+        auto &cap = ir::acquisition::capture();
+        StandaloneStopGuard guard(cap);
+        *reading = ir::procedures::waitForPowerCurrentStable(cap, handle, channel, *spec);
     });
 }

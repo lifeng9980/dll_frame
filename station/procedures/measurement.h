@@ -42,5 +42,8 @@ struct OvenTarget {
 IROvenReading waitForOven(const acquisition::Capture &capture, IRHandle handle,
                           const OvenTarget &target);
 
+IRPowerReading waitForPowerCurrentStable(const acquisition::Capture &capture, IRHandle handle,
+                                         int32_t channel, const IRPowerCurrentStableSpec &spec);
+
 std::string utcTimestampNow();
 }

@@ -207,6 +207,13 @@ struct CoolerReadStep {
     std::string name;
 };
 
+struct PowerWaitStableStep {
+    StepRef ref;
+    std::string device;
+    int32_t channel{};
+    IRPowerCurrentStableSpec spec{};
+};
+
 struct MetricV2Operations {
     std::function<void(IRGeometry)> checkGeometry;
     std::function<void(ExecutionContext &)> execute;
@@ -222,7 +229,7 @@ struct AnalysisStepV2 {
 };
 
 using InnerStepV2 = std::variant<
-    BlackbodyStep, PowerStep, OvenStabilizeStep, OvenStandbyStep, DmmReadStep,
+    BlackbodyStep, PowerStep, PowerWaitStableStep, OvenStabilizeStep, OvenStandbyStep, DmmReadStep,
     DetectorTimingStep, DetectorGpolStep, DetectorRegisterStep, DetectorCurrentStep,
     CoolerReadStep, FlushStep, CaptureStepV2, AnalysisStepV2>;
 
@@ -237,7 +244,7 @@ struct RepeatBurstStep {
 };
 
 using StepV2 = std::variant<
-    BlackbodyStep, PowerStep, OvenStabilizeStep, OvenStandbyStep, DmmReadStep,
+    BlackbodyStep, PowerStep, PowerWaitStableStep, OvenStabilizeStep, OvenStandbyStep, DmmReadStep,
     DetectorTimingStep, DetectorGpolStep, DetectorRegisterStep, DetectorCurrentStep,
     CoolerReadStep, FlushStep, CaptureStepV2, AnalysisStepV2, SaveRawStepV2,
     RepeatBurstStep>;

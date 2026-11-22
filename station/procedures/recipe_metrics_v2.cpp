@@ -1127,6 +1127,76 @@ PreparedMetricV2 prepFlickerDetect(const std::string &name, const Json &inputs, 
     }};
 }
 
+PreparedMetricV2 prepFft2d(const std::string &name, const Json &inputs, const Json &params,
+                           const Json &outputs, std::map<std::string, SlotKind> &slots,
+                           const std::string &path)
+{
+    allowFields(inputs, {"map", "valid_mask"}, path + ".inputs");
+    allowFields(params, {"window", "detrend_mean", "shift_dc_center"}, path + ".params");
+    allowFields(outputs, {"magnitude_map", "power_map"}, path + ".outputs");
+    const auto mapSlot = requireInputSlot(inputs, "map", SlotKind::double_map, slots, path);
+    const auto maskSlot = optionalInputSlot(inputs, "valid_mask", SlotKind::byte_mask, slots, path);
+    const auto winText = optionalString(params, "window", "hann", path + ".params");
+    require(winText == "rect" || winText == "rectangular" || winText == "hann",
+            IR_BAD_ARGUMENT, path + ".params.window must be 'rect', 'rectangular', or 'hann'");
+    const int32_t winKind = (winText == "hann") ? IR_WINDOW_HANN : IR_WINDOW_RECTANGULAR;
+    const bool detrend = optionalBoolean(params, "detrend_mean", true, path + ".params");
+    const bool shiftDc = optionalBoolean(params, "shift_dc_center", true, path + ".params");
+    const auto magOut = bindOutputSlot(outputs, "magnitude_map", SlotKind::double_map, false, slots, path);
+    const auto pwrOut = bindOutputSlot(outputs, "power_map", SlotKind::double_map, false, slots, path);
+
+    std::vector<MetricOutput> outs{
+        {".dc_magnitude", "DN", "fft2d", 1},
+        {".peak_ac_magnitude", "DN", "fft2d", 1},
+        {".total_ac_power", "DN^2", "fft2d", 1},
+        {".low_freq_power_ratio", "ratio", "fft2d", 1},
+        {".high_freq_power_ratio", "ratio", "fft2d", 1}
+    };
+    return {1, outs, {
+        {},
+        [=](ExecutionContext &ctx) {
+            const auto &m = getMap(ctx, mapSlot);
+            const auto g = m.geometry;
+            const auto n = pixels(g.height, g.width);
+            checkMapSize(m, n, g, "fft2d.map");
+            const uint8_t *maskPtr = nullptr;
+            if (!maskSlot.empty()) {
+                const auto &vm = getMask(ctx, maskSlot);
+                checkMaskSize(vm, n, g, "fft2d.valid_mask");
+                maskPtr = vm.data.data();
+            }
+            std::vector<double> magMap;
+            std::vector<double> pwrMap;
+            double *magPtr = nullptr;
+            double *pwrPtr = nullptr;
+            if (!magOut.empty()) {
+                magMap.resize(static_cast<size_t>(n));
+                magPtr = magMap.data();
+            }
+            if (!pwrOut.empty()) {
+                pwrMap.resize(static_cast<size_t>(n));
+                pwrPtr = pwrMap.data();
+            }
+            IRFft2dSummary summary{};
+            char err[1024]{};
+            checkStatus(IR_Fft2dMagnitudeF64(m.data.data(), maskPtr, g.height, g.width, n,
+                winKind, detrend ? 1 : 0, shiftDc ? 1 : 0,
+                &summary, magPtr, pwrPtr, err, sizeof err), err);
+            if (!magOut.empty())
+                ctx.maps[magOut] = {g, std::move(magMap)};
+            if (!pwrOut.empty())
+                ctx.maps[pwrOut] = {g, std::move(pwrMap)};
+            recordScalarOutputs(ctx, name, outs, {
+                summary.dc_magnitude,
+                summary.peak_ac_magnitude,
+                summary.total_ac_power,
+                summary.low_freq_power_ratio,
+                summary.high_freq_power_ratio
+            });
+        }
+    }};
+}
+
 constexpr MetricSpecV2 kMethodsV2[]{
     {"temporal_noise", "frames", prepTemporalNoise},
     {"roi_mean", "frames", prepRoiMean},
@@ -1143,6 +1213,7 @@ constexpr MetricSpecV2 kMethodsV2[]{
     {"noise3d_compute", "frames", prepNoise3dCompute},
     {"channel_spectrum", "frames", prepChannelSpectrum},
     {"flicker_detect", "frames", prepFlickerDetect},
+    {"fft2d", "map", prepFft2d},
 };
 
 } // namespace

@@ -399,6 +399,146 @@ void testGjbBurstMetricsAndErrors()
                                      rows, cols, n, &badCtx, &m, err, sizeof err) == IR_BAD_ARGUMENT);
 }
 
+void testFft2dMagnitude()
+{
+    char err[256]{};
+    const double pi = std::numbers::pi;
+
+    // 1. Analytical 8x8 cosine: 10.0 + cos(2*pi*c/8), Parseval & shift coordinates
+    std::vector<double> in8(64);
+    for (int32_t r = 0; r < 8; ++r)
+        for (int32_t c = 0; c < 8; ++c)
+            in8[size_t(r * 8 + c)] = 10.0 + std::cos(2.0 * pi * double(c) / 8.0);
+
+    IRFft2dSummary sUnshifted{};
+    std::vector<double> magUnshifted(64), pwrUnshifted(64);
+    CHECK(IR_Fft2dMagnitudeF64(in8.data(), nullptr, 8, 8, 64,
+                               IR_WINDOW_RECTANGULAR, 0, 0,
+                               &sUnshifted, magUnshifted.data(), pwrUnshifted.data(),
+                               err, sizeof err) == IR_OK);
+    CHECK(sUnshifted.rows == 8 && sUnshifted.cols == 8 && sUnshifted.valid_pixel_count == 64);
+    CHECK_NEAR(sUnshifted.dc_magnitude, 10.0, 1e-12);
+    CHECK_NEAR(sUnshifted.peak_ac_magnitude, 0.5, 1e-12);
+    CHECK_NEAR(sUnshifted.total_ac_power, 0.5, 1e-12);
+    CHECK_NEAR(sUnshifted.low_freq_power_ratio, 1.0, 1e-12);
+    CHECK_NEAR(sUnshifted.high_freq_power_ratio, 0.0, 1e-12);
+    CHECK_NEAR(magUnshifted[0], 10.0, 1e-12);
+    CHECK(sUnshifted.peak_ac_row == 0 && (sUnshifted.peak_ac_col == 1 || sUnshifted.peak_ac_col == 7));
+
+    IRFft2dSummary sShifted{};
+    std::vector<double> magShifted(64);
+    CHECK(IR_Fft2dMagnitudeF64(in8.data(), nullptr, 8, 8, 64,
+                               IR_WINDOW_RECTANGULAR, 0, 1,
+                               &sShifted, magShifted.data(), nullptr,
+                               err, sizeof err) == IR_OK);
+    CHECK_NEAR(sShifted.dc_magnitude, 10.0, 1e-12);
+    CHECK_NEAR(sShifted.peak_ac_magnitude, 0.5, 1e-12);
+    CHECK_NEAR(magShifted[4 * 8 + 4], 10.0, 1e-12);
+    CHECK(sShifted.peak_ac_row == 4 && (sShifted.peak_ac_col == 3 || sShifted.peak_ac_col == 5));
+
+    // 2. 8x8 Nyquist checkerboard (-1)^(r+c): all energy above radial cutoff 0.25
+    std::vector<double> checker(64);
+    for (int32_t r = 0; r < 8; ++r)
+        for (int32_t c = 0; c < 8; ++c)
+            checker[size_t(r * 8 + c)] = ((r + c) % 2 == 0) ? 1.0 : -1.0;
+    IRFft2dSummary sChk{};
+    CHECK(IR_Fft2dMagnitudeF64(checker.data(), nullptr, 8, 8, 64,
+                               IR_WINDOW_RECTANGULAR, 1, 1,
+                               &sChk, nullptr, nullptr, err, sizeof err) == IR_OK);
+    CHECK_NEAR(sChk.dc_magnitude, 0.0, 1e-12);
+    CHECK_NEAR(sChk.peak_ac_magnitude, 1.0, 1e-12);
+    CHECK_NEAR(sChk.total_ac_power, 1.0, 1e-12);
+    CHECK_NEAR(sChk.low_freq_power_ratio, 0.0, 1e-12);
+    CHECK_NEAR(sChk.high_freq_power_ratio, 1.0, 1e-12);
+    CHECK(sChk.peak_ac_row == 0 && sChk.peak_ac_col == 0);
+
+    // 3. Arbitrary prime dimensions 5x7 (Bluestein path) vs direct naive 2D DFT
+    const int32_t r5 = 5, c7 = 7, n57 = r5 * c7;
+    std::vector<double> in57(static_cast<size_t>(n57));
+    double mean57 = 0.0;
+    for (int32_t r = 0; r < r5; ++r)
+    {
+        for (int32_t c = 0; c < c7; ++c)
+        {
+            const double v = 5.0 + 1.3 * r - 0.7 * c +
+                             2.5 * std::sin(2.0 * pi * 2.0 * r / 5.0 + 0.4) * std::cos(2.0 * pi * 3.0 * c / 7.0);
+            in57[size_t(r * c7 + c)] = v;
+            mean57 += v;
+        }
+    }
+    mean57 /= double(n57);
+    IRFft2dSummary s57{};
+    std::vector<double> mag57(static_cast<size_t>(n57)), pwr57(static_cast<size_t>(n57));
+    CHECK(IR_Fft2dMagnitudeF64(in57.data(), nullptr, r5, c7, n57,
+                               IR_WINDOW_RECTANGULAR, 1, 1,
+                               &s57, mag57.data(), pwr57.data(), err, sizeof err) == IR_OK);
+    for (int32_t u = 0; u < r5; ++u)
+    {
+        for (int32_t v = 0; v < c7; ++v)
+        {
+            double re = 0.0, im = 0.0;
+            for (int32_t r = 0; r < r5; ++r)
+            {
+                for (int32_t c = 0; c < c7; ++c)
+                {
+                    const double theta = -2.0 * pi * (double(u * r) / double(r5) + double(v * c) / double(c7));
+                    const double x = in57[size_t(r * c7 + c)] - mean57;
+                    re += x * std::cos(theta);
+                    im += x * std::sin(theta);
+                }
+            }
+            const double refMag = std::hypot(re, im) / double(n57);
+            const int32_t outR = (u + r5 / 2) % r5;
+            const int32_t outC = (v + c7 / 2) % c7;
+            CHECK_NEAR(mag57[size_t(outR * c7 + outC)], refMag, 1e-10);
+            CHECK_NEAR(pwr57[size_t(outR * c7 + outC)], refMag * refMag, 1e-10);
+        }
+    }
+
+    // 4. Masked invalid / NaN pixels with detrend_mean=1
+    std::vector<double> inMasked = in57;
+    std::vector<uint8_t> mask57(static_cast<size_t>(n57), 1);
+    inMasked[2] = std::numeric_limits<double>::quiet_NaN();
+    mask57[2] = 0;
+    inMasked[19] = 1.0e9;
+    mask57[19] = 0;
+    IRFft2dSummary sMasked{};
+    std::vector<double> magMasked(static_cast<size_t>(n57));
+    CHECK(IR_Fft2dMagnitudeF64(inMasked.data(), mask57.data(), r5, c7, n57,
+                               IR_WINDOW_RECTANGULAR, 1, 1,
+                               &sMasked, magMasked.data(), nullptr, err, sizeof err) == IR_OK);
+    CHECK(sMasked.valid_pixel_count == n57 - 2);
+    CHECK_NEAR(sMasked.dc_magnitude, 0.0, 1e-11);
+    for (double m : magMasked)
+        CHECK(std::isfinite(m));
+
+    // 5. 1x1 boundary & Hann window normalization
+    const double one = 42.5;
+    IRFft2dSummary sOne{};
+    CHECK(IR_Fft2dMagnitudeF64(&one, nullptr, 1, 1, 1,
+                               IR_WINDOW_HANN, 0, 1,
+                               &sOne, nullptr, nullptr, err, sizeof err) == IR_OK);
+    CHECK_NEAR(sOne.dc_magnitude, 42.5, 1e-12);
+    CHECK_NEAR(sOne.peak_ac_magnitude, 0.0, 1e-12);
+
+    std::vector<double> const8(64, 10.0);
+    IRFft2dSummary sHann{};
+    CHECK(IR_Fft2dMagnitudeF64(const8.data(), nullptr, 8, 8, 64,
+                               IR_WINDOW_HANN, 0, 1,
+                               &sHann, nullptr, nullptr, err, sizeof err) == IR_OK);
+    CHECK_NEAR(sHann.dc_magnitude, 10.0, 1e-9);
+
+    // 6. Negative checks
+    CHECK(IR_Fft2dMagnitudeF64(in8.data(), nullptr, 0, 8, 64, IR_WINDOW_RECTANGULAR, 0, 1,
+                               &sUnshifted, nullptr, nullptr, err, sizeof err) == IR_BAD_ARGUMENT);
+    CHECK(IR_Fft2dMagnitudeF64(in8.data(), nullptr, 8, 8, 64, IR_WINDOW_RECTANGULAR, 0, 1,
+                               nullptr, nullptr, nullptr, err, sizeof err) == IR_NULL_POINTER);
+    CHECK(IR_Fft2dMagnitudeF64(in8.data(), nullptr, 8, 8, 63, IR_WINDOW_RECTANGULAR, 0, 1,
+                               &sUnshifted, nullptr, nullptr, err, sizeof err) == IR_BUFFER_TOO_SMALL);
+    CHECK(IR_Fft2dMagnitudeF64(in8.data(), nullptr, 8, 8, 64, 99, 0, 1,
+                               &sUnshifted, nullptr, nullptr, err, sizeof err) == IR_BAD_ARGUMENT);
+}
+
 } // namespace
 
 int main()
@@ -409,6 +549,7 @@ int main()
     testSpatialGaussianWithDcAndBlindMask();
     testFftAndChannelSpectrum();
     testGjbBurstMetricsAndErrors();
+    testFft2dMagnitude();
 
     if (gFailures == 0)
         std::printf("composable_ops_test: ALL PASSED\n");

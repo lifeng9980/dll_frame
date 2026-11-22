@@ -117,6 +117,82 @@ std::vector<Complex> computeDftComplex(const std::vector<double> &input)
     return out;
 }
 
+struct ComplexFft1dPlan
+{
+    size_t n{};
+    bool powerOfTwo{false};
+    size_t bluesteinSize{0};
+    std::vector<Complex> chirp;
+    std::vector<Complex> kernelFft;
+
+    explicit ComplexFft1dPlan(size_t length)
+        : n(length), powerOfTwo(isPowerOfTwo(length))
+    {
+        if (n <= 1 || powerOfTwo)
+            return;
+        bluesteinSize = nextPowerOfTwo(2 * n - 1);
+        chirp.resize(n);
+        kernelFft.assign(bluesteinSize, Complex(0.0, 0.0));
+        const int64_t twoN = 2 * static_cast<int64_t>(n);
+        for (size_t k = 0; k < n; ++k)
+        {
+            const int64_t kSqMod = (static_cast<int64_t>(k) * static_cast<int64_t>(k)) % twoN;
+            const double angle = kPi * static_cast<double>(kSqMod) / static_cast<double>(n);
+            chirp[k] = Complex(std::cos(angle), -std::sin(angle));
+        }
+        kernelFft[0] = Complex(1.0, 0.0);
+        for (size_t k = 1; k < n; ++k)
+        {
+            const Complex conjChirp = std::conj(chirp[k]);
+            kernelFft[k] = conjChirp;
+            kernelFft[bluesteinSize - k] = conjChirp;
+        }
+        radix2Fft(kernelFft, false);
+    }
+
+    void transform(const Complex *src, Complex *dst) const
+    {
+        if (n == 0)
+            return;
+        if (n == 1)
+        {
+            dst[0] = src[0];
+            return;
+        }
+        if (powerOfTwo)
+        {
+            std::vector<Complex> buf(src, src + n);
+            radix2Fft(buf, false);
+            std::copy(buf.begin(), buf.end(), dst);
+            return;
+        }
+        std::vector<Complex> a(bluesteinSize, Complex(0.0, 0.0));
+        for (size_t k = 0; k < n; ++k)
+            a[k] = src[k] * chirp[k];
+        radix2Fft(a, false);
+        for (size_t i = 0; i < bluesteinSize; ++i)
+            a[i] *= kernelFft[i];
+        radix2Fft(a, true);
+        for (size_t k = 0; k < n; ++k)
+            dst[k] = a[k] * chirp[k];
+    }
+};
+
+std::vector<double> buildWindow1d(int32_t length, int32_t windowKind)
+{
+    std::vector<double> w(static_cast<size_t>(length), 1.0);
+    if (length <= 1 || windowKind == IR_WINDOW_RECTANGULAR)
+        return w;
+    for (int32_t i = 0; i < length; ++i)
+    {
+        if (windowKind == IR_WINDOW_HANN)
+            w[static_cast<size_t>(i)] = 0.5 * (1.0 - std::cos(2.0 * kPi * i / static_cast<double>(length - 1)));
+        else if (windowKind == IR_WINDOW_HAMMING)
+            w[static_cast<size_t>(i)] = 0.54 - 0.46 * std::cos(2.0 * kPi * i / static_cast<double>(length - 1));
+    }
+    return w;
+}
+
 void computeRfftCore(const double *signal,
                      int32_t length,
                      double sampleRateHz,
@@ -335,5 +411,167 @@ extern "C" IR_ANALYSIS_API int32_t IR_ChannelSpectrumU16(
                             out_channel_amplitudes + int64_t(ch) * bins,
                             nullptr);
         }
+    });
+}
+
+extern "C" IR_ANALYSIS_API int32_t IR_Fft2dMagnitudeF64(
+    const double *in_map,
+    const uint8_t *valid_mask,
+    int32_t rows,
+    int32_t cols,
+    int64_t pixel_capacity,
+    int32_t window_kind,
+    int32_t detrend_mean,
+    int32_t shift_dc_center,
+    IRFft2dSummary *summary,
+    double *out_magnitude_map,
+    double *out_power_map,
+    char *err,
+    int32_t err_bytes)
+{
+    static_assert(sizeof(IRFft2dSummary) == 64, "Unexpected IRFft2dSummary size");
+    if (summary)
+        *summary = IRFft2dSummary{};
+    return guarded(err, err_bytes, [&] {
+        const int64_t total = pixels(rows, cols);
+        needed(in_map, pixel_capacity, total);
+        if (valid_mask)
+            needed(valid_mask, pixel_capacity, total);
+        require(summary != nullptr, IR_NULL_POINTER, "summary must not be null");
+        require(window_kind == IR_WINDOW_RECTANGULAR || window_kind == IR_WINDOW_HANN,
+                IR_BAD_ARGUMENT, "2D FFT window_kind supports IR_WINDOW_RECTANGULAR or IR_WINDOW_HANN");
+        if (out_magnitude_map)
+            needed(out_magnitude_map, pixel_capacity, total);
+        if (out_power_map)
+            needed(out_power_map, pixel_capacity, total);
+
+        double sumValid = 0.0;
+        int64_t validCount = 0;
+        for (int64_t i = 0; i < total; ++i)
+        {
+            if (valid_mask && valid_mask[i] == 0)
+                continue;
+            const double v = in_map[i];
+            if (!std::isfinite(v))
+                continue;
+            sumValid += v;
+            ++validCount;
+        }
+        require(validCount > 0, IR_COMPUTATION_FAILED, "No valid finite pixels for 2D FFT");
+        require(validCount <= INT32_MAX, IR_COMPUTATION_FAILED, "valid_pixel_count exceeds INT32_MAX");
+        const double validMean = sumValid / static_cast<double>(validCount);
+
+        const auto winRow = buildWindow1d(rows, window_kind);
+        const auto winCol = buildWindow1d(cols, window_kind);
+        double rowWinSum = 0.0;
+        double colWinSum = 0.0;
+        for (double w : winRow)
+            rowWinSum += w;
+        for (double w : winCol)
+            colWinSum += w;
+        const double windowNorm = rowWinSum * colWinSum;
+        require(windowNorm > 0.0, IR_BAD_ARGUMENT,
+                "Selected 2D FFT window yields zero weight for these image dimensions");
+
+        const ComplexFft1dPlan rowPlan(static_cast<size_t>(cols));
+        const ComplexFft1dPlan colPlan(static_cast<size_t>(rows));
+
+        std::vector<Complex> work(static_cast<size_t>(total));
+        std::vector<Complex> rowIn(static_cast<size_t>(cols));
+        std::vector<Complex> rowOut(static_cast<size_t>(cols));
+        for (int32_t r = 0; r < rows; ++r)
+        {
+            const int64_t rowBase = int64_t(r) * cols;
+            const double wr = winRow[static_cast<size_t>(r)];
+            for (int32_t c = 0; c < cols; ++c)
+            {
+                const int64_t idx = rowBase + c;
+                const bool ok = (!valid_mask || valid_mask[idx] != 0) && std::isfinite(in_map[idx]);
+                const double baseVal = ok ? in_map[idx] : validMean;
+                const double centered = (detrend_mean != 0) ? (baseVal - validMean) : baseVal;
+                rowIn[static_cast<size_t>(c)] = Complex(centered * wr * winCol[static_cast<size_t>(c)], 0.0);
+            }
+            rowPlan.transform(rowIn.data(), rowOut.data());
+            std::copy(rowOut.begin(), rowOut.end(), work.begin() + rowBase);
+        }
+
+        std::vector<Complex> colIn(static_cast<size_t>(rows));
+        std::vector<Complex> colOut(static_cast<size_t>(rows));
+        for (int32_t c = 0; c < cols; ++c)
+        {
+            for (int32_t r = 0; r < rows; ++r)
+                colIn[static_cast<size_t>(r)] = work[static_cast<size_t>(int64_t(r) * cols + c)];
+            colPlan.transform(colIn.data(), colOut.data());
+            for (int32_t r = 0; r < rows; ++r)
+                work[static_cast<size_t>(int64_t(r) * cols + c)] = colOut[static_cast<size_t>(r)];
+        }
+
+        const double invNorm = 1.0 / windowNorm;
+        const int32_t shiftR = (shift_dc_center != 0) ? (rows / 2) : 0;
+        const int32_t shiftC = (shift_dc_center != 0) ? (cols / 2) : 0;
+
+        double dcMag = 0.0;
+        double peakAcMag = 0.0;
+        int32_t peakAcRow = 0;
+        int32_t peakAcCol = 0;
+        double totalAcPower = 0.0;
+        double lowFreqPower = 0.0;
+        double highFreqPower = 0.0;
+
+        for (int32_t u = 0; u < rows; ++u)
+        {
+            const int32_t outR = (u + shiftR) % rows;
+            const double ru = static_cast<double>(std::min(u, rows - u)) / static_cast<double>(rows);
+            for (int32_t v = 0; v < cols; ++v)
+            {
+                const int32_t outC = (v + shiftC) % cols;
+                const Complex &z = work[static_cast<size_t>(int64_t(u) * cols + v)];
+                const double mag = std::hypot(z.real(), z.imag()) * invNorm;
+                const double pwr = mag * mag;
+
+                if (out_magnitude_map)
+                    out_magnitude_map[static_cast<size_t>(int64_t(outR) * cols + outC)] = mag;
+                if (out_power_map)
+                    out_power_map[static_cast<size_t>(int64_t(outR) * cols + outC)] = pwr;
+
+                if (u == 0 && v == 0)
+                {
+                    dcMag = mag;
+                }
+                else
+                {
+                    if (mag > peakAcMag)
+                    {
+                        peakAcMag = mag;
+                        peakAcRow = outR;
+                        peakAcCol = outC;
+                    }
+                    totalAcPower += pwr;
+                    const double rv = static_cast<double>(std::min(v, cols - v)) / static_cast<double>(cols);
+                    const double rad = std::hypot(ru, rv);
+                    if (rad <= 0.25)
+                        lowFreqPower += pwr;
+                    else
+                        highFreqPower += pwr;
+                }
+            }
+        }
+
+        IRFft2dSummary out{};
+        out.dc_magnitude = dcMag;
+        out.peak_ac_magnitude = peakAcMag;
+        out.total_ac_power = totalAcPower;
+        if (totalAcPower > 0.0)
+        {
+            out.low_freq_power_ratio = lowFreqPower / totalAcPower;
+            out.high_freq_power_ratio = highFreqPower / totalAcPower;
+        }
+        out.peak_ac_row = peakAcRow;
+        out.peak_ac_col = peakAcCol;
+        out.rows = rows;
+        out.cols = cols;
+        out.valid_pixel_count = static_cast<int32_t>(validCount);
+        out.reserved = 0;
+        *summary = out;
     });
 }

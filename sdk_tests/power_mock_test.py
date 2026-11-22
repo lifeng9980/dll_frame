@@ -31,6 +31,23 @@ class Reading(c.Structure):
     ]
 
 
+class PowerCurrentStableSpec(c.Structure):
+    _fields_ = [
+        ("expected_voltage_v", c.c_double),
+        ("voltage_tolerance_v", c.c_double),
+        ("max_current_a", c.c_double),
+        ("startup_threshold_a", c.c_double),
+        ("stable_threshold_a", c.c_double),
+        ("max_variation_a", c.c_double),
+        ("startup_required_samples", c.c_int32),
+        ("startup_timeout_ms", c.c_int32),
+        ("stable_required_samples", c.c_int32),
+        ("sample_interval_ms", c.c_int32),
+        ("timeout_ms", c.c_int32),
+        ("reserved", c.c_int32),
+    ]
+
+
 class RecipeResult(c.Structure):
     _fields_ = [
         ("completed_frames", c.c_int32), ("failed_stage", c.c_int32),
@@ -70,6 +87,9 @@ def main():
     sdk.IR_SetPowerOutput.argtypes = [c.c_uint64, c.c_int32, c.c_int32,
                                       c.POINTER(Reading), *error_args]
     sdk.IR_ReadPower.argtypes = [c.c_uint64, c.c_int32, c.POINTER(Reading), *error_args]
+    sdk.IR_WaitPowerCurrentStable.argtypes = [
+        c.c_uint64, c.c_int32, c.POINTER(PowerCurrentStableSpec), c.POINTER(Reading), *error_args
+    ]
     sdk.IR_CheckRecipeJson.argtypes = [c.c_char_p, c.c_char_p, *error_args]
     sdk.IR_RunRecipeJson.argtypes = [c.c_char_p, c.c_char_p, c.c_char_p, c.POINTER(RecipeResult), *error_args]
     sdk.IR_RequestStop.argtypes = []
@@ -194,6 +214,42 @@ def main():
         assert controller.drop_count == 0
         check(sdk.IR_ReadPower(handle, 1, c.byref(reading), error, len(error)))
         check(sdk.IR_ReadPower(handle, 4, c.byref(reading), error, len(error)), 2)
+        check(sdk.IR_SetPowerOutput(handle, 1, 0, c.byref(reading), error, len(error)))
+        assert reading.output_enabled == 0 and reading.measured_v == 0.0
+
+        assert c.sizeof(PowerCurrentStableSpec) == 72
+        controller.cooler_profile = True
+        controller._ch1_on_reads = 0
+        check(sdk.IR_SetPowerOutput(handle, 1, 1, c.byref(reading), error, len(error)))
+        assert abs(reading.measured_a - 0.55) < 1e-9, reading.measured_a
+        stable_spec = PowerCurrentStableSpec(
+            expected_voltage_v=12.0,
+            voltage_tolerance_v=0.2,
+            max_current_a=2.0,
+            startup_threshold_a=0.3,
+            stable_threshold_a=0.3,
+            max_variation_a=0.05,
+            startup_required_samples=3,
+            startup_timeout_ms=2000,
+            stable_required_samples=3,
+            sample_interval_ms=5,
+            timeout_ms=3000,
+            reserved=0,
+        )
+        check(sdk.IR_WaitPowerCurrentStable(handle, 1, c.byref(stable_spec), c.byref(reading), error, len(error)))
+        assert reading.measured_a < 0.3, reading.measured_a
+
+        controller.cooler_profile = False
+        timeout_spec = PowerCurrentStableSpec(12.0, 0.2, 2.0, 0.3, 0.3, 0.05, 2, 60, 2, 10, 400, 0)
+        check(sdk.IR_WaitPowerCurrentStable(handle, 1, c.byref(timeout_spec), c.byref(reading), error, len(error)), 7)
+
+        over_spec = PowerCurrentStableSpec(12.0, 0.2, 0.02, 0.3, 0.3, 0.05, 0, 0, 2, 10, 400, 0)
+        check(sdk.IR_WaitPowerCurrentStable(handle, 1, c.byref(over_spec), c.byref(reading), error, len(error)), 6)
+
+        cancel_spec = PowerCurrentStableSpec(12.0, 0.2, 2.0, 0.3, 0.3, 0.05, 0, 0, 2, 10, 2000, 0)
+        command_hook = (b"MEAS:CURR?", sdk.IR_RequestStop)
+        check(sdk.IR_WaitPowerCurrentStable(handle, 1, c.byref(cancel_spec), c.byref(reading), error, len(error)), 8)
+
         check(sdk.IR_SetPowerOutput(handle, 1, 0, c.byref(reading), error, len(error)))
         assert reading.output_enabled == 0 and reading.measured_v == 0.0
         check(sdk.IR_CloseDevice(handle, error, len(error)))

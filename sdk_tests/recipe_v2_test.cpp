@@ -583,6 +583,70 @@ void testGaussianFilterAndFlickerDetectV2()
     CHECK(std::abs(res.at("metrics").at("flick.flicker_ratio_pct").at("value").get<double>() - 6.25) < 1e-12);
 }
 
+void testFft2dPipelineV2()
+{
+    TempDirGuard root("fft2d_v2");
+    const auto fixture = root.path() / "fixture";
+    fs::create_directories(fixture);
+
+    // 4x4, 2 frames: 1000 + round(100 * cos(2*pi*c/4)) -> [1100, 1000, 900, 1000] per row
+    std::vector<uint16_t> frames(32);
+    const double pi = std::acos(-1.0);
+    for (int f = 0; f < 2; ++f) {
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                const double val = 1000.0 + 100.0 * std::cos(2.0 * pi * double(c) / 4.0);
+                frames[size_t(f * 16 + r * 4 + c)] = static_cast<uint16_t>(std::llround(val));
+            }
+        }
+    }
+    {
+        std::ofstream raw(fixture / "frames.raw", std::ios::binary);
+        raw.write(reinterpret_cast<const char *>(frames.data()), std::streamsize(frames.size() * sizeof(uint16_t)));
+    }
+    {
+        std::ofstream csv(fixture / "frames.csv", std::ios::binary);
+        csv << "frame_index,width,height,stride_bytes,pixel_format,bit_depth,endianness\n";
+        for (int i = 0; i < 2; ++i)
+            csv << i << ",4,4,8,RAW16_LE,16,little\n";
+    }
+
+    const Json recipe = {
+        {"schema_version", 2},
+        {"recipe_id", "v2-fft2d"},
+        {"steps", Json::array({
+            {{"id", "cap"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}, {"output", "b"}},
+            {{"id", "stats"}, {"type", "analyze"}, {"method", "frame_stats"}, {"input", "b"},
+             {"outputs", {{"mean_map", "m"}}}},
+            {{"id", "fft"}, {"type", "analyze"}, {"method", "fft2d"},
+             {"inputs", {{"map", "m"}}},
+             {"params", {{"window", "rect"}, {"detrend_mean", true}, {"shift_dc_center", true}}},
+             {"outputs", {{"magnitude_map", "mag"}}}},
+            {{"id", "mag_sum"}, {"type", "analyze"}, {"method", "map_summary"},
+             {"inputs", {{"map", "mag"}}}}
+        })},
+        {"limits", Json::array({
+            {{"metric", "fft.peak_ac_magnitude"}, {"operator", "min"}, {"value", 49.0}, {"unit", "DN"}},
+            {{"metric", "mag_sum.max"}, {"operator", "max"}, {"value", 51.0}, {"unit", "DN"}}
+        })}
+    };
+
+    const std::string stJson = makeStation(fixture).dump();
+    const std::string rJson = recipe.dump();
+    char err[1024]{};
+    CHECK(IR_CheckRecipeJson(stJson.c_str(), rJson.c_str(), err, sizeof err) == IR_OK);
+
+    const auto outDir = root.path() / "out_fft2d";
+    IRRecipeResult rr{};
+    CHECK(IR_RunRecipeJson(stJson.c_str(), rJson.c_str(), utf8(outDir).c_str(), &rr, err, sizeof err) == IR_OK);
+    CHECK(countRawFiles(outDir) == 0);
+    const auto res = Json::parse(readText(outDir / "result.json"));
+    CHECK(res.at("run_status") == "PASS");
+    CHECK(std::abs(res.at("metrics").at("fft.dc_magnitude").at("value").get<double>()) < 1e-9);
+    CHECK(std::abs(res.at("metrics").at("fft.peak_ac_magnitude").at("value").get<double>() - 50.0) < 1e-9);
+    CHECK(std::abs(res.at("metrics").at("mag_sum.max").at("value").get<double>() - 50.0) < 1e-9);
+}
+
 } // namespace
 
 int main()
@@ -593,6 +657,7 @@ int main()
     testRepeatBurstCancelPreservesFlushedCsv();
     testPreflightRejections();
     testGaussianFilterAndFlickerDetectV2();
+    testFft2dPipelineV2();
     if (gFailures == 0)
         std::cout << "recipe_v2_test: ALL PASSED\n";
     return gFailures == 0 ? 0 : 1;

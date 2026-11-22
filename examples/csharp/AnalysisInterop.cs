@@ -349,6 +349,22 @@ internal static class IRAnalysis
         public int FlickerCount;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct Fft2dSummary
+    {
+        public double DcMagnitude;
+        public double PeakAcMagnitude;
+        public double TotalAcPower;
+        public double LowFreqPowerRatio;
+        public double HighFreqPowerRatio;
+        public int PeakAcRow;
+        public int PeakAcCol;
+        public int Rows;
+        public int Cols;
+        public int ValidPixelCount;
+        public int Reserved;
+    }
+
     internal static void VerifyAbiSizes()
     {
         if (Marshal.SizeOf<CalcParameters>() != 80 ||
@@ -365,6 +381,7 @@ internal static class IRAnalysis
             Marshal.SizeOf<GjbDriftContext>() != 64 ||
             Marshal.SizeOf<GjbBurstMetrics>() != 168 ||
             Marshal.SizeOf<FlickerSummary>() != 48 ||
+            Marshal.SizeOf<Fft2dSummary>() != 64 ||
             (IntPtr.Size == 8 && (
                 Marshal.SizeOf<GbBadPixelMasks>() != 64 ||
                 Marshal.SizeOf<GjbBadPixelMasks>() != 64 ||
@@ -511,5 +528,12 @@ internal static class IRAnalysis
         double stdDevMultiplier, int exceedCountThreshold,
         out FlickerSummary summary, int[]? outExceedCountMap, byte[]? outFlickerMask, long pixelCapacity,
         double[]? outFrameMeans, double[]? outFrameSigmas, int frameStatsCapacity,
+        byte[] error, int errorBytes);
+
+    [DllImport("IR_analysis", EntryPoint = "IR_Fft2dMagnitudeF64", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int Fft2dMagnitudeF64(
+        double[] inMap, byte[]? validMask, int rows, int cols, long pixelCapacity,
+        int windowKind, int detrendMean, int shiftDcCenter,
+        out Fft2dSummary summary, double[]? outMagnitudeMap, double[]? outPowerMap,
         byte[] error, int errorBytes);
 }

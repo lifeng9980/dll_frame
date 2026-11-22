@@ -815,6 +815,44 @@ IR_ANALYSIS_API int32_t IR_FlickerDetectU16(
     int32_t frame_stats_capacity,
     char *err,
     int32_t err_bytes);
+/* ======================== 二维 FFT / 空域频谱 ======================== */
+
+typedef struct IRFft2dSummary
+{
+    double dc_magnitude;            /* 零频幅度 |X[0,0]| / (rows * cols) */
+    double peak_ac_magnitude;       /* 非零频最大归一化幅度 */
+    double total_ac_power;          /* 所有非零频归一化功率和 sum(|X[u,v]|^2) / (rows * cols)^2 */
+    double low_freq_power_ratio;    /* 归一化径向频率 <= 0.25 的 AC 功率占比 [0, 1] */
+    double high_freq_power_ratio;   /* 归一化径向频率 > 0.25 的 AC 功率占比 [0, 1] */
+    int32_t peak_ac_row;            /* 非零频峰值行索引（按输出坐标系） */
+    int32_t peak_ac_col;            /* 非零频峰值列索引（按输出坐标系） */
+    int32_t rows;
+    int32_t cols;
+    int32_t valid_pixel_count;
+    int32_t reserved;
+} IRFft2dSummary;
+
+/* 纯 C++ 任意尺寸二维离散傅里叶幅度/功率谱（支持任意 rows >= 1、cols >= 1）：
+ * 若提供 valid_mask，则无效或非有限像元按有效像元均值填充（配合 detrend_mean=1 等价填零）；
+ * window_kind 支持 IR_WINDOW_RECTANGULAR（可分离二维矩形）与 IR_WINDOW_HANN（可分离二维 Hann，长度=1 时权重=1）；
+ * shift_dc_center != 0 时按 (rows/2, cols/2) 中心平移输出谱图及峰值索引；
+ * summary 必填，out_magnitude_map 与 out_power_map 均可为 NULL。
+ */
+IR_ANALYSIS_API int32_t IR_Fft2dMagnitudeF64(
+    const double *in_map,
+    const uint8_t *valid_mask,
+    int32_t rows,
+    int32_t cols,
+    int64_t pixel_capacity,
+    int32_t window_kind,
+    int32_t detrend_mean,
+    int32_t shift_dc_center,
+    IRFft2dSummary *summary,
+    double *out_magnitude_map,
+    double *out_power_map,
+    char *err,
+    int32_t err_bytes);
+
 #ifdef __cplusplus
 }
 #endif

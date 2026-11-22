@@ -2,7 +2,8 @@
 param(
     [string]$WorkRoot = "",
     [switch]$RequireClean,
-    [string]$PythonExe = ""
+    [string]$PythonExe = "",
+    [switch]$RunCom0ComHil
 )
 
 Set-StrictMode -Version Latest
@@ -292,7 +293,8 @@ foreach ($sym in @(
     "IR_SetDetectorGpol",
     "IR_SetDetectorRegister",
     "IR_MeasureDetectorCurrent",
-    "IR_ReadCooler"
+    "IR_ReadCooler",
+    "IR_WaitPowerCurrentStable"
 )) {
     Assert-True ($stationExports -match "\b$sym\b") "IR_station.dll must export $sym"
 }
@@ -318,7 +320,8 @@ foreach ($sym in @(
     "IR_ComputeRfft1D",
     "IR_ChannelSpectrumU16",
     "IR_GjbEvaluateBurstMetrics",
-    "IR_FlickerDetectU16"
+    "IR_FlickerDetectU16",
+    "IR_Fft2dMagnitudeF64"
 )) {
     Assert-True ($analysisExports -match "\b$sym\b") "IR_analysis.dll must export $sym"
 }
@@ -429,6 +432,7 @@ Assert-True ($analysisCRes.StdOut -match "(?m)^lrnu_ok=1\r?$") "ir_analysis_c_sa
 Assert-True ($analysisCRes.StdOut -match "(?m)^fft_ok=1\r?$") "ir_analysis_c_sample missing fft_ok=1"
 Assert-True ($analysisCRes.StdOut -match "(?m)^gaussian_ok=1\r?$") "ir_analysis_c_sample missing gaussian_ok=1"
 Assert-True ($analysisCRes.StdOut -match "(?m)^flicker_ok=1\r?$") "ir_analysis_c_sample missing flicker_ok=1"
+Assert-True ($analysisCRes.StdOut -match "(?m)^fft2d_ok=1\r?$") "ir_analysis_c_sample missing fft2d_ok=1"
 $standaloneCliCheck = Invoke-External -FilePath (Join-Path $ClientBuildDir "ir_run_recipe.exe") `
     -Arguments @("--check", "--station", (Join-Path $PkgRoot "examples\stations\offline.json"),
                  "--recipe", (Join-Path $PkgRoot "examples\recipes\noise_roi.json"),
@@ -558,6 +562,7 @@ Assert-True ($pyAnalysisRes.StdOut -match "(?m)^lrnu_ok=1\r?$") "ir_analysis.py 
 Assert-True ($pyAnalysisRes.StdOut -match "(?m)^fft_ok=1\r?$") "ir_analysis.py missing fft_ok=1"
 Assert-True ($pyAnalysisRes.StdOut -match "(?m)^gaussian_ok=1\r?$") "ir_analysis.py missing gaussian_ok=1"
 Assert-True ($pyAnalysisRes.StdOut -match "(?m)^flicker_ok=1\r?$") "ir_analysis.py missing flicker_ok=1"
+Assert-True ($pyAnalysisRes.StdOut -match "(?m)^fft2d_ok=1\r?$") "ir_analysis.py missing fft2d_ok=1"
 $PyDriftOut = Join-Path $WorkRoot "py-drift-out"
 $pyDriftRes = Invoke-External -FilePath $pythonPath `
     -Arguments @("-B", (Join-Path $PkgRoot "examples\python\ir_drift_nodisk.py"),
@@ -829,6 +834,9 @@ good_recipes_v2_extra = [
         "schema_version": 2,
         "recipe_id": "v2-instruments-schema-check",
         "steps": [
+            {"id": "pw1", "type": "power_set", "device": "pw", "channel": 1, "voltage_v": 12.0, "current_limit_a": 2.0},
+            {"id": "pw2", "type": "power_output", "device": "pw", "channel": 1, "enabled": True, "off_after_run": True},
+            {"id": "pws", "type": "power_wait_stable", "device": "pw", "channel": 1, "expected_voltage_v": 12.0, "voltage_tolerance_v": 0.2, "max_current_a": 2.02, "startup_threshold_a": 0.3, "startup_required_samples": 3, "startup_timeout_ms": 5000, "stable_threshold_a": 0.3, "max_variation_a": 0.02, "stable_required_samples": 3, "sample_interval_ms": 10, "timeout_ms": 10000},
             {"id": "ov1", "type": "oven_stabilize", "device": "ov", "target_c": 25.0, "tolerance_c": 0.5, "stable_window_ms": 100, "timeout_ms": 5000, "require_no_alarm": True, "standby_after_run": True},
             {"id": "dt1", "type": "detector_timing", "device": "dt", "integration_us": 1000, "frame_hz": 50, "empty_us": 200},
             {"id": "dg1", "type": "detector_gpol", "device": "dt", "gpol_v": 2.5},
@@ -837,6 +845,8 @@ good_recipes_v2_extra = [
             {"id": "dm1", "type": "dmm_read", "device": "dm", "name": "dmm", "mode": "diode", "set_mode": True},
             {"id": "cl1", "type": "cooler_read", "device": "cl", "name": "cooler"},
             {"id": "c1", "type": "capture", "frames": 2, "frame_timeout_ms": 0, "output": "b0"},
+            {"id": "fs1", "type": "analyze", "method": "frame_stats", "input": "b0", "outputs": {"mean_map": "m0"}},
+            {"id": "fft1", "type": "analyze", "method": "fft2d", "input": "m0", "params": {"window": "rect", "detrend_mean": False, "shift_dc_center": True}},
             {"id": "ov2", "type": "oven_standby", "device": "ov"},
         ],
         "safety": {"oven_standby": ["ov"]},
@@ -903,6 +913,15 @@ bad_recipes_v2 = [
     ]},
     {"schema_version": 2, "recipe_id": "bad-curr-gain", "steps": [
         {"id": "dc", "type": "detector_current", "device": "dt", "gain_code": 8, "channel_code": 1}
+    ]},
+    {"schema_version": 2, "recipe_id": "bad-power-wait-zero-thresh", "steps": [
+        {"id": "pws", "type": "power_wait_stable", "device": "supply", "channel": 1, "stable_threshold_a": 0.0}
+    ]},
+    {"schema_version": 2, "recipe_id": "bad-power-wait-zero-timeout", "steps": [
+        {"id": "pws", "type": "power_wait_stable", "device": "supply", "channel": 1, "timeout_ms": 0}
+    ]},
+    {"schema_version": 2, "recipe_id": "bad-analyze-method", "steps": [
+        {"id": "fft", "type": "analyze", "method": "fft3d", "input": "m0"}
     ]},
 ]
 for idx, r in enumerate(bad_recipes_v2):
@@ -988,7 +1007,30 @@ if (-not $dotnetExe) {
     Assert-True ($csAnalysisRes.StdOut -match "(?m)^fft_ok=1\r?$") "C# analysis sample failed fft_ok (got: $($csAnalysisRes.StdOut))"
     Assert-True ($csAnalysisRes.StdOut -match "(?m)^gaussian_ok=1\r?$") "C# analysis sample failed gaussian_ok (got: $($csAnalysisRes.StdOut))"
     Assert-True ($csAnalysisRes.StdOut -match "(?m)^flicker_ok=1\r?$") "C# analysis sample failed flicker_ok (got: $($csAnalysisRes.StdOut))"
+    Assert-True ($csAnalysisRes.StdOut -match "(?m)^fft2d_ok=1\r?$") "C# analysis sample failed fft2d_ok (got: $($csAnalysisRes.StdOut))"
     Write-Host "  C# sample verified (dotnet ${dotnetVer}: raw16, v1 recipe, v2 no-disk recipe, analysis)."
+}
+
+if ($RunCom0ComHil) {
+    Write-Step "14. Running live 6-pair com0com HIL verification"
+    $hilMapPath = Join-Path $ExperimentDir "hil_serial_map.json"
+    Assert-True (Test-Path $hilMapPath) "hil_serial_map.json not found at $hilMapPath"
+    $hilArgs = @(
+        "-B",
+        (Join-Path $RepoRoot "tools\verify_com0com_hil.py"),
+        "--station-lib", $StationDll,
+        "--cli", $PkgCli,
+        "--serial-map", $hilMapPath,
+        "--csharp-project", (Join-Path $PkgRoot "examples\csharp\IRSdkSample.csproj"),
+        "--python-recipe", (Join-Path $PkgRoot "examples\python\ir_recipe.py"),
+        "--work-parent", $WorkRoot
+    )
+    if ($dotnetExe) {
+        $hilArgs += @("--dotnet", $dotnetExe)
+    }
+    $hilRes = Invoke-External -FilePath $pythonPath -Arguments $hilArgs
+    Assert-True ($hilRes.StdOut -match "(?m)^COM0COM_HIL=PASS\r?$") "Live com0com HIL missing COM0COM_HIL=PASS (got: $($hilRes.StdOut))"
+    Write-Host ($hilRes.StdOut.Trim())
 }
 
 Write-Step "ALL WINDOWS VERIFICATION CHECKS PASSED"
