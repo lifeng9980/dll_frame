@@ -121,7 +121,8 @@ enum IRNoiseStep {
     IR_NOISE_STEP_READ_FRAMES = 6,
     IR_NOISE_STEP_STOP_CAPTURE = 7,
     IR_NOISE_STEP_ANALYZE = 8,
-    IR_NOISE_STEP_SAVE = 9
+    IR_NOISE_STEP_SAVE = 9,
+    IR_NOISE_STEP_SET_DETECTOR = 10
 };
 typedef struct IRNoiseResult {
     int32_t completed;
@@ -130,9 +131,8 @@ typedef struct IRNoiseResult {
     int32_t cleanup_status;                 /* 收尾状态，成功为 IR_OK。 */
 } IRNoiseResult;
 /* 在打开源的线程同步运行配方。采集源已打开且未启动，recipe 和 result 由调用方持有。
-   recipe_id 使用 UTF-8，frames >= 2。指定黑体时，先设温并等待稳定，再从当前采集源取帧。
-   温度和温差单位 °C，稳定窗口和等待上限单位 ms，以设温回读成功为起点。通信调用结束后检查超时和取消。
-   detector 现阶段填 0。
+   recipe_id 使用 UTF-8，frames >= 2。指定黑体时，先设温并等待稳定；指定探测器串口句柄（detector != 0）时，
+   再下发 integration_us/frame_hz/empty_us 时序配置，然后从当前采集源取帧。离线或无需控温/控时序时对应句柄填 0。
    结果为完成帧数、平均 DN 和样本时域噪声 DN。
    目录传 NULL 时只计算。传 UTF-8 路径时须是同级父目录下尚未存在的新目录。
    流程运行期间占用配方指定的仪器，其他线程对这些设备的操作返回 IR_BUSY。

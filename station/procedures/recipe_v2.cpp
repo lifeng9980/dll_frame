@@ -77,6 +77,36 @@ void registerBatchSlot(const std::string &slot, std::map<std::string, SlotKind> 
     }
 }
 
+void requireDeviceKind(const StationConfig &station, const std::string &alias, int expectedKind,
+                       const std::string &path, const char *label)
+{
+    const auto it = station.devices.find(alias);
+    require(it != station.devices.end() && it->second.kind == expectedKind,
+            IR_BAD_ARGUMENT, path + ".device must name a configured " + label);
+}
+
+const char *dmmModeName(int32_t mode)
+{
+    switch (mode) {
+    case IR_DMM_MODE_DCV: return "dcv";
+    case IR_DMM_MODE_DCI: return "dci";
+    case IR_DMM_MODE_RES: return "res";
+    case IR_DMM_MODE_DIODE: return "diode";
+    default: return "any";
+    }
+}
+
+const char *ovenModeName(int32_t mode)
+{
+    switch (mode) {
+    case IR_OVEN_MODE_STANDBY: return "STANDBY";
+    case IR_OVEN_MODE_CONSTANT: return "CONSTANT";
+    case IR_OVEN_MODE_PROGRAM: return "PROGRAM";
+    case IR_OVEN_MODE_OTHER: return "OTHER";
+    default: return "UNKNOWN";
+    }
+}
+
 template <class VariantType>
 VariantType parseSharedControlOrCaptureOrFlushOrAnalyze(
     StepRef ref, const std::string &type, const Json &fields, const std::string &path,
@@ -94,6 +124,81 @@ VariantType parseSharedControlOrCaptureOrFlushOrAnalyze(
         auto step = parsePowerStep(std::move(ref), type, fields, path, station);
         usedDevices.insert(step.device);
         return step;
+    }
+    if (type == "oven_stabilize") {
+        allowFields(fields, {"id", "type", "device", "target_c", "tolerance_c",
+                             "stable_window_ms", "timeout_ms", "require_no_alarm", "standby_after_run"}, path);
+        const auto alias = stringField(fields, "device", path);
+        requireDeviceKind(station, alias, IR_OVEN_GWS_STEN, path, "gws-sten oven");
+        const OvenTarget target{
+            numberField(fields, "target_c", path),
+            numberField(fields, "tolerance_c", path),
+            integerField(fields, "stable_window_ms", 0, 3600000, path),
+            integerField(fields, "timeout_ms", 1, 86400000, path),
+            optionalBoolean(fields, "require_no_alarm", true, path)
+        };
+        require(target.toleranceC > 0.0 && target.timeoutMs >= target.stableWindowMs &&
+                target.temperatureC >= -100.0 && target.temperatureC <= 250.0,
+                IR_BAD_ARGUMENT, path + " has invalid oven temperature or stability limits");
+        const bool standbyAfter = optionalBoolean(fields, "standby_after_run", false, path);
+        usedDevices.insert(alias);
+        return OvenStabilizeStep{std::move(ref), alias, target, standbyAfter};
+    }
+    if (type == "oven_standby") {
+        allowFields(fields, {"id", "type", "device"}, path);
+        const auto alias = stringField(fields, "device", path);
+        requireDeviceKind(station, alias, IR_OVEN_GWS_STEN, path, "gws-sten oven");
+        usedDevices.insert(alias);
+        return OvenStandbyStep{std::move(ref), alias};
+    }
+    if (type == "dmm_read") {
+        allowFields(fields, {"id", "type", "device", "name", "mode", "set_mode"}, path);
+        const auto alias = stringField(fields, "device", path);
+        requireDeviceKind(station, alias, IR_DMM6500, path, "dmm6500");
+        const std::string stepName = fields.contains("name") ? stringField(fields, "name", path) : ref.id;
+        const std::string modeText = optionalString(fields, "mode", "any", path);
+        const bool setMode = optionalBoolean(fields, "set_mode", false, path);
+        int32_t mode = IR_DMM_MODE_ANY;
+        std::string unit = "reading";
+        if (modeText == "any") { mode = IR_DMM_MODE_ANY; unit = "reading"; }
+        else if (modeText == "dcv") { mode = IR_DMM_MODE_DCV; unit = "V"; }
+        else if (modeText == "dci") { mode = IR_DMM_MODE_DCI; unit = "A"; }
+        else if (modeText == "res") { mode = IR_DMM_MODE_RES; unit = "Ohm"; }
+        else if (modeText == "diode") { mode = IR_DMM_MODE_DIODE; unit = "V"; }
+        else throw Error(IR_BAD_ARGUMENT, path + ".mode is unsupported: " + modeText);
+        require(!setMode || mode != IR_DMM_MODE_ANY, IR_BAD_ARGUMENT,
+                path + ".set_mode=true requires mode in {dcv, dci, res, diode}");
+        require(analysisNames.insert(stepName).second, IR_BAD_ARGUMENT,
+                path + ".name is duplicated: " + stepName);
+        const std::string metricKey = stepName + ".value";
+        require(metricUnits.emplace(metricKey, unit).second, IR_BAD_ARGUMENT,
+                path + " produces duplicate metric name: " + metricKey);
+        if (producedMetricsOrder)
+            producedMetricsOrder->push_back(metricKey);
+        usedDevices.insert(alias);
+        return DmmReadStep{std::move(ref), alias, stepName, mode, setMode, std::move(unit)};
+    }
+    if (type == "detector_timing") {
+        allowFields(fields, {"id", "type", "device", "integration_us", "frame_hz", "empty_us"}, path);
+        const auto alias = stringField(fields, "device", path);
+        requireDeviceKind(station, alias, IR_DETECTOR_SERIAL, path, "detector-serial");
+        const int32_t intUs = integerField(fields, "integration_us", 1, 1000000, path);
+        const int32_t hz = integerField(fields, "frame_hz", 1, 1000000, path);
+        const int32_t emptyUs = optionalInteger(fields, "empty_us", 0, 0, 0xFFFFFF, path);
+        require(intUs <= 1000000 / hz, IR_BAD_ARGUMENT,
+                path + ": integration_us exceeds frame period (1e6 / frame_hz)");
+        usedDevices.insert(alias);
+        return DetectorTimingStep{std::move(ref), alias, intUs, hz, emptyUs};
+    }
+    if (type == "detector_gpol") {
+        allowFields(fields, {"id", "type", "device", "gpol_v"}, path);
+        const auto alias = stringField(fields, "device", path);
+        requireDeviceKind(station, alias, IR_DETECTOR_SERIAL, path, "detector-serial");
+        const double gpol = numberField(fields, "gpol_v", path);
+        require(std::isfinite(gpol) && gpol >= 0.0 && gpol <= 5.0, IR_BAD_ARGUMENT,
+                path + ".gpol_v must be within [0.0, 5.0]");
+        usedDevices.insert(alias);
+        return DetectorGpolStep{std::move(ref), alias, gpol};
     }
     if (type == "flush_frames") {
         allowFields(fields, {"id", "type", "discard_frames", "timeout_ms"}, path);
@@ -227,6 +332,108 @@ void runControlPower(IRHandle handle, const PowerStep &step, V2Readbacks &readba
         {"device", step.device},
         {"operation", action},
         {"reading", powerJson(reading, step.channel)}
+    });
+}
+
+void runControlOvenStabilize(const ir::acquisition::Capture &capture, IRHandle handle,
+                             const OvenStabilizeStep &step, V2Readbacks &readbacks,
+                             std::vector<std::string> &ovensToStandby)
+{
+    if (step.standbyAfterRun &&
+        std::find(ovensToStandby.begin(), ovensToStandby.end(), step.device) == ovensToStandby.end()) {
+        ovensToStandby.push_back(step.device);
+    }
+    char error[1024]{};
+    double setpoint{};
+    checkStatus(IR_SetOven(handle, step.target.temperatureC, &setpoint, error, sizeof error), error);
+    const auto reading = waitForOven(capture, handle, step.target);
+    readbacks.conditions.push_back({
+        {"step", step.ref.id},
+        {"device", step.device},
+        {"kind", "oven"},
+        {"target_c", step.target.temperatureC},
+        {"setpoint_readback_c", setpoint},
+        {"actual_c", reading.actual_c},
+        {"mode", ovenModeName(reading.mode)},
+        {"alarm_active", reading.alarm_active != 0},
+        {"tolerance_c", step.target.toleranceC},
+        {"stable_window_ms", step.target.stableWindowMs},
+        {"timeout_ms", step.target.timeoutMs}
+    });
+}
+
+void runControlOvenStandby(IRHandle handle, const OvenStandbyStep &step, V2Readbacks &readbacks)
+{
+    char error[1024]{};
+    checkStatus(IR_StopOven(handle, error, sizeof error), error);
+    IROvenReading reading{};
+    checkStatus(IR_ReadOven(handle, &reading, error, sizeof error), error);
+    readbacks.instruments.push_back({
+        {"step", step.ref.id},
+        {"device", step.device},
+        {"operation", "standby"},
+        {"reading", {
+            {"actual_c", reading.actual_c},
+            {"setpoint_c", reading.setpoint_c},
+            {"mode", ovenModeName(reading.mode)},
+            {"alarm_active", reading.alarm_active != 0}
+        }}
+    });
+}
+
+void runControlDmmRead(IRHandle handle, const DmmReadStep &step,
+                       V2Readbacks &readbacks, ExecutionContext &ctx)
+{
+    char error[1024]{};
+    if (step.setMode && step.mode != IR_DMM_MODE_ANY)
+        checkStatus(IR_SetDmmMode(handle, step.mode, error, sizeof error), error);
+    IRDmmReading reading{};
+    checkStatus(IR_ReadDmm(handle, step.mode, &reading, error, sizeof error), error);
+    readbacks.instruments.push_back({
+        {"step", step.ref.id},
+        {"device", step.device},
+        {"operation", "dmm_read"},
+        {"reading", {
+            {"mode", dmmModeName(reading.mode)},
+            {"value", reading.value},
+            {"unit", step.unit},
+            {"valid", reading.valid != 0}
+        }}
+    });
+    const std::string key = step.name + ".value";
+    ctx.scalarValues[key] = reading.value;
+    ctx.metrics[key] = {
+        {"value", reading.value},
+        {"unit", step.unit},
+        {"method", "dmm6500_" + std::string(dmmModeName(reading.mode))},
+        {"version", 1}
+    };
+}
+
+void runControlDetectorTiming(IRHandle handle, const DetectorTimingStep &step, V2Readbacks &readbacks)
+{
+    char error[1024]{};
+    checkStatus(IR_SetDetectorTiming(handle, step.integrationUs, step.frameHz,
+                                     step.emptyUs, error, sizeof error), error);
+    readbacks.conditions.push_back({
+        {"step", step.ref.id},
+        {"device", step.device},
+        {"kind", "detector_timing"},
+        {"integration_us", step.integrationUs},
+        {"frame_hz", step.frameHz},
+        {"empty_us", step.emptyUs}
+    });
+}
+
+void runControlDetectorGpol(IRHandle handle, const DetectorGpolStep &step, V2Readbacks &readbacks)
+{
+    char error[1024]{};
+    checkStatus(IR_SetDetectorGpol(handle, step.gpolV, error, sizeof error), error);
+    readbacks.conditions.push_back({
+        {"step", step.ref.id},
+        {"device", step.device},
+        {"kind", "detector_gpol"},
+        {"gpol_v", step.gpolV}
     });
 }
 
@@ -364,7 +571,7 @@ RecipeConfigV2 parseRecipeV2(const char *text, const StationConfig &station)
 
     if (const auto safetyIt = root.find("safety"); safetyIt != root.end()) {
         require(safetyIt->is_object(), IR_BAD_ARGUMENT, "recipe.safety must be an object");
-        allowFields(*safetyIt, {"blackbody_standby"}, "recipe.safety");
+        allowFields(*safetyIt, {"blackbody_standby", "oven_standby"}, "recipe.safety");
         if (const auto bbIt = safetyIt->find("blackbody_standby"); bbIt != safetyIt->end()) {
             require(bbIt->is_array(), IR_BAD_ARGUMENT, "recipe.safety.blackbody_standby must be an array");
             for (size_t i = 0; i < bbIt->size(); ++i) {
@@ -382,6 +589,19 @@ RecipeConfigV2 parseRecipeV2(const char *text, const StationConfig &station)
                         sPath + ".target_c must be within [-60, 100]");
                 usedDevices.insert(alias);
                 recipe.standbyBlackbodies.push_back({alias, targetC});
+            }
+        }
+        if (const auto ovIt = safetyIt->find("oven_standby"); ovIt != safetyIt->end()) {
+            require(ovIt->is_array(), IR_BAD_ARGUMENT, "recipe.safety.oven_standby must be an array");
+            for (size_t i = 0; i < ovIt->size(); ++i) {
+                const auto &entry = (*ovIt)[i];
+                const auto sPath = "recipe.safety.oven_standby[" + std::to_string(i) + "]";
+                require(entry.is_string(), IR_BAD_ARGUMENT, sPath + " must be a string device alias");
+                const auto alias = entry.get<std::string>();
+                requireDeviceKind(station, alias, IR_OVEN_GWS_STEN, sPath, "gws-sten oven");
+                usedDevices.insert(alias);
+                if (std::find(recipe.standbyOvens.begin(), recipe.standbyOvens.end(), alias) == recipe.standbyOvens.end())
+                    recipe.standbyOvens.push_back(alias);
             }
         }
     }
@@ -428,6 +648,7 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
     std::map<std::string, IRHandle> devices;
     std::optional<ir::instruments::DeviceLease> lease;
     std::vector<const PowerStep *> powerToSwitchOff;
+    std::vector<std::string> ovensToStandby;
     std::exception_ptr failure;
 
     ExecutionContext ctx;
@@ -502,6 +723,31 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
                     progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
                     capture.checkStop();
                     runControlPower(devices.at(s.device), s, readbacks, powerToSwitchOff);
+                    capture.checkStop();
+                } else if constexpr (std::is_same_v<T, OvenStabilizeStep>) {
+                    progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
+                    capture.checkStop();
+                    runControlOvenStabilize(capture, devices.at(s.device), s, readbacks, ovensToStandby);
+                    capture.checkStop();
+                } else if constexpr (std::is_same_v<T, OvenStandbyStep>) {
+                    progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
+                    capture.checkStop();
+                    runControlOvenStandby(devices.at(s.device), s, readbacks);
+                    capture.checkStop();
+                } else if constexpr (std::is_same_v<T, DmmReadStep>) {
+                    progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
+                    capture.checkStop();
+                    runControlDmmRead(devices.at(s.device), s, readbacks, ctx);
+                    capture.checkStop();
+                } else if constexpr (std::is_same_v<T, DetectorTimingStep>) {
+                    progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
+                    capture.checkStop();
+                    runControlDetectorTiming(devices.at(s.device), s, readbacks);
+                    capture.checkStop();
+                } else if constexpr (std::is_same_v<T, DetectorGpolStep>) {
+                    progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
+                    capture.checkStop();
+                    runControlDetectorGpol(devices.at(s.device), s, readbacks);
                     capture.checkStop();
                 } else if constexpr (std::is_same_v<T, FlushStep>) {
                     progress.enter(IR_RECIPE_STAGE_CAPTURE, &s.ref);
@@ -645,6 +891,17 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
                 double readback{};
                 checkStatus(IR_SetBlackbody(devices.at(sb.device), sb.targetC, &readback,
                                             error, sizeof error), error);
+            });
+        }
+        std::vector<std::string> uniqueStandbyOvens = ovensToStandby;
+        for (const auto &ov : recipe.standbyOvens) {
+            if (std::find(uniqueStandbyOvens.begin(), uniqueStandbyOvens.end(), ov) == uniqueStandbyOvens.end())
+                uniqueStandbyOvens.push_back(ov);
+        }
+        for (auto it = uniqueStandbyOvens.rbegin(); it != uniqueStandbyOvens.rend(); ++it) {
+            cleanup.attempt(nullptr, [&] {
+                char error[1024]{};
+                checkStatus(IR_StopOven(devices.at(*it), error, sizeof error), error);
             });
         }
         lease.reset();

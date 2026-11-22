@@ -83,6 +83,23 @@ internal static class IRStation
         public double EstimatedFps;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct OvenReading
+    {
+        public double ActualC;
+        public double SetpointC;
+        public int Mode;
+        public int AlarmActive;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct DmmReading
+    {
+        public double Value;
+        public int Mode;
+        public int Valid;
+    }
+
     [DllImport("IR_station", EntryPoint = "IR_StationVersion", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr StationVersionPtr();
 
@@ -126,6 +143,41 @@ internal static class IRStation
     [DllImport("IR_station", EntryPoint = "IR_ListCaptureDevices", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int ListCaptureDevices(int backend, byte[]? jsonOut, int capacity,
         out int requiredBytes, byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_SetOven", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int SetOven(ulong handle, double targetC, out double readbackC,
+        byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_ReadOven", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ReadOven(ulong handle, out OvenReading reading,
+        byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_StopOven", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int StopOven(ulong handle, byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_WaitOvenStable", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int WaitOvenStable(ulong handle, double targetC, double toleranceC,
+        int stableWindowMs, int timeoutMs, int requireNoAlarm,
+        out OvenReading reading, byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_SetDmmMode", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int SetDmmMode(ulong handle, int mode, byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_ReadDmm", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ReadDmm(ulong handle, int expectedMode,
+        out DmmReading reading, byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_SetDetectorTiming", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int SetDetectorTiming(ulong handle, int integrationUs,
+        int frameHz, int emptyUs, byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_SetDetectorGpol", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int SetDetectorGpol(ulong handle, double gpolV,
+        byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_SetDetectorRegister", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int SetDetectorRegister(ulong handle, byte commandCode,
+        byte[] payload, int payloadBytes, byte[] error, int errorBytes);
 
     [DllImport("IR_station", EntryPoint = "IR_CheckRecipeJson", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int CheckRecipeJson(
@@ -309,6 +361,8 @@ internal static class Program
             if (Marshal.SizeOf<IRStation.NoiseRecipe>() != 80 ||
                 Marshal.SizeOf<IRStation.NoiseResult>() != 32 ||
                 Marshal.SizeOf<IRStation.BlackbodyReading>() != 24 ||
+                Marshal.SizeOf<IRStation.OvenReading>() != 24 ||
+                Marshal.SizeOf<IRStation.DmmReading>() != 16 ||
                 Marshal.SizeOf<IRStation.FrameStamp>() != 40 ||
                 Marshal.SizeOf<IRStation.CaptureStats>() != 64)
                 throw new InvalidOperationException("The C# structures do not match the IR SDK x64 C ABI.");

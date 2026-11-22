@@ -43,7 +43,7 @@ cmake --build build-client --config Release
 
 ## C# P/Invoke
 
-`csharp/IRSdkSample.csproj` 面向 .NET 10。它包含传统 RAW/噪声调用、JSON 流程调用（`RecipeRunner.cs`）以及 `IR_analysis` 核心算法 P/Invoke 声明（`AnalysisInterop.cs`）：
+`csharp/IRSdkSample.csproj` 面向 .NET 10。它包含传统 RAW/噪声调用、JSON 流程调用（`RecipeRunner.cs`）、`IR_analysis` 核心算法 P/Invoke 声明（`AnalysisInterop.cs`），以及 `IRStation.OvenReading`、`IRStation.DmmReading` 与烘箱/万用表/探测器 9 个 C ABI P/Invoke 声明（`Program.cs`）：
 
 ```powershell
 $env:IR_SDK_LIB_DIR = (Resolve-Path '.\windows-x64\bin').Path
@@ -78,5 +78,5 @@ python3 examples/python/ir_analysis.py
 
 ## Schema 校验与算法扩展
 
-- `examples/schemas/station.schema.json`、`examples/schemas/recipe.schema.json` 与 `examples/schemas/recipe.v2.schema.json` 提供 JSON Schema（Draft 2020-12）定义，随包工位与配方模板已通过 `"$schema"` 引用，可在编辑器中直接校验字段。
+- `examples/schemas/station.schema.json`、`examples/schemas/recipe.schema.json` 与 `examples/schemas/recipe.v2.schema.json` 提供 JSON Schema（Draft 2020-12）定义（`1.5.0` 已覆盖 `gws-sten`/`dmm6500`/`detector-serial` 工位及 `oven_stabilize`/`oven_standby`/`dmm_read`/`detector_timing`/`detector_gpol`、`safety.oven_standby` 配方步校验），随包工位与配方模板已通过 `"$schema"` 引用，可在编辑器中直接校验字段；`simulators/ir_sim_devices.py` 同步提供 `oven-*`、`dmm6500-*`、`detector-*` TCP/串口模拟模式。
 - 源码级二次开发时，新增指标放在 `analysis/`，公共 C 函数放在 `include/IR_analysis.h`，小数据预期结果放在 `sdk_tests/`；Schema v1 方法登记在 `station/procedures/recipe_metrics.cpp`，Schema v2 开放算子登记在 `station/procedures/recipe_metrics_v2.cpp`（详细开发与算法接入规范位于 SDK Git 源码仓库的 `docs/` 目录）。

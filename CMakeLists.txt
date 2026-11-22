@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(IRSDK VERSION 1.4.0 LANGUAGES C CXX)
+project(IRSDK VERSION 1.5.0 LANGUAGES C CXX)
 include(CTest)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -78,6 +78,9 @@ target_sources(IR_station PRIVATE
     station/instruments/discovery.cpp
     station/instruments/blackbody/doc058.cpp
     station/instruments/power/it6332a.cpp
+    station/instruments/oven/gws_sten.cpp
+    station/instruments/dmm/dmm6500.cpp
+    station/instruments/detector/detector_serial.cpp
     station/instruments/transport/asio_link.cpp)
 
 # 采集：公共入口按来源创建 FrameSource，实时后端随目标平台编译。
@@ -221,6 +224,11 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/sdk_tests/blackbody_mock_test.py"
             tcp "$<TARGET_FILE:IR_station>" --client "$<TARGET_FILE:noise_recipe>" --fixture-parent "${PROJECT_BINARY_DIR}")
         set_tests_properties(blackbody_tcp PROPERTIES TIMEOUT 60)
+
+        add_test(NAME instruments_mock COMMAND "${Python3_EXECUTABLE}" -B
+            "${PROJECT_SOURCE_DIR}/sdk_tests/instruments_mock_test.py"
+            "$<TARGET_FILE:IR_station>" --fixture-parent "${PROJECT_BINARY_DIR}")
+        set_tests_properties(instruments_mock PROPERTIES TIMEOUT 60)
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             add_test(NAME blackbody_serial COMMAND "${Python3_EXECUTABLE}" -B
                 "${PROJECT_SOURCE_DIR}/sdk_tests/blackbody_mock_test.py"

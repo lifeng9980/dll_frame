@@ -5,7 +5,14 @@
 extern "C" {
 #endif
 
-enum IRDeviceKind { IR_PCN7LT = 2, IR_DCN1000 = 3, IR_IT6332A = 4 };
+enum IRDeviceKind {
+    IR_PCN7LT = 2,
+    IR_DCN1000 = 3,
+    IR_IT6332A = 4,
+    IR_OVEN_GWS_STEN = 5,
+    IR_DMM6500 = 6,
+    IR_DETECTOR_SERIAL = 7
+};
 
 typedef struct IRBlackbodyReading {
     double actual_c;    /* 实际温度，°C */
@@ -77,6 +84,69 @@ IR_STATION_API int32_t IR_ListSerialPorts(char *json_out, int32_t capacity,
  */
 IR_STATION_API int32_t IR_ListCaptureDevices(int32_t backend, char *json_out, int32_t capacity,
     int32_t *required_bytes, char *err, int32_t err_bytes);
+
+/* ======================== 温箱 (GWS STEN) ======================== */
+
+enum IROvenMode {
+    IR_OVEN_MODE_UNKNOWN = 0,
+    IR_OVEN_MODE_STANDBY = 1,
+    IR_OVEN_MODE_CONSTANT = 2,
+    IR_OVEN_MODE_PROGRAM = 3,
+    IR_OVEN_MODE_OTHER = 4
+};
+
+typedef struct IROvenReading {
+    double actual_c;      /* 当前箱体温度，°C */
+    double setpoint_c;    /* 控制器回读设定温度，°C */
+    int32_t mode;         /* IROvenMode */
+    int32_t alarm_active; /* 0=无告警，1=存在告警 */
+} IROvenReading;
+
+/* GWS STEN 烘箱配置 JSON 含 serial port（9600 默认）或 TCP host/tcp_port（二选一），
+ * 可选 address（默认 1）、delimiter（crlf/cr/lf，默认 crlf）、min_setpoint_c（默认 -45）、
+ * max_setpoint_c（默认 70）及 timeout_ms（默认 2000）。
+ */
+IR_STATION_API int32_t IR_SetOven(IRHandle handle, double target_c, double *readback_c,
+    char *err, int32_t err_bytes);
+IR_STATION_API int32_t IR_ReadOven(IRHandle handle, IROvenReading *reading,
+    char *err, int32_t err_bytes);
+IR_STATION_API int32_t IR_StopOven(IRHandle handle, char *err, int32_t err_bytes);
+IR_STATION_API int32_t IR_WaitOvenStable(IRHandle handle, double target_c, double tolerance_c,
+    int32_t stable_window_ms, int32_t timeout_ms, int32_t require_no_alarm,
+    IROvenReading *reading, char *err, int32_t err_bytes);
+
+/* ======================== 万用表 (Keithley DMM6500 SCPI) ======================== */
+
+enum IRDmmMode {
+    IR_DMM_MODE_ANY = 0,
+    IR_DMM_MODE_DCV = 1,
+    IR_DMM_MODE_DCI = 2,
+    IR_DMM_MODE_RES = 3,
+    IR_DMM_MODE_DIODE = 4
+};
+
+typedef struct IRDmmReading {
+    double value;         /* 测量数值（V / A / Ohm，二极管模式为正向压降 V） */
+    int32_t mode;         /* IRDmmMode */
+    int32_t valid;        /* 1=有效 */
+} IRDmmReading;
+
+/* DMM6500 配置 JSON 含 port（默认 115200 baud）或 host/tcp_port（默认 5025）二选一及可选 timeout_ms（默认 2000）。 */
+IR_STATION_API int32_t IR_SetDmmMode(IRHandle handle, int32_t mode, char *err, int32_t err_bytes);
+IR_STATION_API int32_t IR_ReadDmm(IRHandle handle, int32_t expected_mode,
+    IRDmmReading *reading, char *err, int32_t err_bytes);
+
+/* ======================== 探测器串口控制 (CC 帧协议) ======================== */
+
+/* 探测器串口控制配置 JSON 含 port（默认 115200 baud）或 host/tcp_port（默认 2102）二选一，
+ * 可选 timeout_ms（默认 1200）与 inter_command_ms（默认 0）。
+ */
+IR_STATION_API int32_t IR_SetDetectorTiming(IRHandle handle, int32_t integration_us,
+    int32_t frame_hz, int32_t empty_us, char *err, int32_t err_bytes);
+IR_STATION_API int32_t IR_SetDetectorGpol(IRHandle handle, double gpol_v,
+    char *err, int32_t err_bytes);
+IR_STATION_API int32_t IR_SetDetectorRegister(IRHandle handle, uint8_t command_code,
+    const uint8_t *payload, int32_t payload_bytes, char *err, int32_t err_bytes);
 
 #ifdef __cplusplus
 }

@@ -41,6 +41,12 @@
           "items": {
             "$ref": "#/$defs/blackbodyStandbyEntry"
           }
+        },
+        "oven_standby": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmptyIdentifier"
+          }
         }
       }
     },
@@ -241,6 +247,89 @@
         }
       }
     },
+    "ovenStabilizeStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "device",
+        "target_c",
+        "tolerance_c",
+        "stable_window_ms",
+        "timeout_ms"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyIdentifier" },
+        "type": { "const": "oven_stabilize" },
+        "device": { "$ref": "#/$defs/nonEmptyIdentifier" },
+        "target_c": { "type": "number", "minimum": -100.0, "maximum": 250.0 },
+        "tolerance_c": { "type": "number", "exclusiveMinimum": 0.0 },
+        "stable_window_ms": { "type": "integer", "minimum": 0, "maximum": 3600000 },
+        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "require_no_alarm": { "type": "boolean", "default": true },
+        "standby_after_run": { "type": "boolean", "default": false }
+      }
+    },
+    "ovenStandbyStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "device"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyIdentifier" },
+        "type": { "const": "oven_standby" },
+        "device": { "$ref": "#/$defs/nonEmptyIdentifier" }
+      }
+    },
+    "dmmReadStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "device"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyIdentifier" },
+        "type": { "const": "dmm_read" },
+        "device": { "$ref": "#/$defs/nonEmptyIdentifier" },
+        "name": { "$ref": "#/$defs/nonEmptyIdentifier" },
+        "mode": {
+          "type": "string",
+          "enum": ["any", "dcv", "dci", "res", "diode"],
+          "default": "any"
+        },
+        "set_mode": { "type": "boolean", "default": false }
+      },
+      "if": {
+        "properties": { "set_mode": { "const": true } },
+        "required": ["set_mode"]
+      },
+      "then": {
+        "required": ["mode"],
+        "properties": { "mode": { "enum": ["dcv", "dci", "res", "diode"] } }
+      }
+    },
+    "detectorTimingStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "device", "integration_us", "frame_hz"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyIdentifier" },
+        "type": { "const": "detector_timing" },
+        "device": { "$ref": "#/$defs/nonEmptyIdentifier" },
+        "integration_us": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "frame_hz": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "empty_us": { "type": "integer", "minimum": 0, "maximum": 16777215, "default": 0 }
+      }
+    },
+    "detectorGpolStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "device", "gpol_v"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyIdentifier" },
+        "type": { "const": "detector_gpol" },
+        "device": { "$ref": "#/$defs/nonEmptyIdentifier" },
+        "gpol_v": { "type": "number", "minimum": 0.0, "maximum": 5.0 }
+      }
+    },
     "flushFramesStep": {
       "type": "object",
       "additionalProperties": false,
@@ -402,6 +491,21 @@
           "$ref": "#/$defs/powerReadStep"
         },
         {
+          "$ref": "#/$defs/ovenStabilizeStep"
+        },
+        {
+          "$ref": "#/$defs/ovenStandbyStep"
+        },
+        {
+          "$ref": "#/$defs/dmmReadStep"
+        },
+        {
+          "$ref": "#/$defs/detectorTimingStep"
+        },
+        {
+          "$ref": "#/$defs/detectorGpolStep"
+        },
+        {
           "$ref": "#/$defs/flushFramesStep"
         },
         {
@@ -476,6 +580,21 @@
         },
         {
           "$ref": "#/$defs/powerReadStep"
+        },
+        {
+          "$ref": "#/$defs/ovenStabilizeStep"
+        },
+        {
+          "$ref": "#/$defs/ovenStandbyStep"
+        },
+        {
+          "$ref": "#/$defs/dmmReadStep"
+        },
+        {
+          "$ref": "#/$defs/detectorTimingStep"
+        },
+        {
+          "$ref": "#/$defs/detectorGpolStep"
         },
         {
           "$ref": "#/$defs/flushFramesStep"

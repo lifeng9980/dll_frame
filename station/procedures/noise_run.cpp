@@ -53,7 +53,6 @@ extern "C" int32_t IR_RunNoise(const IRNoiseRecipe *recipe, const char *output,
             needed(result, 1, 1);
             require(recipe->recipe_id && *recipe->recipe_id && recipe->frames >= 2 && recipe->frame_timeout_ms >= 0,
                     IR_BAD_ARGUMENT, "Specify recipe ID, at least two frames, and a nonnegative timeout");
-            require(!recipe->detector, IR_UNSUPPORTED, "Detector control is not available in this build");
             std::filesystem::path directory;
             if (output) {
 #ifdef _WIN32
@@ -69,8 +68,10 @@ extern "C" int32_t IR_RunNoise(const IRNoiseRecipe *recipe, const char *output,
             procedures::Measurement measurement;
             auto &capture = measurement.frames();
             capture.checkOwner();
-            const IRHandle requestedDevices[]{recipe->blackbody};
-            ir::instruments::DeviceLease deviceLease(requestedDevices, recipe->blackbody ? 1 : 0);
+            std::vector<IRHandle> requestedDevices;
+            if (recipe->blackbody) requestedDevices.push_back(recipe->blackbody);
+            if (recipe->detector) requestedDevices.push_back(recipe->detector);
+            ir::instruments::DeviceLease deviceLease(requestedDevices.data(), requestedDevices.size());
 
             const auto geometry = capture.source->geometry();
             const auto pixelCount = pixels(geometry.height, geometry.width);
@@ -87,6 +88,13 @@ extern "C" int32_t IR_RunNoise(const IRNoiseRecipe *recipe, const char *output,
                 // 等稳期间尚未启动采集，避免把升温过程中的帧计入本次测量。
                 if (recipe->blackbody) {
                     settleBlackbody(*recipe, capture, step, blackbodySetpointReadback, blackbodyReading);
+                }
+                if (recipe->detector) {
+                    capture.checkStop();
+                    step = IR_NOISE_STEP_SET_DETECTOR;
+                    char detErr[1024]{};
+                    checkStatus(IR_SetDetectorTiming(recipe->detector, recipe->integration_us,
+                        recipe->frame_hz, recipe->empty_us, detErr, sizeof detErr), detErr);
                 }
                 capture.checkStop();
                 step = IR_NOISE_STEP_START_CAPTURE;

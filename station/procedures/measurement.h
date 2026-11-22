@@ -31,5 +31,16 @@ struct BlackbodyTarget {
 IRBlackbodyReading waitForBlackbody(const acquisition::Capture &capture, IRHandle handle,
                                    const BlackbodyTarget &target);
 
+struct OvenTarget {
+    double temperatureC;
+    double toleranceC;
+    int32_t stableWindowMs;
+    int32_t timeoutMs;
+    bool requireNoAlarm;
+};
+
+IROvenReading waitForOven(const acquisition::Capture &capture, IRHandle handle,
+                          const OvenTarget &target);
+
 std::string utcTimestampNow();
 }

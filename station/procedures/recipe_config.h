@@ -150,6 +150,41 @@ struct StandbyBlackbody {
     double targetC{};
 };
 
+struct OvenStabilizeStep {
+    StepRef ref;
+    std::string device;
+    OvenTarget target;
+    bool standbyAfterRun{false};
+};
+
+struct OvenStandbyStep {
+    StepRef ref;
+    std::string device;
+};
+
+struct DmmReadStep {
+    StepRef ref;
+    std::string device;
+    std::string name;
+    int32_t mode{IR_DMM_MODE_ANY};
+    bool setMode{false};
+    std::string unit{"reading"};
+};
+
+struct DetectorTimingStep {
+    StepRef ref;
+    std::string device;
+    int32_t integrationUs{};
+    int32_t frameHz{};
+    int32_t emptyUs{};
+};
+
+struct DetectorGpolStep {
+    StepRef ref;
+    std::string device;
+    double gpolV{};
+};
+
 struct MetricV2Operations {
     std::function<void(IRGeometry)> checkGeometry;
     std::function<void(ExecutionContext &)> execute;
@@ -164,7 +199,9 @@ struct AnalysisStepV2 {
     MetricV2Operations operations;
 };
 
-using InnerStepV2 = std::variant<BlackbodyStep, PowerStep, FlushStep, CaptureStepV2, AnalysisStepV2>;
+using InnerStepV2 = std::variant<
+    BlackbodyStep, PowerStep, OvenStabilizeStep, OvenStandbyStep, DmmReadStep,
+    DetectorTimingStep, DetectorGpolStep, FlushStep, CaptureStepV2, AnalysisStepV2>;
 
 struct RepeatBurstStep {
     StepRef ref;
@@ -176,8 +213,10 @@ struct RepeatBurstStep {
     std::vector<InnerStepV2> steps;
 };
 
-using StepV2 = std::variant<BlackbodyStep, PowerStep, FlushStep, CaptureStepV2,
-                            AnalysisStepV2, SaveRawStepV2, RepeatBurstStep>;
+using StepV2 = std::variant<
+    BlackbodyStep, PowerStep, OvenStabilizeStep, OvenStandbyStep, DmmReadStep,
+    DetectorTimingStep, DetectorGpolStep, FlushStep, CaptureStepV2,
+    AnalysisStepV2, SaveRawStepV2, RepeatBurstStep>;
 
 struct RecipeConfigV2 {
     std::string id;
@@ -185,6 +224,7 @@ struct RecipeConfigV2 {
     std::vector<Limit> limits;
     std::vector<std::string> deviceAliases;
     std::vector<StandbyBlackbody> standbyBlackbodies;
+    std::vector<std::string> standbyOvens;
     Json definition;
     bool hasRepeatBurst{false};
 };

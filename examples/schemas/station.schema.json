@@ -82,6 +82,15 @@
         },
         {
           "$ref": "#/$defs/it6332aDevice"
+        },
+        {
+          "$ref": "#/$defs/gwsStenDevice"
+        },
+        {
+          "$ref": "#/$defs/dmm6500Device"
+        },
+        {
+          "$ref": "#/$defs/detectorSerialDevice"
         }
       ]
     },
@@ -223,6 +232,121 @@
               "default": 1200
             }
           }
+        }
+      }
+    },
+    "gwsStenDevice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "connection"],
+      "properties": {
+        "kind": { "const": "gws-sten" },
+        "connection": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["port"],
+              "properties": {
+                "port": { "type": "string", "minLength": 1 },
+                "baud_rate": { "type": "integer", "minimum": 1200, "maximum": 921600, "default": 9600 },
+                "data_bits": { "type": "integer", "minimum": 5, "maximum": 8, "default": 8 },
+                "parity": { "type": "string", "enum": ["none", "odd", "even"], "default": "none" },
+                "stop_bits": { "type": "integer", "enum": [1, 2], "default": 1 },
+                "address": { "type": "integer", "minimum": 1, "maximum": 255, "default": 1 },
+                "delimiter": { "type": "string", "enum": ["crlf", "cr", "lf"], "default": "crlf" },
+                "min_setpoint_c": { "type": "number", "default": -45.0 },
+                "max_setpoint_c": { "type": "number", "default": 70.0 },
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 60000, "default": 2000 }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["host"],
+              "properties": {
+                "host": { "type": "string", "minLength": 1 },
+                "tcp_port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 5000 },
+                "address": { "type": "integer", "minimum": 1, "maximum": 255, "default": 1 },
+                "delimiter": { "type": "string", "enum": ["crlf", "cr", "lf"], "default": "crlf" },
+                "min_setpoint_c": { "type": "number", "default": -45.0 },
+                "max_setpoint_c": { "type": "number", "default": 70.0 },
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 60000, "default": 2000 }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "dmm6500Device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "connection"],
+      "properties": {
+        "kind": { "const": "dmm6500" },
+        "connection": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["port"],
+              "properties": {
+                "port": { "type": "string", "minLength": 1 },
+                "baud_rate": { "type": "integer", "minimum": 1200, "maximum": 921600, "default": 115200 },
+                "data_bits": { "type": "integer", "minimum": 5, "maximum": 8, "default": 8 },
+                "parity": { "type": "string", "enum": ["none", "odd", "even"], "default": "none" },
+                "stop_bits": { "type": "integer", "enum": [1, 2], "default": 1 },
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 60000, "default": 2000 }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["host"],
+              "properties": {
+                "host": { "type": "string", "minLength": 1 },
+                "tcp_port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 5025 },
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 60000, "default": 2000 }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "detectorSerialDevice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "connection"],
+      "properties": {
+        "kind": { "const": "detector-serial" },
+        "connection": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["port"],
+              "properties": {
+                "port": { "type": "string", "minLength": 1 },
+                "baud_rate": { "type": "integer", "minimum": 1200, "maximum": 921600, "default": 115200 },
+                "data_bits": { "type": "integer", "minimum": 5, "maximum": 8, "default": 8 },
+                "parity": { "type": "string", "enum": ["none", "odd", "even"], "default": "none" },
+                "stop_bits": { "type": "integer", "enum": [1, 2], "default": 1 },
+                "inter_command_ms": { "type": "integer", "minimum": 0, "maximum": 2000, "default": 0 },
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 60000, "default": 1200 }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["host"],
+              "properties": {
+                "host": { "type": "string", "minLength": 1 },
+                "tcp_port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 2102 },
+                "inter_command_ms": { "type": "integer", "minimum": 0, "maximum": 2000, "default": 0 },
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 60000, "default": 1200 }
+              }
+            }
+          ]
         }
       }
     }

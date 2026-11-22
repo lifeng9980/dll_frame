@@ -16,6 +16,9 @@ struct TcpEndpoint {
 struct SerialEndpoint {
     std::string port;
     unsigned baud;
+    unsigned dataBits{8};
+    int parity{0};    // 0=none, 1=odd, 2=even
+    int stopBits{1};  // 1 or 2
 };
 
 // Resolve once with the instrument timeout so endpoint reservation and connect
@@ -23,7 +26,7 @@ struct SerialEndpoint {
 std::vector<std::string> resolveTcpAddresses(const TcpEndpoint &endpoint, Deadline deadline);
 
 // One caller owns a link at a time. A request and all its response fragments
-// share the same deadline. Delimited reads retain bytes for the next read.
+// share the same deadline. Delimited and exact reads retain extra bytes for the next read.
 class AsioLink {
 public:
     AsioLink(const TcpEndpoint &endpoint, Deadline deadline);
@@ -34,6 +37,8 @@ public:
 
     void writeAll(std::string_view bytes, Deadline deadline);
     std::string readDelimited(char delimiter, Deadline deadline);
+    std::string readDelimited(std::string_view delimiter, Deadline deadline);
+    std::string readExact(std::size_t count, Deadline deadline);
     void discardSerialInput();
 
 private:

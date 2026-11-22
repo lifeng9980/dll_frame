@@ -183,6 +183,119 @@ class It6332a:
         return b""
 
 
+class GwsStenOven:
+    def __init__(self, address=1, temperature=25.0, setpoint=25.0, mode="STANDBY", alarm="",
+                 drop_command="", drop_count=0, log_io=False):
+        self.address = address
+        self.temperature = temperature
+        self.setpoint = setpoint
+        self.mode = mode
+        self.alarm = alarm
+        self.drop_command = drop_command
+        self.drop_count = drop_count
+        self.log_io = log_io
+        self.commands = []
+
+    def _matches_drop(self, body_upper):
+        if not self.drop_command or self.drop_count <= 0:
+            return False
+        target = self.drop_command.strip().upper()
+        return target in ("*", "ANY") or body_upper == target or body_upper.startswith(target)
+
+    def handle(self, request):
+        text = request.decode("ascii", errors="replace").strip()
+        prefix = f"{self.address},"
+        if not text.startswith(prefix):
+            return None
+        body = text[len(prefix):].strip()
+        body_upper = body.upper()
+        self.commands.append(body)
+        if self._matches_drop(body_upper):
+            self.drop_count -= 1
+            if self.log_io:
+                print(f"[DROP] cmd={text!r} remaining={self.drop_count}", flush=True)
+            return None
+        if body_upper == "MODE?":
+            return f"{self.mode}\r\n".encode("ascii")
+        if body_upper == "TEMP?":
+            return f"{self.temperature:.2f},{self.setpoint:.2f},0.00,0.00\r\n".encode("ascii")
+        if body_upper == "ALARM?":
+            return (f"{self.alarm}\r\n" if self.alarm else "0\r\n").encode("ascii")
+        if body_upper.startswith("TEMP, S") or body_upper.startswith("TEMP,S"):
+            try:
+                val = float(body.split("S", 1)[1].strip())
+            except ValueError:
+                return b"NA\r\n"
+            self.setpoint = val
+            return b"OK\r\n"
+        if body_upper == "MODE, CONSTANT":
+            self.mode = "CONSTANT"
+            return b"OK\r\n"
+        if body_upper == "MODE, STANDBY":
+            self.mode = "STANDBY"
+            return b"OK\r\n"
+        return b"NA\r\n"
+
+
+class Dmm6500:
+    def __init__(self, mode="VOLT:DC", value=0.612345, idn="KEITHLEY INSTRUMENTS,MODEL DMM6500,IR-SIM,1.0",
+                 lang="SCPI", drop_command="", drop_count=0, log_io=False):
+        self.mode = mode
+        self.value = value
+        self.idn = idn
+        self.lang = lang
+        self.drop_command = drop_command
+        self.drop_count = drop_count
+        self.log_io = log_io
+        self.commands = []
+
+    def _matches_drop(self, upper):
+        if not self.drop_command or self.drop_count <= 0:
+            return False
+        target = self.drop_command.strip().upper()
+        return target in ("*", "ANY") or upper == target or upper.startswith(target + " ")
+
+    def handle(self, request):
+        cmd = request.decode("ascii", errors="replace").strip()
+        upper = cmd.upper()
+        self.commands.append(cmd)
+        if self._matches_drop(upper):
+            self.drop_count -= 1
+            if self.log_io:
+                print(f"[DROP] cmd={cmd!r} remaining={self.drop_count}", flush=True)
+            return None
+        if upper == "*IDN?":
+            return f"{self.idn}\n".encode("ascii")
+        if upper == "*LANG?":
+            return f"{self.lang}\n".encode("ascii")
+        if upper == ":SENS:FUNC?":
+            return f'"{self.mode}"\n'.encode("ascii")
+        if upper.startswith(":SENS:FUNC "):
+            arg = cmd.split(None, 1)[1].strip().strip('"').upper()
+            self.mode = arg
+            return None
+        if upper == ":READ?":
+            return f"{self.value:.9g}\n".encode("ascii")
+        return None
+
+
+class DetectorController:
+    def __init__(self, bad_ack=False, log_io=False):
+        self.bad_ack = bad_ack
+        self.log_io = log_io
+        self.frames = []
+
+    def handle_frame(self, frame):
+        cmd_code = frame[2]
+        payload = frame[3:]
+        self.frames.append((cmd_code, bytes(payload)))
+        if self.log_io:
+            print(f"[DET RX] cmd=0x{cmd_code:02X} payload={payload.hex()}", flush=True)
+        if self.bad_ack:
+            return b"\x55\x00\x01\xEE\xFF"
+        return bytes((0x55, 0x00, 0x01, cmd_code, 0xFF))
+
+
 def send_response(write_fn, response, fragment=False, log_io=False):
     if not response:
         return
@@ -198,8 +311,23 @@ def send_response(write_fn, response, fragment=False, log_io=False):
             time.sleep(0.01)
 
 
-def serve_tcp(host, port, controller, stop, fragment=False, log_io=False):
-    delimiter = b"\r"
+def _consume_detector_buffer(pending, controller, write_fn, fragment=False, log_io=False):
+    while len(pending) >= 3:
+        if pending[0] != 0xCC:
+            pending = pending[1:]
+            continue
+        length = pending[1]
+        total = 3 + length
+        if len(pending) < total:
+            break
+        frame = pending[:total]
+        pending = pending[total:]
+        resp = controller.handle_frame(frame)
+        send_response(write_fn, resp, fragment=fragment, log_io=log_io)
+    return pending
+
+
+def serve_tcp(host, port, controller, stop, delimiter=b"\r", fragment=False, log_io=False):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind((host, port))
@@ -226,16 +354,23 @@ def serve_tcp(host, port, controller, stop, fragment=False, log_io=False):
                         break
                     pending += block
                     disconnected = False
-                    while delimiter in pending:
-                        request, pending = pending.split(delimiter, 1)
-                        if log_io:
-                            print(f"[RX] {request!r}", flush=True)
-                        response = controller.handle(request)
+                    if delimiter is None:
                         try:
-                            send_response(connection.sendall, response, fragment=fragment, log_io=log_io)
+                            pending = _consume_detector_buffer(
+                                pending, controller, connection.sendall, fragment=fragment, log_io=log_io)
                         except (ConnectionResetError, BrokenPipeError, OSError):
                             disconnected = True
-                            break
+                    else:
+                        while delimiter in pending:
+                            request, pending = pending.split(delimiter, 1)
+                            if log_io:
+                                print(f"[RX] {request!r}", flush=True)
+                            response = controller.handle(request)
+                            try:
+                                send_response(connection.sendall, response, fragment=fragment, log_io=log_io)
+                            except (ConnectionResetError, BrokenPipeError, OSError):
+                                disconnected = True
+                                break
                     if disconnected:
                         break
 
@@ -280,12 +415,16 @@ def serve_serial(port, baud, controller, delimiter, stop, fragment=False, log_io
             if not block:
                 continue
             pending += block
-            while delimiter in pending:
-                request, pending = pending.split(delimiter, 1)
-                if log_io:
-                    print(f"[RX] {request!r}", flush=True)
-                response = controller.handle(request)
-                send_response(write_fn, response, fragment=fragment, log_io=log_io)
+            if delimiter is None:
+                pending = _consume_detector_buffer(
+                    pending, controller, write_fn, fragment=fragment, log_io=log_io)
+            else:
+                while delimiter in pending:
+                    request, pending = pending.split(delimiter, 1)
+                    if log_io:
+                        print(f"[RX] {request!r}", flush=True)
+                    response = controller.handle(request)
+                    send_response(write_fn, response, fragment=fragment, log_io=log_io)
     finally:
         if os.name == "nt":
             handle.close()
@@ -319,12 +458,17 @@ def serve_pty(controller, delimiter, baud, stop, fragment=False, log_io=False):
             if not ready:
                 continue
             pending += os.read(master, 4096)
-            while delimiter in pending:
-                request, pending = pending.split(delimiter, 1)
-                if log_io:
-                    print(f"[RX] {request!r}", flush=True)
-                response = controller.handle(request)
-                send_response(lambda data: os.write(master, data), response, fragment=fragment, log_io=log_io)
+            if delimiter is None:
+                pending = _consume_detector_buffer(
+                    pending, controller, lambda data: os.write(master, data),
+                    fragment=fragment, log_io=log_io)
+            else:
+                while delimiter in pending:
+                    request, pending = pending.split(delimiter, 1)
+                    if log_io:
+                        print(f"[RX] {request!r}", flush=True)
+                    response = controller.handle(request)
+                    send_response(lambda data: os.write(master, data), response, fragment=fragment, log_io=log_io)
     finally:
         os.close(master)
         os.close(slave)
@@ -332,14 +476,23 @@ def serve_pty(controller, delimiter, baud, stop, fragment=False, log_io=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("blackbody-tcp", "blackbody-serial", "power-serial",
-                                          "blackbody-pty", "power-pty"))
+    parser.add_argument("mode", choices=(
+        "blackbody-tcp", "blackbody-serial", "power-serial", "blackbody-pty", "power-pty",
+        "oven-tcp", "oven-serial", "oven-pty",
+        "dmm6500-tcp", "dmm6500-serial", "dmm6500-pty",
+        "detector-tcp", "detector-serial", "detector-pty",
+    ))
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=21010, help="TCP port for blackbody-tcp")
+    parser.add_argument("--port", type=int, default=21010, help="TCP port for TCP simulator modes")
     parser.add_argument("--device", help="serial port path or COM name")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--temperature", type=float, default=24.875)
     parser.add_argument("--unstable", action="store_true", help="report the blackbody as not stable")
+    parser.add_argument("--address", type=int, default=1, help="oven station address (1..255)")
+    parser.add_argument("--alarm", default="", help="oven alarm status string")
+    parser.add_argument("--dmm-mode", default="VOLT:DC", help="initial DMM6500 SCPI function")
+    parser.add_argument("--dmm-value", type=float, default=0.612345, help="DMM6500 :READ? value")
+    parser.add_argument("--bad-ack", action="store_true", help="return mismatched detector ACK frames")
     parser.add_argument("--drop-command", default="",
                         help="command name or DOC058 function code whose reply is dropped (e.g. 114, set, VOLT?)")
     parser.add_argument("--drop-count", type=int, default=None,
@@ -369,12 +522,44 @@ def main():
     if args.mode == "blackbody-tcp":
         controller = Blackbody(True, args.temperature, not args.unstable,
                                drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
-        serve_tcp(args.host, args.port, controller, stop, fragment=args.fragment, log_io=args.log_io)
+        serve_tcp(args.host, args.port, controller, stop, delimiter=b"\r",
+                  fragment=args.fragment, log_io=args.log_io)
+        return
+    if args.mode == "oven-tcp":
+        controller = GwsStenOven(args.address, args.temperature, args.temperature, "CONSTANT",
+                                 args.alarm, drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
+        serve_tcp(args.host, args.port, controller, stop, delimiter=b"\r\n",
+                  fragment=args.fragment, log_io=args.log_io)
+        return
+    if args.mode == "dmm6500-tcp":
+        controller = Dmm6500(args.dmm_mode, args.dmm_value,
+                             drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
+        serve_tcp(args.host, args.port, controller, stop, delimiter=b"\n",
+                  fragment=args.fragment, log_io=args.log_io)
+        return
+    if args.mode == "detector-tcp":
+        controller = DetectorController(bad_ack=args.bad_ack, log_io=args.log_io)
+        serve_tcp(args.host, args.port, controller, stop, delimiter=None,
+                  fragment=args.fragment, log_io=args.log_io)
         return
     if args.mode == "blackbody-pty":
         controller = Blackbody(False, args.temperature, not args.unstable,
                                drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
         serve_pty(controller, b"\r", 9600, stop, fragment=args.fragment, log_io=args.log_io)
+        return
+    if args.mode == "oven-pty":
+        controller = GwsStenOven(args.address, args.temperature, args.temperature, "CONSTANT",
+                                 args.alarm, drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
+        serve_pty(controller, b"\r\n", 9600, stop, fragment=args.fragment, log_io=args.log_io)
+        return
+    if args.mode == "dmm6500-pty":
+        controller = Dmm6500(args.dmm_mode, args.dmm_value,
+                             drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
+        serve_pty(controller, b"\n", 115200, stop, fragment=args.fragment, log_io=args.log_io)
+        return
+    if args.mode == "detector-pty":
+        controller = DetectorController(bad_ack=args.bad_ack, log_io=args.log_io)
+        serve_pty(controller, None, 115200, stop, fragment=args.fragment, log_io=args.log_io)
         return
     if args.mode == "power-pty":
         controller = It6332a(drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
@@ -387,6 +572,20 @@ def main():
                                drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
         delimiter = b"\r"
         baud = 9600
+    elif args.mode == "oven-serial":
+        controller = GwsStenOven(args.address, args.temperature, args.temperature, "CONSTANT",
+                                 args.alarm, drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
+        delimiter = b"\r\n"
+        baud = 9600
+    elif args.mode == "dmm6500-serial":
+        controller = Dmm6500(args.dmm_mode, args.dmm_value,
+                             drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
+        delimiter = b"\n"
+        baud = args.baud
+    elif args.mode == "detector-serial":
+        controller = DetectorController(bad_ack=args.bad_ack, log_io=args.log_io)
+        delimiter = None
+        baud = args.baud
     else:
         controller = It6332a(drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
         delimiter = b"\n"

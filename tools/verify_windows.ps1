@@ -281,7 +281,16 @@ foreach ($sym in @(
     "IR_TryReadLatestFrame",
     "IR_GetCaptureStats",
     "IR_ListSerialPorts",
-    "IR_ListCaptureDevices"
+    "IR_ListCaptureDevices",
+    "IR_SetOven",
+    "IR_ReadOven",
+    "IR_StopOven",
+    "IR_WaitOvenStable",
+    "IR_SetDmmMode",
+    "IR_ReadDmm",
+    "IR_SetDetectorTiming",
+    "IR_SetDetectorGpol",
+    "IR_SetDetectorRegister"
 )) {
     Assert-True ($stationExports -match "\b$sym\b") "IR_station.dll must export $sym"
 }
@@ -768,9 +777,59 @@ bad_stations = [
     {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16, "max_batch_bytes": 2**63}},
     {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16, "queue_capacity": 1}},
     {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16, "queue_capacity": 5000}},
+    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
+     "devices": {"ov": {"kind": "gws-sten", "connection": {"host": "127.0.0.1", "port": "COM3"}}}},
+    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
+     "devices": {"dm": {"kind": "dmm6500", "connection": {"host": "127.0.0.1", "port": "COM4"}}}},
+    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
+     "devices": {"dt": {"kind": "detector-serial", "connection": {"host": "127.0.0.1", "port": "COM5"}}}},
+    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
+     "devices": {"ov": {"kind": "gws-sten", "connection": {"host": "127.0.0.1", "delimiter": "tab"}}}},
 ]
 for idx, s in enumerate(bad_stations):
     assert not sv.is_valid(s), f"bad station #{idx} unexpectedly validated"
+
+good_stations_extra = [
+    {
+        "schema_version": 1,
+        "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
+        "devices": {
+            "ov": {"kind": "gws-sten", "connection": {"port": "COM3", "baud_rate": 9600, "data_bits": 8, "parity": "none", "stop_bits": 1, "address": 1, "delimiter": "crlf"}},
+            "dm": {"kind": "dmm6500", "connection": {"port": "COM4", "baud_rate": 115200}},
+            "dt": {"kind": "detector-serial", "connection": {"port": "COM5", "baud_rate": 115200, "inter_command_ms": 5}},
+        },
+    },
+    {
+        "schema_version": 1,
+        "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
+        "devices": {
+            "ov": {"kind": "gws-sten", "connection": {"host": "127.0.0.1", "tcp_port": 5000}},
+            "dm": {"kind": "dmm6500", "connection": {"host": "127.0.0.1", "tcp_port": 5025}},
+            "dt": {"kind": "detector-serial", "connection": {"host": "127.0.0.1", "tcp_port": 2102}},
+        },
+    },
+]
+for idx, s in enumerate(good_stations_extra):
+    sv.validate(s)
+
+good_recipes_v2_extra = [
+    {
+        "schema_version": 2,
+        "recipe_id": "v2-instruments-schema-check",
+        "steps": [
+            {"id": "ov1", "type": "oven_stabilize", "device": "ov", "target_c": 25.0, "tolerance_c": 0.5, "stable_window_ms": 100, "timeout_ms": 5000, "require_no_alarm": True, "standby_after_run": True},
+            {"id": "dt1", "type": "detector_timing", "device": "dt", "integration_us": 1000, "frame_hz": 50, "empty_us": 200},
+            {"id": "dg1", "type": "detector_gpol", "device": "dt", "gpol_v": 2.5},
+            {"id": "dm1", "type": "dmm_read", "device": "dm", "name": "dmm", "mode": "diode", "set_mode": True},
+            {"id": "c1", "type": "capture", "frames": 2, "frame_timeout_ms": 0, "output": "b0"},
+            {"id": "ov2", "type": "oven_standby", "device": "ov"},
+        ],
+        "safety": {"oven_standby": ["ov"]},
+        "limits": [{"metric": "dmm.value", "operator": "max", "value": 0.8, "unit": "V"}],
+    }
+]
+for r in good_recipes_v2_extra:
+    rv2.validate(r)
 
 bad_recipes_v1 = [
     {"schema_version": 1, "recipe_id": "bad", "steps": [
@@ -809,11 +868,23 @@ bad_recipes_v2 = [
         {"id": "p", "type": "power_output", "device": "supply", "channel": 1, "enabled": True},
         {"id": "c", "type": "capture", "frames": 2, "frame_timeout_ms": 0}
     ]},
+    {"schema_version": 2, "recipe_id": "bad-dmm-any-set", "steps": [
+        {"id": "dm", "type": "dmm_read", "device": "dm", "mode": "any", "set_mode": True}
+    ]},
+    {"schema_version": 2, "recipe_id": "bad-gpol-high", "steps": [
+        {"id": "dg", "type": "detector_gpol", "device": "dt", "gpol_v": 5.5}
+    ]},
+    {"schema_version": 2, "recipe_id": "bad-oven-missing-tol", "steps": [
+        {"id": "ov", "type": "oven_stabilize", "device": "ov", "target_c": 25.0, "stable_window_ms": 100, "timeout_ms": 1000}
+    ]},
+    {"schema_version": 2, "recipe_id": "bad-safety-oven", "steps": [
+        {"id": "c", "type": "capture", "frames": 2, "frame_timeout_ms": 0}
+    ], "safety": {"oven_standby": [123]}},
 ]
 for idx, r in enumerate(bad_recipes_v2):
     assert not rv2.is_valid(r), f"bad recipe v2 #{idx} unexpectedly validated"
 
-print(f"mode=Draft202012Validator stations={len(stations)} recipes={len(recipes)} negatives={len(bad_stations)+len(bad_recipes_v1)+len(bad_recipes_v2)}")
+print(f"mode=Draft202012Validator stations={len(stations)+len(good_stations_extra)} recipes={len(recipes)+len(good_recipes_v2_extra)} negatives={len(bad_stations)+len(bad_recipes_v1)+len(bad_recipes_v2)}")
 '@
 $schemaPyPath = Join-Path $TempRecipesDir "check_schemas.py"
 Write-Utf8File $schemaPyPath $schemaCheckPy

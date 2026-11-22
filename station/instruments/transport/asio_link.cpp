@@ -2,6 +2,7 @@
 #include "api_common.h"
 #include <asio/connect.hpp>
 #include <asio/ip/tcp.hpp>
+#include <asio/read.hpp>
 #include <asio/read_until.hpp>
 #include <asio/serial_port.hpp>
 #include <asio/steady_timer.hpp>
@@ -53,7 +54,7 @@ std::vector<std::string> resolveTcpAddresses(const TcpEndpoint &endpoint, Deadli
     asio::io_context io;
     Tcp::resolver resolver(io);
     Tcp::resolver::results_type resolved;
-    withDeadline(io, deadline, "Resolve blackbody host", [&](auto done) {
+    withDeadline(io, deadline, "Resolve instrument host", [&](auto done) {
         resolver.async_resolve(endpoint.host, std::to_string(endpoint.port),
             [&, done](auto error, auto results) {
                 resolved = std::move(results);
@@ -74,7 +75,7 @@ std::vector<std::string> resolveTcpAddresses(const TcpEndpoint &endpoint, Deadli
         if (std::find(addresses.begin(), addresses.end(), value) == addresses.end())
             addresses.push_back(value);
     }
-    require(!addresses.empty(), IR_IO_ERROR, "Blackbody host resolved to no addresses");
+    require(!addresses.empty(), IR_IO_ERROR, "Instrument host resolved to no addresses");
     return addresses;
 }
 
@@ -99,7 +100,7 @@ AsioLink::AsioLink(const TcpEndpoint &endpoint, Deadline deadline)
     addresses.reserve(addressStrings.size());
     for (const auto &address : addressStrings)
         addresses.emplace_back(asio::ip::make_address(address), endpoint.port);
-    withDeadline(state.io, deadline, "Connect to blackbody", [&](auto done) {
+    withDeadline(state.io, deadline, "Connect to instrument", [&](auto done) {
         asio::async_connect(socket, addresses, [done](auto error, const auto &) { done(error); });
     }, [&] {
         asio::error_code ignored;
@@ -113,9 +114,12 @@ AsioLink::AsioLink(const SerialEndpoint &endpoint) : state_(std::make_unique<Sta
     using Options = asio::serial_port_base;
     port.open(endpoint.port);
     port.set_option(Options::baud_rate(endpoint.baud));
-    port.set_option(Options::character_size(8));
-    port.set_option(Options::parity(Options::parity::none));
-    port.set_option(Options::stop_bits(Options::stop_bits::one));
+    port.set_option(Options::character_size(endpoint.dataBits));
+    port.set_option(Options::parity(
+        endpoint.parity == 1 ? Options::parity::odd :
+        endpoint.parity == 2 ? Options::parity::even : Options::parity::none));
+    port.set_option(Options::stop_bits(
+        endpoint.stopBits == 2 ? Options::stop_bits::two : Options::stop_bits::one));
     port.set_option(Options::flow_control(Options::flow_control::none));
 #ifdef _WIN32
     // DOC058 serial uses 8N1 without modem control lines.
@@ -150,6 +154,12 @@ void AsioLink::writeAll(std::string_view bytes, Deadline deadline)
 
 std::string AsioLink::readDelimited(char delimiter, Deadline deadline)
 {
+    return readDelimited(std::string_view(&delimiter, 1), deadline);
+}
+
+std::string AsioLink::readDelimited(std::string_view delimiter, Deadline deadline)
+{
+    require(!delimiter.empty(), IR_BAD_ARGUMENT, "Delimiter must not be empty");
     size_t size = 0;
     std::visit([&](auto &stream) {
         withDeadline(state_->io, deadline, "Instrument reply", [&](auto done) {
@@ -165,6 +175,30 @@ std::string AsioLink::readDelimited(char delimiter, Deadline deadline)
     }, state_->stream);
     auto reply = state_->pending.substr(0, size);
     state_->pending.erase(0, size);
+    return reply;
+}
+
+std::string AsioLink::readExact(std::size_t count, Deadline deadline)
+{
+    require(count <= MaxReplyBytes, IR_BAD_ARGUMENT, "Requested reply exceeds buffer limit");
+    if (count == 0)
+        return {};
+    if (state_->pending.size() < count) {
+        const size_t need = count - state_->pending.size();
+        std::visit([&](auto &stream) {
+            withDeadline(state_->io, deadline, "Instrument binary reply", [&](auto done) {
+                asio::async_read(stream, asio::dynamic_buffer(state_->pending, MaxReplyBytes),
+                    asio::transfer_at_least(need),
+                    [done](auto error, auto) { done(error); });
+            }, [&] {
+                asio::error_code ignored;
+                stream.cancel(ignored);
+            });
+        }, state_->stream);
+    }
+    require(state_->pending.size() >= count, IR_IO_ERROR, "Incomplete binary reply");
+    auto reply = state_->pending.substr(0, count);
+    state_->pending.erase(0, count);
     return reply;
 }
 

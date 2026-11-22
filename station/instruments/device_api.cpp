@@ -1,7 +1,10 @@
 #include "IR_device.h"
 #include "api_common.h"
 #include "station/instruments/blackbody/doc058.h"
+#include "station/instruments/detector/detector_serial.h"
 #include "station/instruments/device_lease.h"
+#include "station/instruments/dmm/dmm6500.h"
+#include "station/instruments/oven/gws_sten.h"
 #include "station/instruments/power/it6332a.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -14,12 +17,19 @@
 #include <set>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace {
 using Json = nlohmann::json;
 using ir::instruments::BlackbodyConfig;
+using ir::instruments::DetectorSerial;
+using ir::instruments::DetectorSerialConfig;
+using ir::instruments::Dmm6500;
+using ir::instruments::Dmm6500Config;
 using ir::instruments::Doc058Blackbody;
+using ir::instruments::GwsStenConfig;
+using ir::instruments::GwsStenOven;
 using namespace ir::api;
 
 struct Session {
@@ -27,6 +37,9 @@ struct Session {
     std::mutex mutex;
     std::unique_ptr<Doc058Blackbody> blackbody;
     std::unique_ptr<ir::instruments::It6332aPower> power;
+    std::unique_ptr<GwsStenOven> oven;
+    std::unique_ptr<Dmm6500> dmm;
+    std::unique_ptr<DetectorSerial> detector;
     std::thread::id workflowOwner;
 };
 std::mutex devicesMutex;
@@ -135,6 +148,103 @@ std::pair<ir::instruments::It6332aConfig, std::vector<std::string>> parsePowerCo
     return {std::move(result), {serialEndpointKey(text(json, "port", true))}};
 }
 
+double floating(const Json &json, const char *key, double fallback)
+{
+    const auto value = json.find(key);
+    if (value == json.end()) return fallback;
+    require(value->is_number(), IR_BAD_ARGUMENT, key);
+    const auto num = value->get<double>();
+    require(std::isfinite(num), IR_BAD_ARGUMENT, key);
+    return num;
+}
+
+int parseParity(const std::string &parityText)
+{
+    std::string lower = parityText;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lower.empty() || lower == "none") return 0;
+    if (lower == "odd") return 1;
+    if (lower == "even") return 2;
+    throw Error(IR_BAD_ARGUMENT, "Invalid serial parity (expected none, odd, or even)");
+}
+
+std::pair<std::variant<ir::transport::TcpEndpoint, ir::transport::SerialEndpoint>, std::vector<std::string>>
+parseTcpOrSerialEndpoint(const Json &json, uint16_t defaultTcpPort, unsigned defaultBaud,
+                         std::chrono::milliseconds resolveTimeout)
+{
+    using namespace ir::transport;
+    const bool hasHost = json.contains("host");
+    const bool hasPort = json.contains("port");
+    require(hasHost != hasPort, IR_BAD_ARGUMENT, "Connection JSON must specify either 'host' or 'port'");
+    if (hasHost) {
+        const auto host = text(json, "host", true);
+        const auto tcpPort = static_cast<uint16_t>(integer(json, "tcp_port", defaultTcpPort, 1, 65535));
+        TcpEndpoint ep{host, tcpPort};
+        ep.resolvedAddresses = resolveTcpAddresses(ep, std::chrono::steady_clock::now() + resolveTimeout);
+        std::vector<std::string> keys;
+        keys.reserve(ep.resolvedAddresses.size());
+        for (const auto &address : ep.resolvedAddresses) {
+            const auto fmt = address.find(':') == std::string::npos ? address : '[' + address + ']';
+            keys.push_back("tcp:" + fmt + ':' + std::to_string(tcpPort));
+        }
+        std::sort(keys.begin(), keys.end());
+        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+        return {std::move(ep), std::move(keys)};
+    }
+    const auto portName = text(json, "port", true);
+    SerialEndpoint sp;
+    sp.port = portName;
+    sp.baud = static_cast<unsigned>(integer(json, "baud_rate", static_cast<int>(defaultBaud), 1200, 921600));
+    sp.dataBits = static_cast<unsigned>(integer(json, "data_bits", 8, 5, 8));
+    sp.parity = parseParity(text(json, "parity", false));
+    sp.stopBits = integer(json, "stop_bits", 1, 1, 2);
+    return {std::move(sp), {serialEndpointKey(portName)}};
+}
+
+std::pair<GwsStenConfig, std::vector<std::string>> parseOvenConfig(const char *config)
+{
+    const auto json = parseConfigJson(config);
+    GwsStenConfig result;
+    result.timeout = std::chrono::milliseconds(integer(json, "timeout_ms", 2000, 1, 60000));
+    result.address = integer(json, "address", 1, 1, 255);
+    result.minSetpointC = floating(json, "min_setpoint_c", -45.0);
+    result.maxSetpointC = floating(json, "max_setpoint_c", 70.0);
+    require(result.minSetpointC <= result.maxSetpointC, IR_BAD_ARGUMENT,
+            "min_setpoint_c must be <= max_setpoint_c");
+    auto delim = text(json, "delimiter", false);
+    std::transform(delim.begin(), delim.end(), delim.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (delim.empty() || delim == "crlf") result.delimiter = "\r\n";
+    else if (delim == "cr") result.delimiter = "\r";
+    else if (delim == "lf") result.delimiter = "\n";
+    else throw Error(IR_BAD_ARGUMENT, "Unsupported oven delimiter (expected crlf, cr, or lf)");
+    auto [ep, keys] = parseTcpOrSerialEndpoint(json, 5000, 9600, result.timeout);
+    result.endpoint = std::move(ep);
+    return {std::move(result), std::move(keys)};
+}
+
+std::pair<Dmm6500Config, std::vector<std::string>> parseDmmConfig(const char *config)
+{
+    const auto json = parseConfigJson(config);
+    Dmm6500Config result;
+    result.timeout = std::chrono::milliseconds(integer(json, "timeout_ms", 2000, 1, 60000));
+    auto [ep, keys] = parseTcpOrSerialEndpoint(json, 5025, 115200, result.timeout);
+    result.endpoint = std::move(ep);
+    return {std::move(result), std::move(keys)};
+}
+
+std::pair<DetectorSerialConfig, std::vector<std::string>> parseDetectorConfig(const char *config)
+{
+    const auto json = parseConfigJson(config);
+    DetectorSerialConfig result;
+    result.timeout = std::chrono::milliseconds(integer(json, "timeout_ms", 1200, 1, 60000));
+    result.interCommandDelay = std::chrono::milliseconds(integer(json, "inter_command_ms", 0, 0, 2000));
+    auto [ep, keys] = parseTcpOrSerialEndpoint(json, 2102, 115200, result.timeout);
+    result.endpoint = std::move(ep);
+    return {std::move(result), std::move(keys)};
+}
+
 auto findDevice(IRHandle handle)
 {
     const auto pos = devices.find(handle);
@@ -171,6 +281,30 @@ template<class Action> void usePower(IRHandle handle, Action action)
     useSession(handle, [&](Session &device) {
         require(bool(device.power), IR_BAD_ARGUMENT, "Device handle is not an IT6332A power supply");
         action(*device.power);
+    });
+}
+
+template<class Action> void useOven(IRHandle handle, Action action)
+{
+    useSession(handle, [&](Session &device) {
+        require(bool(device.oven), IR_BAD_ARGUMENT, "Device handle is not a GWS STEN oven");
+        action(*device.oven);
+    });
+}
+
+template<class Action> void useDmm(IRHandle handle, Action action)
+{
+    useSession(handle, [&](Session &device) {
+        require(bool(device.dmm), IR_BAD_ARGUMENT, "Device handle is not a DMM6500 multimeter");
+        action(*device.dmm);
+    });
+}
+
+template<class Action> void useDetector(IRHandle handle, Action action)
+{
+    useSession(handle, [&](Session &device) {
+        require(bool(device.detector), IR_BAD_ARGUMENT, "Device handle is not a serial detector controller");
+        action(*device.detector);
     });
 }
 }
@@ -228,14 +362,30 @@ extern "C" int32_t IR_OpenDevice(int32_t kind, const char *config, IRHandle *out
     if (out) *out = 0;
     return guarded(err, bytes, [&] {
         needed(out, 1, 1);
-        require(kind == IR_PCN7LT || kind == IR_DCN1000 || kind == IR_IT6332A,
+        require(kind == IR_PCN7LT || kind == IR_DCN1000 || kind == IR_IT6332A ||
+                kind == IR_OVEN_GWS_STEN || kind == IR_DMM6500 || kind == IR_DETECTOR_SERIAL,
                 IR_UNSUPPORTED, "Unsupported instrument kind");
         BlackbodyConfig blackbodyOptions;
         ir::instruments::It6332aConfig powerOptions;
+        GwsStenConfig ovenOptions;
+        Dmm6500Config dmmOptions;
+        DetectorSerialConfig detectorOptions;
         std::vector<std::string> endpointKeys;
         if (kind == IR_IT6332A) {
             auto parsed = parsePowerConfig(config);
             powerOptions = std::move(parsed.first);
+            endpointKeys = std::move(parsed.second);
+        } else if (kind == IR_OVEN_GWS_STEN) {
+            auto parsed = parseOvenConfig(config);
+            ovenOptions = std::move(parsed.first);
+            endpointKeys = std::move(parsed.second);
+        } else if (kind == IR_DMM6500) {
+            auto parsed = parseDmmConfig(config);
+            dmmOptions = std::move(parsed.first);
+            endpointKeys = std::move(parsed.second);
+        } else if (kind == IR_DETECTOR_SERIAL) {
+            auto parsed = parseDetectorConfig(config);
+            detectorOptions = std::move(parsed.first);
             endpointKeys = std::move(parsed.second);
         } else {
             auto parsed = parseBlackbodyConfig(kind, config);
@@ -261,6 +411,12 @@ extern "C" int32_t IR_OpenDevice(int32_t kind, const char *config, IRHandle *out
             device->endpointKeys = endpointKeys;
             if (kind == IR_IT6332A)
                 device->power = std::make_unique<ir::instruments::It6332aPower>(std::move(powerOptions));
+            else if (kind == IR_OVEN_GWS_STEN)
+                device->oven = std::make_unique<GwsStenOven>(std::move(ovenOptions));
+            else if (kind == IR_DMM6500)
+                device->dmm = std::make_unique<Dmm6500>(std::move(dmmOptions));
+            else if (kind == IR_DETECTOR_SERIAL)
+                device->detector = std::make_unique<DetectorSerial>(std::move(detectorOptions));
             else
                 device->blackbody = std::make_unique<Doc058Blackbody>(std::move(blackbodyOptions));
         } catch (...) {
@@ -283,6 +439,9 @@ extern "C" int32_t IR_CloseDevice(IRHandle handle, char *err, int32_t bytes)
         std::shared_ptr<Session> device;
         std::unique_ptr<Doc058Blackbody> closingBlackbody;
         std::unique_ptr<ir::instruments::It6332aPower> closingPower;
+        std::unique_ptr<GwsStenOven> closingOven;
+        std::unique_ptr<Dmm6500> closingDmm;
+        std::unique_ptr<DetectorSerial> closingDetector;
         std::unique_lock<std::mutex> deviceLock;
         std::vector<std::string> endpointKeys;
         {
@@ -296,10 +455,16 @@ extern "C" int32_t IR_CloseDevice(IRHandle handle, char *err, int32_t bytes)
             openingEndpoints.insert(endpointKeys.begin(), endpointKeys.end());
             closingBlackbody = std::move(device->blackbody);
             closingPower = std::move(device->power);
+            closingOven = std::move(device->oven);
+            closingDmm = std::move(device->dmm);
+            closingDetector = std::move(device->detector);
             devices.erase(pos);
         }
         closingBlackbody.reset();
         closingPower.reset();
+        closingOven.reset();
+        closingDmm.reset();
+        closingDetector.reset();
         deviceLock.unlock();
         {
             std::lock_guard registryLock(devicesMutex);
@@ -363,6 +528,74 @@ extern "C" int32_t IR_ReadPower(IRHandle handle, int32_t channel,
             const auto value = power.read(channel);
             *reading = {value.setpointVoltageV, value.currentLimitA, value.measuredVoltageV,
                         value.measuredCurrentA, value.outputEnabled ? 1 : 0};
+        });
+    });
+}
+
+extern "C" int32_t IR_SetOven(IRHandle handle, double target_c, double *readback_c, char *err, int32_t bytes)
+{
+    return guarded(err, bytes, [&] {
+        needed(readback_c, 1, 1);
+        useOven(handle, [&](GwsStenOven &oven) { *readback_c = oven.set(target_c); });
+    });
+}
+
+extern "C" int32_t IR_ReadOven(IRHandle handle, IROvenReading *reading, char *err, int32_t bytes)
+{
+    if (reading) *reading = {};
+    return guarded(err, bytes, [&] {
+        needed(reading, 1, 1);
+        useOven(handle, [&](GwsStenOven &oven) { *reading = oven.read(); });
+    });
+}
+
+extern "C" int32_t IR_StopOven(IRHandle handle, char *err, int32_t bytes)
+{
+    return guarded(err, bytes, [&] {
+        useOven(handle, [&](GwsStenOven &oven) { oven.stop(); });
+    });
+}
+
+extern "C" int32_t IR_SetDmmMode(IRHandle handle, int32_t mode, char *err, int32_t bytes)
+{
+    return guarded(err, bytes, [&] {
+        useDmm(handle, [&](Dmm6500 &dmm) { dmm.setMode(mode); });
+    });
+}
+
+extern "C" int32_t IR_ReadDmm(IRHandle handle, int32_t expected_mode, IRDmmReading *reading, char *err, int32_t bytes)
+{
+    if (reading) *reading = {};
+    return guarded(err, bytes, [&] {
+        needed(reading, 1, 1);
+        useDmm(handle, [&](Dmm6500 &dmm) { *reading = dmm.read(expected_mode); });
+    });
+}
+
+extern "C" int32_t IR_SetDetectorTiming(IRHandle handle, int32_t integration_us,
+    int32_t frame_hz, int32_t empty_us, char *err, int32_t bytes)
+{
+    return guarded(err, bytes, [&] {
+        useDetector(handle, [&](DetectorSerial &det) {
+            det.setTiming(integration_us, frame_hz, empty_us);
+        });
+    });
+}
+
+extern "C" int32_t IR_SetDetectorGpol(IRHandle handle, double gpol_v, char *err, int32_t bytes)
+{
+    return guarded(err, bytes, [&] {
+        useDetector(handle, [&](DetectorSerial &det) { det.setGpol(gpol_v); });
+    });
+}
+
+extern "C" int32_t IR_SetDetectorRegister(IRHandle handle, uint8_t command_code,
+    const uint8_t *payload, int32_t payload_bytes, char *err, int32_t bytes)
+{
+    return guarded(err, bytes, [&] {
+        needed(payload, payload_bytes, 1);
+        useDetector(handle, [&](DetectorSerial &det) {
+            det.setRegister(command_code, payload, payload_bytes);
         });
     });
 }

@@ -49,6 +49,35 @@ IRBlackbodyReading waitForBlackbody(const acquisition::Capture &capture, IRHandl
     }
 }
 
+IROvenReading waitForOven(const acquisition::Capture &capture, IRHandle handle,
+                          const OvenTarget &target)
+{
+    using namespace std::chrono;
+    const auto deadline = steady_clock::now() + milliseconds(target.timeoutMs);
+    std::optional<steady_clock::time_point> stableSince;
+    for (;;) {
+        capture.checkStop();
+        require(steady_clock::now() < deadline, IR_TIMEOUT, "Oven did not stabilize before the deadline");
+        IROvenReading reading{};
+        char detail[1024]{};
+        checkStatus(IR_ReadOven(handle, &reading, detail, sizeof detail), detail);
+        capture.checkStop();
+        const auto now = steady_clock::now();
+        require(now <= deadline, IR_TIMEOUT, "Oven did not stabilize before the deadline");
+        const bool alarmBlocked = target.requireNoAlarm && reading.alarm_active != 0;
+        require(!alarmBlocked, IR_IO_ERROR, "Oven reported an active alarm while stabilizing");
+        const bool inRange = std::abs(reading.actual_c - target.temperatureC) <= target.toleranceC &&
+                             reading.mode == IR_OVEN_MODE_CONSTANT;
+        if (inRange) {
+            if (!stableSince) stableSince = now;
+            if (now - *stableSince >= milliseconds(target.stableWindowMs)) return reading;
+        } else {
+            stableSince.reset();
+        }
+        std::this_thread::sleep_until(std::min(deadline, now + milliseconds(100)));
+    }
+}
+
 std::string utcTimestampNow()
 {
     using namespace std::chrono;
@@ -117,5 +146,27 @@ extern "C" IR_STATION_API int32_t IR_WaitBlackbodyStable(
         const ir::procedures::BlackbodyTarget target{
             target_c, tolerance_c, stable_window_ms, timeout_ms, require_device_stable != 0};
         *reading = ir::procedures::waitForBlackbody(cap, handle, target);
+    });
+}
+
+extern "C" IR_STATION_API int32_t IR_WaitOvenStable(
+    IRHandle handle, double target_c, double tolerance_c,
+    int32_t stable_window_ms, int32_t timeout_ms, int32_t require_no_alarm,
+    IROvenReading *reading, char *err, int32_t err_bytes)
+{
+    if (reading) *reading = IROvenReading{};
+    return ir::api::guarded(err, err_bytes, [&] {
+        ir::api::require(handle != 0, IR_INVALID_HANDLE, "Invalid oven handle");
+        ir::api::needed(reading, 1, 1);
+        ir::api::require(std::isfinite(target_c) && std::isfinite(tolerance_c) &&
+                             tolerance_c > 0.0 && stable_window_ms >= 0 &&
+                             timeout_ms >= 1 && timeout_ms >= stable_window_ms &&
+                             (require_no_alarm == 0 || require_no_alarm == 1),
+                         IR_BAD_ARGUMENT, "Invalid oven stabilization parameters");
+        auto &cap = ir::acquisition::capture();
+        StandaloneStopGuard guard(cap);
+        const ir::procedures::OvenTarget target{
+            target_c, tolerance_c, stable_window_ms, timeout_ms, require_no_alarm != 0};
+        *reading = ir::procedures::waitForOven(cap, handle, target);
     });
 }
