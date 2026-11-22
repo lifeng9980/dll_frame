@@ -1033,31 +1033,42 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
             cleanup.attempt(nullptr, [&] { capture.close(); });
         for (auto it = powerToSwitchOff.rbegin(); it != powerToSwitchOff.rend(); ++it) {
             const auto &step = **it;
+            const auto itDev = devices.find(step.device);
+            if (itDev == devices.end() || !itDev->second)
+                continue;
             cleanup.attempt(&step.ref, [&] {
                 char error[1024]{};
                 IRPowerReading reading{};
-                checkStatus(IR_SetPowerOutput(devices.at(step.device), step.channel, 0, &reading,
+                checkStatus(IR_SetPowerOutput(itDev->second, step.channel, 0, &reading,
                                               error, sizeof error), error);
             });
         }
-        for (const auto &sb : recipe.standbyBlackbodies) {
-            cleanup.attempt(nullptr, [&] {
-                char error[1024]{};
-                double readback{};
-                checkStatus(IR_SetBlackbody(devices.at(sb.device), sb.targetC, &readback,
-                                            error, sizeof error), error);
-            });
-        }
-        std::vector<std::string> uniqueStandbyOvens = ovensToStandby;
-        for (const auto &ov : recipe.standbyOvens) {
-            if (std::find(uniqueStandbyOvens.begin(), uniqueStandbyOvens.end(), ov) == uniqueStandbyOvens.end())
-                uniqueStandbyOvens.push_back(ov);
-        }
-        for (auto it = uniqueStandbyOvens.rbegin(); it != uniqueStandbyOvens.rend(); ++it) {
-            cleanup.attempt(nullptr, [&] {
-                char error[1024]{};
-                checkStatus(IR_StopOven(devices.at(*it), error, sizeof error), error);
-            });
+        if (lease.has_value()) {
+            for (const auto &sb : recipe.standbyBlackbodies) {
+                const auto itDev = devices.find(sb.device);
+                if (itDev == devices.end() || !itDev->second)
+                    continue;
+                cleanup.attempt(nullptr, [&] {
+                    char error[1024]{};
+                    double readback{};
+                    checkStatus(IR_SetBlackbody(itDev->second, sb.targetC, &readback,
+                                                error, sizeof error), error);
+                });
+            }
+            std::vector<std::string> uniqueStandbyOvens = ovensToStandby;
+            for (const auto &ov : recipe.standbyOvens) {
+                if (std::find(uniqueStandbyOvens.begin(), uniqueStandbyOvens.end(), ov) == uniqueStandbyOvens.end())
+                    uniqueStandbyOvens.push_back(ov);
+            }
+            for (auto it = uniqueStandbyOvens.rbegin(); it != uniqueStandbyOvens.rend(); ++it) {
+                const auto itDev = devices.find(*it);
+                if (itDev == devices.end() || !itDev->second)
+                    continue;
+                cleanup.attempt(nullptr, [&] {
+                    char error[1024]{};
+                    checkStatus(IR_StopOven(itDev->second, error, sizeof error), error);
+                });
+            }
         }
         lease.reset();
         for (auto it = devices.rbegin(); it != devices.rend(); ++it) {

@@ -426,6 +426,11 @@ class CoolerModbus:
 def _consume_modbus_buffer(pending, controller, write_fn, fragment=False, log_io=False):
     while len(pending) >= 8:
         frame = pending[:8]
+        crc_calc = modbus_crc16(frame[:6])
+        crc_recv = int.from_bytes(frame[6:8], "little")
+        if crc_calc != crc_recv or frame[0] != controller.slave_address:
+            pending = pending[1:]
+            continue
         pending = pending[8:]
         if log_io:
             print(f"[MODBUS RX] {frame.hex()}", flush=True)
@@ -520,17 +525,19 @@ def open_serial(port, baud, data_bits=8, parity="none", stop_bits=1):
             import serial
         except ImportError as error:
             raise RuntimeError("Windows COM simulation requires optional pyserial; TCP simulation needs no extra package") from error
+        win_port = port if port.startswith("\\\\.\\") else f"\\\\.\\{port}"
         parity_map = {"none": serial.PARITY_NONE, "odd": serial.PARITY_ODD, "even": serial.PARITY_EVEN}
         stop_map = {1: serial.STOPBITS_ONE, 2: serial.STOPBITS_TWO}
         handle = serial.Serial(
-            port,
+            win_port,
             baudrate=baud,
             bytesize=data_bits,
             parity=parity_map.get(parity, serial.PARITY_NONE),
             stopbits=stop_map.get(stop_bits, serial.STOPBITS_ONE),
-            timeout=0.1,
+            timeout=0.05,
             write_timeout=1,
         )
+        handle.reset_input_buffer()
         return handle
 
     import termios
@@ -552,25 +559,46 @@ def open_serial(port, baud, data_bits=8, parity="none", stop_bits=1):
 
 
 def serve_serial(port, baud, controller, delimiter, stop, fragment=False, log_io=False,
-                 stop_bits=1, consume_fn=None):
+                 stop_bits=1, consume_fn=None, dispatch_lock=None):
     handle = open_serial(port, baud, stop_bits=stop_bits)
     print(f"Serial simulator attached to {port} at {baud} baud", flush=True)
     pending = b""
     write_fn = handle.write if os.name == "nt" else (lambda data: os.write(handle, data))
     try:
         while not stop.is_set():
-            if os.name == "nt":
-                block = handle.read(4096)
-            else:
-                ready, _, _ = select.select([handle], [], [], 0.25)
-                block = os.read(handle, 4096) if ready else b""
+            try:
+                if os.name == "nt":
+                    block = handle.read(1)
+                    if block:
+                        waiting = handle.in_waiting
+                        if waiting:
+                            block += handle.read(waiting)
+                else:
+                    ready, _, _ = select.select([handle], [], [], 0.25)
+                    block = os.read(handle, 4096) if ready else b""
+            except OSError:
+                if stop.is_set():
+                    break
+                raise
             if not block:
                 continue
             pending += block
-            pending = _dispatch_buffer(
-                pending, controller, delimiter, write_fn,
-                fragment=fragment, log_io=log_io, consume_fn=consume_fn,
-            )
+            try:
+                if dispatch_lock is not None:
+                    with dispatch_lock:
+                        pending = _dispatch_buffer(
+                            pending, controller, delimiter, write_fn,
+                            fragment=fragment, log_io=log_io, consume_fn=consume_fn,
+                        )
+                else:
+                    pending = _dispatch_buffer(
+                        pending, controller, delimiter, write_fn,
+                        fragment=fragment, log_io=log_io, consume_fn=consume_fn,
+                    )
+            except OSError:
+                if stop.is_set():
+                    break
+                raise
     finally:
         if os.name == "nt":
             handle.close()

@@ -97,7 +97,7 @@ class VirtualStationState:
 
     def snapshot(self):
         with self.lock:
-            regs = self.detector.registers
+            regs = dict(self.detector.registers)
             int_us = int.from_bytes(regs[0x50], "little") if 0x50 in regs and len(regs[0x50]) == 3 else None
             empty_us = int.from_bytes(regs[0x51], "little") if 0x51 in regs and len(regs[0x51]) == 3 else None
             gpol_v = None
@@ -172,12 +172,13 @@ def write_dynamic_raw16(directory, state, frames=2, width=4, height=4):
 
 
 class BoundTcpDevice:
-    def __init__(self, host, port, controller, delimiter, stop, log_io=False, consume_fn=None):
+    def __init__(self, host, port, controller, delimiter, stop, log_io=False, consume_fn=None, lock=None):
         self.controller = controller
         self.delimiter = delimiter
         self.stop = stop
         self.log_io = log_io
         self.consume_fn = consume_fn
+        self.lock = lock
         self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.listener.bind((host, port))
@@ -223,10 +224,17 @@ class BoundTcpDevice:
                     break
                 pending += block
                 try:
-                    pending = _dispatch_buffer(
-                        pending, self.controller, self.delimiter, conn.sendall,
-                        fragment=False, log_io=self.log_io, consume_fn=self.consume_fn,
-                    )
+                    if self.lock is not None:
+                        with self.lock:
+                            pending = _dispatch_buffer(
+                                pending, self.controller, self.delimiter, conn.sendall,
+                                fragment=False, log_io=self.log_io, consume_fn=self.consume_fn,
+                            )
+                    else:
+                        pending = _dispatch_buffer(
+                            pending, self.controller, self.delimiter, conn.sendall,
+                            fragment=False, log_io=self.log_io, consume_fn=self.consume_fn,
+                        )
                 except (ConnectionResetError, BrokenPipeError, OSError):
                     break
 
@@ -293,32 +301,35 @@ def build_station_json(endpoints, raw_source):
                                "expected_head_serial": "HEAD-SIMULATOR", "timeout_ms": 1500},
             }
         else:
-            devices["bb"] = {"kind": "dcn1000", "connection": {"port": ep["port"], "timeout_ms": 1500}}
+            devices["bb"] = {
+                "kind": "dcn1000",
+                "connection": {"port": ep.get("client_port", ep["port"]), "timeout_ms": 1500},
+            }
     if "power" in endpoints:
         ep = endpoints["power"]
         conn = {"host": ep["host"], "tcp_port": ep["tcp_port"], "timeout_ms": 1200} if "tcp_port" in ep \
-            else {"port": ep["port"], "baud_rate": ep.get("baud_rate", 115200), "timeout_ms": 1200}
+            else {"port": ep.get("client_port", ep["port"]), "baud_rate": ep.get("baud_rate", 115200), "timeout_ms": 1200}
         devices["supply"] = {"kind": "it6332a", "connection": conn}
     if "oven" in endpoints:
         ep = endpoints["oven"]
         conn = {"host": ep["host"], "tcp_port": ep["tcp_port"], "address": 1, "delimiter": "crlf", "timeout_ms": 1500} if "tcp_port" in ep \
-            else {"port": ep["port"], "baud_rate": ep.get("baud_rate", 9600), "address": 1, "delimiter": "crlf", "timeout_ms": 1500}
+            else {"port": ep.get("client_port", ep["port"]), "baud_rate": ep.get("baud_rate", 9600), "address": 1, "delimiter": "crlf", "timeout_ms": 1500}
         devices["oven"] = {"kind": "gws-sten", "connection": conn}
     if "dmm" in endpoints:
         ep = endpoints["dmm"]
         conn = {"host": ep["host"], "tcp_port": ep["tcp_port"], "timeout_ms": 1500} if "tcp_port" in ep \
-            else {"port": ep["port"], "baud_rate": ep.get("baud_rate", 115200), "timeout_ms": 1500}
+            else {"port": ep.get("client_port", ep["port"]), "baud_rate": ep.get("baud_rate", 115200), "timeout_ms": 1500}
         devices["dmm"] = {"kind": "dmm6500", "connection": conn}
     if "detector" in endpoints:
         ep = endpoints["detector"]
         conn = {"host": ep["host"], "tcp_port": ep["tcp_port"], "timeout_ms": 1200} if "tcp_port" in ep \
-            else {"port": ep["port"], "baud_rate": ep.get("baud_rate", 115200), "timeout_ms": 1200}
+            else {"port": ep.get("client_port", ep["port"]), "baud_rate": ep.get("baud_rate", 115200), "timeout_ms": 1200}
         devices["det"] = {"kind": "detector-serial", "connection": conn}
     if "cooler" in endpoints:
         ep = endpoints["cooler"]
         conn = {"host": ep["host"], "tcp_port": ep["tcp_port"], "slave_address": 1, "register_address": 31314, "timeout_ms": 1500} if "tcp_port" in ep \
-            else {"port": ep["port"], "baud_rate": ep.get("baud_rate", 9600), "stop_bits": 2,
-                  "slave_address": 1, "register_address": 31314, "timeout_ms": 1500}
+            else {"port": ep.get("client_port", ep["port"]), "baud_rate": ep.get("baud_rate", 9600),
+                  "stop_bits": ep.get("stop_bits", 2), "slave_address": 1, "register_address": 31314, "timeout_ms": 1500}
         devices["cooler"] = {"kind": "cooler-modbus", "connection": conn}
     return {
         "schema_version": 1,
@@ -332,20 +343,40 @@ def build_station_json(endpoints, raw_source):
 
 
 def build_host_blackbody_json(ep):
+    if "tcp_port" in ep:
+        return {
+            "schema_version": 1,
+            "driver": "pcn7lt",
+            "transport": "tcp",
+            "connection": {
+                "host": ep["host"],
+                "port": ep["tcp_port"],
+            },
+            "driver_options": {
+                "head": 0,
+                "expected_head_serial": "HEAD-SIMULATOR",
+            },
+            "safety": {
+                "min_setpoint_c": -60.0,
+                "max_setpoint_c": 100.0,
+                "readback_tolerance_c": 0.01,
+            },
+            "telemetry": {
+                "period_ms": 1000,
+                "stale_ms": 8000,
+                "io_timeout_ms": 3000,
+            },
+        }
     return {
         "schema_version": 1,
-        "driver": "pcn7lt",
-        "transport": "tcp",
+        "driver": "dcn1000",
+        "transport": "serial",
         "connection": {
-            "host": ep["host"],
-            "port": ep["tcp_port"],
+            "port": ep.get("client_port", ep["port"]),
         },
-        "driver_options": {
-            "head": 0,
-            "expected_head_serial": "HEAD-SIMULATOR",
-        },
+        "driver_options": {},
         "safety": {
-            "min_setpoint_c": -60.0,
+            "min_setpoint_c": -5.0,
             "max_setpoint_c": 100.0,
             "readback_tolerance_c": 0.01,
         },
@@ -402,15 +433,24 @@ def main():
         cfg = serial_map.get(name) if args.mode == "serial-map" else None
         if cfg and "port" in cfg:
             port_name = cfg["port"]
+            client_port = cfg.get("client_port")
             baud = int(cfg.get("baud_rate", default_baud))
             stop_bits = int(cfg.get("stop_bits", default_stop))
             if name == "blackbody":
                 controller.tcp = False
-            endpoints[name] = {"port": port_name, "baud_rate": baud, "stop_bits": stop_bits}
+            ep_info = {"port": port_name, "baud_rate": baud, "stop_bits": stop_bits}
+            if client_port:
+                ep_info["client_port"] = client_port
+            endpoints[name] = ep_info
             t = threading.Thread(
                 target=serve_serial,
                 args=(port_name, baud, controller, delimiter, stop),
-                kwargs={"log_io": args.log_io, "stop_bits": stop_bits, "consume_fn": consume_fn},
+                kwargs={
+                    "log_io": args.log_io,
+                    "stop_bits": stop_bits,
+                    "consume_fn": consume_fn,
+                    "dispatch_lock": state.lock,
+                },
                 daemon=True,
             )
             t.start()
@@ -419,7 +459,7 @@ def main():
             tcp_host = (cfg or {}).get("host", args.host)
             tcp_port = int((cfg or {}).get("tcp_port", tcp_default))
             srv = BoundTcpDevice(tcp_host, tcp_port, controller, delimiter, stop,
-                                 log_io=args.log_io, consume_fn=consume_fn)
+                                 log_io=args.log_io, consume_fn=consume_fn, lock=state.lock)
             srv.start()
             tcp_servers.append(srv)
             endpoints[name] = {"host": tcp_host, "tcp_port": srv.port}
@@ -437,7 +477,7 @@ def main():
             json.dumps(build_station_json(endpoints, args.raw_source), ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-    if args.emit_blackbody_config and "blackbody" in endpoints and "tcp_port" in endpoints["blackbody"]:
+    if args.emit_blackbody_config and "blackbody" in endpoints:
         args.emit_blackbody_config.parent.mkdir(parents=True, exist_ok=True)
         args.emit_blackbody_config.write_text(
             json.dumps(build_host_blackbody_json(endpoints["blackbody"]), ensure_ascii=False, indent=2) + "\n",

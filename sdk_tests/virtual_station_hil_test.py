@@ -15,6 +15,9 @@ from tempfile import TemporaryDirectory
 import urllib.request
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "simulators"))
+
+from ir_virtual_station import build_host_blackbody_json, build_station_json  # noqa: E402
 
 IR_PCN7LT = 2
 IR_IT6332A = 4
@@ -115,12 +118,42 @@ def query_doc058_fn116(host: str, port: int) -> str:
         return frame[2:].decode("ascii")
 
 
+def verify_serial_map_config_builders():
+    endpoints = {
+        "blackbody": {"port": "COM21", "client_port": "COM20", "baud_rate": 9600, "stop_bits": 1},
+        "power": {"port": "COM11", "client_port": "COM10", "baud_rate": 115200, "stop_bits": 1},
+        "oven": {"port": "COM13", "client_port": "COM12", "baud_rate": 9600, "stop_bits": 1},
+        "dmm": {"port": "COM15", "client_port": "COM14", "baud_rate": 115200, "stop_bits": 1},
+        "detector": {"port": "COM17", "client_port": "COM16", "baud_rate": 115200, "stop_bits": 1},
+        "cooler": {"port": "COM19", "client_port": "COM18", "baud_rate": 9600, "stop_bits": 2},
+    }
+    st = build_station_json(endpoints, REPO_ROOT / "examples/data/raw16")
+    assert st["devices"]["bb"]["kind"] == "dcn1000"
+    assert st["devices"]["bb"]["connection"]["port"] == "COM20"
+    assert st["devices"]["supply"]["connection"]["port"] == "COM10"
+    assert st["devices"]["oven"]["connection"]["port"] == "COM12"
+    assert st["devices"]["dmm"]["connection"]["port"] == "COM14"
+    assert st["devices"]["det"]["connection"]["port"] == "COM16"
+    assert st["devices"]["cooler"]["connection"]["port"] == "COM18"
+    assert st["devices"]["cooler"]["connection"]["stop_bits"] == 2
+
+    serial_bb = build_host_blackbody_json(endpoints["blackbody"])
+    assert serial_bb["driver"] == "dcn1000" and serial_bb["transport"] == "serial"
+    assert serial_bb["connection"]["port"] == "COM20"
+
+    tcp_bb = build_host_blackbody_json({"host": "127.0.0.1", "tcp_port": 21010})
+    assert tcp_bb["driver"] == "pcn7lt" and tcp_bb["transport"] == "tcp"
+    assert tcp_bb["connection"]["port"] == 21010
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("library", type=Path)
     parser.add_argument("cli", type=Path)
     parser.add_argument("--fixture-parent", type=Path, default=None)
     args = parser.parse_args()
+
+    verify_serial_map_config_builders()
 
     assert c.sizeof(PowerReading) == 40
     assert c.sizeof(DetectorCurrentReading) == 24

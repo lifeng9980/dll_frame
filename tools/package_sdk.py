@@ -10,6 +10,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 from urllib.parse import unquote
 import zipfile
 
@@ -254,7 +255,8 @@ def make_package(source_root, windows_install, linux_install, archive, windows_o
             require_file(linux_install / relative)
 
     archive_name = f"IR-SDK-{version}-Windows" if windows_only else f"IR-SDK-{version}-Windows-Linux"
-    with tempfile.TemporaryDirectory(prefix="IR-SDK-package-", dir=archive.parent) as temporary:
+    temporary = tempfile.mkdtemp(prefix="IR-SDK-package-", dir=archive.parent)
+    try:
         stage = Path(temporary) / archive_name
         stage.mkdir()
 
@@ -309,6 +311,16 @@ def make_package(source_root, windows_install, linux_install, archive, windows_o
                     package.writestr(entry, path.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=6)
                 else:
                     package.write(path, relative)
+    finally:
+        for attempt in range(5):
+            try:
+                shutil.rmtree(temporary)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    shutil.rmtree(temporary, ignore_errors=True)
+                else:
+                    time.sleep(0.2)
 
     digest = file_hash(archive)
     Path(str(archive) + ".sha256").write_text(f"{digest}  {archive.name}\n", encoding="ascii")

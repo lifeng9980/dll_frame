@@ -110,31 +110,36 @@ AsioLink::AsioLink(const TcpEndpoint &endpoint, Deadline deadline)
 
 AsioLink::AsioLink(const SerialEndpoint &endpoint) : state_(std::make_unique<State>(false))
 {
-    auto &port = std::get<asio::serial_port>(state_->stream);
-    using Options = asio::serial_port_base;
-    port.open(endpoint.port);
-    port.set_option(Options::baud_rate(endpoint.baud));
-    port.set_option(Options::character_size(endpoint.dataBits));
-    port.set_option(Options::parity(
-        endpoint.parity == 1 ? Options::parity::odd :
-        endpoint.parity == 2 ? Options::parity::even : Options::parity::none));
-    port.set_option(Options::stop_bits(
-        endpoint.stopBits == 2 ? Options::stop_bits::two : Options::stop_bits::one));
-    port.set_option(Options::flow_control(Options::flow_control::none));
+    try {
+        auto &port = std::get<asio::serial_port>(state_->stream);
+        using Options = asio::serial_port_base;
+        port.open(endpoint.port);
+        port.set_option(Options::baud_rate(endpoint.baud));
+        port.set_option(Options::character_size(endpoint.dataBits));
+        port.set_option(Options::parity(
+            endpoint.parity == 1 ? Options::parity::odd :
+            endpoint.parity == 2 ? Options::parity::even : Options::parity::none));
+        port.set_option(Options::stop_bits(
+            endpoint.stopBits == 2 ? Options::stop_bits::two : Options::stop_bits::one));
+        port.set_option(Options::flow_control(Options::flow_control::none));
 #ifdef _WIN32
-    // DOC058 serial uses 8N1 without modem control lines.
-    DCB settings{};
-    settings.DCBlength = sizeof(settings);
-    const auto handle = port.native_handle();
-    if (!GetCommState(handle, &settings))
-        throw std::system_error(GetLastError(), std::system_category(), "GetCommState");
-    settings.fDtrControl = DTR_CONTROL_DISABLE;
-    settings.fRtsControl = RTS_CONTROL_DISABLE;
-    settings.fOutxDsrFlow = FALSE;
-    settings.fDsrSensitivity = FALSE;
-    if (!SetCommState(handle, &settings))
-        throw std::system_error(GetLastError(), std::system_category(), "SetCommState");
+        // DOC058 serial uses 8N1 without modem control lines.
+        DCB settings{};
+        settings.DCBlength = sizeof(settings);
+        const auto handle = port.native_handle();
+        if (!GetCommState(handle, &settings))
+            throw std::system_error(GetLastError(), std::system_category(), "GetCommState");
+        settings.fDtrControl = DTR_CONTROL_DISABLE;
+        settings.fRtsControl = RTS_CONTROL_DISABLE;
+        settings.fOutxDsrFlow = FALSE;
+        settings.fDsrSensitivity = FALSE;
+        if (!SetCommState(handle, &settings))
+            throw std::system_error(GetLastError(), std::system_category(), "SetCommState");
 #endif
+    } catch (const std::system_error &error) {
+        throw Error(IR_IO_ERROR,
+                    "Cannot open/configure serial port '" + endpoint.port + "': " + error.what());
+    }
 }
 
 AsioLink::~AsioLink() = default;
@@ -207,12 +212,16 @@ void AsioLink::discardSerialInput()
     auto *port = std::get_if<asio::serial_port>(&state_->stream);
     if (!port) return;
     state_->pending.clear();
+    try {
 #ifdef _WIN32
-    if (!PurgeComm(port->native_handle(), PURGE_RXABORT | PURGE_RXCLEAR))
-        throw std::system_error(GetLastError(), std::system_category(), "PurgeComm");
+        if (!PurgeComm(port->native_handle(), PURGE_RXABORT | PURGE_RXCLEAR))
+            throw std::system_error(GetLastError(), std::system_category(), "PurgeComm");
 #else
-    if (tcflush(port->native_handle(), TCIFLUSH) != 0)
-        throw std::system_error(errno, std::generic_category(), "tcflush");
+        if (tcflush(port->native_handle(), TCIFLUSH) != 0)
+            throw std::system_error(errno, std::generic_category(), "tcflush");
 #endif
+    } catch (const std::system_error &error) {
+        throw Error(IR_IO_ERROR, std::string("Serial buffer flush failed: ") + error.what());
+    }
 }
 }

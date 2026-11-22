@@ -36,6 +36,8 @@ IR_CANCELLED = 8
 
 # Device kinds (IR_device.h)
 IR_RAW_REPLAY = 2
+IR_DCN1000 = 3
+IR_IT6332A = 4
 IR_OVEN_GWS_STEN = 5
 IR_DMM6500 = 6
 IR_DETECTOR_SERIAL = 7
@@ -624,6 +626,93 @@ def exercise_recipe_v2(sdk, oven: GwsStenOven, oven_port: int,
     assert oven.mode == "STANDBY"
     assert "MODE, STANDBY" in oven.commands
 
+    # H3: PREPARE/RESERVE failures before device lease must not corrupt cleanup_status
+    missing_raw_station = json.loads(json.dumps(station))
+    missing_raw_station["acquisition"]["source"] = str(work_dir / "nonexistent_raw_source")
+    res_prepare_fail = RecipeResult()
+    err_buf = c.create_string_buffer(1024)
+    st_prepare = sdk.IR_RunRecipeJson(
+        json.dumps(missing_raw_station).encode("utf-8"),
+        pass_bytes,
+        str(work_dir / "v2-prepare-fail-out").encode("utf-8"),
+        c.byref(res_prepare_fail),
+        err_buf,
+        len(err_buf),
+    )
+    assert st_prepare != IR_OK, "Expected missing raw source to fail PREPARE"
+    assert res_prepare_fail.cleanup_status == IR_OK, res_prepare_fail.cleanup_status
+
+    nonexistent_com = "COM250" if os.name == "nt" else "/dev/ir_sdk_nonexistent_tty"
+    partial_reserve_station = {
+        "schema_version": 1,
+        "acquisition": {
+            "backend": "raw_replay",
+            "source": str(fixture_dir),
+            "valid_bits": 16,
+        },
+        "devices": {
+            "oven": {
+                "kind": "gws-sten",
+                "connection": {"host": "127.0.0.1", "tcp_port": oven_port, "timeout_ms": 300},
+            },
+            "dmm": {
+                "kind": "dmm6500",
+                "connection": {"port": nonexistent_com, "timeout_ms": 200},
+            },
+        },
+    }
+    partial_reserve_recipe = {
+        "schema_version": 2,
+        "recipe_id": "partial-reserve-fail",
+        "steps": [
+            {
+                "id": "ov1", "type": "oven_stabilize", "device": "oven",
+                "target_c": 35.0, "tolerance_c": 0.5, "stable_window_ms": 20,
+                "timeout_ms": 1000, "require_no_alarm": True, "standby_after_run": True,
+            },
+            {"id": "dm1", "type": "dmm_read", "device": "dmm", "name": "dmm", "set_mode": False, "mode": "any"},
+        ],
+        "safety": {"oven_standby": ["oven"]},
+    }
+    res_reserve_fail = RecipeResult()
+    check(
+        sdk.IR_RunRecipeJson,
+        json.dumps(partial_reserve_station).encode("utf-8"),
+        json.dumps(partial_reserve_recipe).encode("utf-8"),
+        str(work_dir / "v2-reserve-fail-out").encode("utf-8"),
+        c.byref(res_reserve_fail),
+        expected=IR_IO_ERROR,
+    )
+    assert res_reserve_fail.cleanup_status == IR_OK, res_reserve_fail.cleanup_status
+
+
+def exercise_modbus_resync():
+    cooler = CoolerModbus(slave_address=1, register_address=0x7A52, voltage_mv=1080.0)
+    replies = []
+    valid_req = bytes.fromhex("01037a5200027cc2")
+    # 1 stray noise byte + wrong-slave 8-byte frame + valid frame for slave 1
+    stream = b"\xAA" + bytes.fromhex("020300000002c438") + valid_req
+    rem = _consume_modbus_buffer(stream, cooler, replies.append)
+    assert rem == b"", rem
+    assert len(replies) == 1, replies
+    assert len(replies[0]) == 9 and int.from_bytes(replies[0][3:7], "big") == 108000, replies[0].hex()
+
+
+def exercise_serial_open_errors(sdk):
+    bad_port = "COM250" if os.name == "nt" else "/dev/ir_sdk_nonexistent_tty"
+    cases = [
+        (IR_DCN1000, {"port": bad_port, "timeout_ms": 200}),
+        (IR_IT6332A, {"port": bad_port, "timeout_ms": 200}),
+        (IR_OVEN_GWS_STEN, {"port": bad_port, "timeout_ms": 200}),
+        (IR_DMM6500, {"port": bad_port, "timeout_ms": 200}),
+        (IR_DETECTOR_SERIAL, {"port": bad_port, "timeout_ms": 200}),
+        (IR_COOLER_MODBUS, {"port": bad_port, "timeout_ms": 200}),
+    ]
+    for kind, cfg in cases:
+        handle = c.c_uint64(99)
+        msg = check(sdk.IR_OpenDevice, kind, json.dumps(cfg).encode("utf-8"), c.byref(handle), expected=IR_IO_ERROR)
+        assert handle.value == 0, (kind, handle.value, msg)
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -652,6 +741,8 @@ def main():
         fixture_dir.mkdir()
         write_raw_fixture(fixture_dir)
 
+        exercise_modbus_resync()
+        exercise_serial_open_errors(sdk)
         exercise_oven(sdk, oven, oven_srv.port)
         exercise_dmm6500(sdk, dmm, dmm_srv.port)
         exercise_detector(sdk, det, det_srv.port, fixture_dir)
