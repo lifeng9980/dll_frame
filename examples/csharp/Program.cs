@@ -48,9 +48,31 @@ internal static class IRStation
         public int CleanupStatus;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct BlackbodyReading
+    {
+        public double ActualC;
+        public double SetpointC;
+        public int Stable;
+    }
+
+    [DllImport("IR_station", EntryPoint = "IR_StationVersion", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr StationVersionPtr();
+
+    internal static string StationVersion() => Marshal.PtrToStringUTF8(StationVersionPtr()) ?? string.Empty;
+
     [DllImport("IR_station", EntryPoint = "IR_OpenFrames", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int OpenFrames(int backend, byte[] source, int validBits,
         out Geometry geometry, byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_FlushFrames", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int FlushFrames(int discardFrames, int timeoutMs,
+        out int discarded, byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_WaitBlackbodyStable", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int WaitBlackbodyStable(ulong handle, double targetC, double toleranceC,
+        int stableWindowMs, int timeoutMs, int requireDeviceStable,
+        out BlackbodyReading reading, byte[] error, int errorBytes);
 
     [DllImport("IR_station", EntryPoint = "IR_RunNoise", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int RunNoise(ref NoiseRecipe recipe, IntPtr outputDirectory,
@@ -95,10 +117,111 @@ internal static class Program
         return Encoding.UTF8.GetString(error, 0, end < 0 ? error.Length : end);
     }
 
+    private static int RunAnalysisSample()
+    {
+        try
+        {
+            var libraryDirectory = Environment.GetEnvironmentVariable("IR_SDK_LIB_DIR");
+            if (string.IsNullOrWhiteSpace(libraryDirectory))
+            {
+                Console.Error.WriteLine("Set IR_SDK_LIB_DIR to the platform library directory.");
+                return 2;
+            }
+            IRAnalysis.VerifyAbiSizes();
+            IRStation.ConfigureNativeLibraries(Path.GetFullPath(libraryDirectory));
+            var version = IRAnalysis.AnalysisVersion();
+            if (string.IsNullOrEmpty(version))
+                throw new InvalidOperationException("IR_AnalysisVersion returned an empty string.");
+
+            var err = new byte[1024];
+            var t1Frames = new ushort[] { 30196, 30196, 30196, 30196, 30204, 30204, 30204, 30204 };
+            var v1Map = new double[4];
+            var vnMap = new double[4];
+            var statSummary = new double[2];
+            var status = IRAnalysis.FrameStatisticsU16(t1Frames, 8, 2, 2, 2, 0,
+                v1Map, vnMap, 4, statSummary, 2, err, err.Length);
+            if (status != 0)
+                throw new InvalidOperationException($"IR_FrameStatisticsU16 status={status}: {ErrorText(err)}");
+
+            var v2Map = new[] { 30000.0, 30000.0, 30000.0, 30000.0 };
+            var vmMap = new[] { 30100.0, 30100.0, 30100.0, 30100.0 };
+            var calcParams = new IRAnalysis.CalcParameters
+            {
+                T0C = 20.0,
+                T1C = 30.0,
+                PixelPitchUm = 15.0,
+                Emissivity = 1.0,
+                SystemGain = 1.0,
+                AdcSwingV = 2.0,
+                FNumber = 1.0,
+                VmaxPerCount = 2.0,
+                IntegrationTimeUs = 1000,
+                InvalidIntegrationUs = 0,
+                DigitalFull = 65535
+            };
+            var gbCrit = new IRAnalysis.GbCriteria
+            {
+                ResponseUpper = 1.5,
+                ResponseLower = 0.5,
+                NoiseUpper = 1.5,
+                NetdUpper = 2.0,
+                ShortBadThreshold = 0.0,
+                OpenBadThreshold = 0.0,
+                CycleUpper = 3
+            };
+            var gjbCrit = new IRAnalysis.GjbCriteria
+            {
+                K1 = 1.0,
+                K2 = 1.0,
+                K3 = 0.5,
+                K4 = 0.5,
+                CycleUpper = 3
+            };
+
+            status = IRAnalysis.GbEvaluateMaps(v1Map, v2Map, vnMap, 2, 2, 4,
+                ref calcParams, ref gbCrit, out var gb, IntPtr.Zero, err, err.Length);
+            if (status != 0)
+                throw new InvalidOperationException($"IR_GbEvaluateMaps status={status}: {ErrorText(err)}");
+
+            status = IRAnalysis.GjbEvaluateMaps(v1Map, v2Map, vnMap, vmMap, 2, 2, 4,
+                ref calcParams, ref gjbCrit, out var gjb, IntPtr.Zero, err, err.Length);
+            if (status != 0)
+                throw new InvalidOperationException($"IR_GjbEvaluateMaps status={status}: {ErrorText(err)}");
+
+            status = IRAnalysis.MapSummaryF64(v1Map, null, 2, 2, 4, 0, 0, 0, 0, 5.0, 95.0,
+                out var mapSum, err, err.Length);
+            if (status != 0 || mapSum.ValidCount != 4)
+                throw new InvalidOperationException($"IR_MapSummaryF64 status={status}: {ErrorText(err)}");
+
+            var sig = new double[8];
+            for (var i = 0; i < sig.Length; ++i)
+                sig[i] = 2.0 + 3.0 * Math.Cos(2.0 * Math.PI * i / sig.Length);
+            var freqs = new double[5];
+            var amps = new double[5];
+            status = IRAnalysis.ComputeRfft1D(sig, sig.Length, 80.0, IRAnalysis.WindowRectangular, 1,
+                freqs, amps, null, freqs.Length, err, err.Length);
+            if (status != 0 || Math.Abs(amps[1] - 3.0) > 1e-9)
+                throw new InvalidOperationException($"IR_ComputeRfft1D status={status}: {ErrorText(err)}");
+
+            Console.WriteLine($"analysis_version={version}");
+            Console.WriteLine($"gb_grade={gb.BadPixels.ChipGrade}");
+            Console.WriteLine($"gjb_bad_count={gjb.BadPixels.TotalBadCount}");
+            Console.WriteLine("fft_ok=1");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return 1;
+        }
+    }
+
     private static int Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "--recipe")
             return RecipeRunner.Run(args);
+        if (args.Length > 0 && args[0] == "--analysis")
+            return RunAnalysisSample();
 
         if (args.Length is < 1 or > 2)
         {
@@ -115,9 +238,12 @@ internal static class Program
                 return 2;
             }
             if (Marshal.SizeOf<IRStation.NoiseRecipe>() != 80 ||
-                Marshal.SizeOf<IRStation.NoiseResult>() != 32)
+                Marshal.SizeOf<IRStation.NoiseResult>() != 32 ||
+                Marshal.SizeOf<IRStation.BlackbodyReading>() != 24)
                 throw new InvalidOperationException("The C# structures do not match the IR SDK x64 C ABI.");
             IRStation.ConfigureNativeLibraries(Path.GetFullPath(libraryDirectory));
+            if (string.IsNullOrEmpty(IRStation.StationVersion()))
+                throw new InvalidOperationException("IR_StationVersion returned an empty string.");
 
             var source = Utf8Z(Path.GetFullPath(args[0]));
             var outputText = args.Length == 2 ? Path.GetFullPath(args[1]) : null;

@@ -66,6 +66,11 @@ def main() -> int:
         raise RuntimeError("The ctypes structures do not match the IR SDK x64 C ABI")
 
     station, dll_directory = load_station(args.library_dir.resolve())
+    station.IR_StationVersion.argtypes = []
+    station.IR_StationVersion.restype = c.c_char_p
+    station_version = station.IR_StationVersion()
+    if not station_version or not station_version.decode("utf-8"):
+        raise RuntimeError("IR_StationVersion returned an empty string")
     error = c.create_string_buffer(1024)
     error_args = [c.c_char_p, c.c_int32]
     station.IR_OpenFrames.argtypes = [c.c_int32, c.c_char_p, c.c_int32,

@@ -1,0 +1,457 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ir-sdk.local/schemas/recipe.schema.json",
+  "title": "IR SDK Measurement Recipe (schema_version 1)",
+  "description": "Ordered measurement procedure: optional instrument controls, one capture step, one or more analysis steps, a final save_raw step, and optional product limits.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "recipe_id",
+    "steps"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional JSON Schema reference for editor validation and autocompletion."
+    },
+    "schema_version": {
+      "const": 1,
+      "description": "Recipe schema version."
+    },
+    "recipe_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Product recipe identifier or revision."
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 3,
+      "description": "Ordered procedure steps: instrument controls before capture, one capture, one or more analyze steps, and save_raw last.",
+      "items": {
+        "$ref": "#/$defs/step"
+      },
+      "allOf": [
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "capture"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "analyze"
+              }
+            }
+          },
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "save_raw"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ]
+    },
+    "limits": {
+      "type": "array",
+      "description": "Optional product pass/fail limits evaluated against produced metrics.",
+      "items": {
+        "$ref": "#/$defs/limit"
+      }
+    }
+  },
+  "$defs": {
+    "step": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/blackbodyStabilizeStep"
+        },
+        {
+          "$ref": "#/$defs/powerSetStep"
+        },
+        {
+          "$ref": "#/$defs/powerOutputStep"
+        },
+        {
+          "$ref": "#/$defs/powerReadStep"
+        },
+        {
+          "$ref": "#/$defs/captureStep"
+        },
+        {
+          "$ref": "#/$defs/analyzeTemporalNoiseStep"
+        },
+        {
+          "$ref": "#/$defs/analyzeRoiMeanStep"
+        },
+        {
+          "$ref": "#/$defs/saveRawStep"
+        }
+      ]
+    },
+    "blackbodyStabilizeStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "device",
+        "target_c",
+        "tolerance_c",
+        "stable_window_ms",
+        "timeout_ms",
+        "require_device_stable"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "const": "blackbody_stabilize"
+        },
+        "device": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target_c": {
+          "type": "number",
+          "minimum": -60.0,
+          "maximum": 100.0
+        },
+        "tolerance_c": {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        "stable_window_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600000
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        },
+        "require_device_stable": {
+          "type": "boolean"
+        }
+      }
+    },
+    "powerSetStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "device",
+        "channel",
+        "voltage_v",
+        "current_limit_a"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "const": "power_set"
+        },
+        "device": {
+          "type": "string",
+          "minLength": 1
+        },
+        "channel": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "voltage_v": {
+          "type": "number",
+          "minimum": 0.0
+        },
+        "current_limit_a": {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        }
+      }
+    },
+    "powerOutputStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "device",
+        "channel",
+        "enabled"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "const": "power_output"
+        },
+        "device": {
+          "type": "string",
+          "minLength": 1
+        },
+        "channel": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "off_after_run": {
+          "type": "boolean",
+          "description": "Must be true whenever enabled is true."
+        }
+      },
+      "if": {
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "off_after_run"
+        ],
+        "properties": {
+          "off_after_run": {
+            "const": true
+          }
+        }
+      }
+    },
+    "powerReadStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "device",
+        "channel"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "const": "power_read"
+        },
+        "device": {
+          "type": "string",
+          "minLength": 1
+        },
+        "channel": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        }
+      }
+    },
+    "captureStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "frames",
+        "frame_timeout_ms"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "const": "capture"
+        },
+        "frames": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "frame_timeout_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        }
+      }
+    },
+    "analyzeTemporalNoiseStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "method",
+        "name",
+        "input"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "const": "analyze"
+        },
+        "method": {
+          "const": "temporal_noise"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "input": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "analyzeRoiMeanStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "method",
+        "name",
+        "input",
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "const": "analyze"
+        },
+        "method": {
+          "const": "roi_mean"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "input": {
+          "type": "string",
+          "minLength": 1
+        },
+        "x": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "y": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        }
+      }
+    },
+    "saveRawStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "input"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "const": "save_raw"
+        },
+        "input": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "limit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "metric",
+        "operator",
+        "value",
+        "unit"
+      ],
+      "properties": {
+        "metric": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operator": {
+          "type": "string",
+          "enum": [
+            "max",
+            "min"
+          ]
+        },
+        "value": {
+          "type": "number"
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

@@ -4,6 +4,7 @@ project(IRSDKExamples LANGUAGES C CXX)
 if(NOT IR_SDK_ROOT)
     message(FATAL_ERROR "Set IR_SDK_ROOT to the extracted IR SDK package directory")
 endif()
+file(TO_CMAKE_PATH "${IR_SDK_ROOT}" IR_SDK_ROOT)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,28 +23,36 @@ else()
 endif()
 
 function(add_ir_client target source)
+    set(extra_libs ${ARGN})
     add_executable(${target} "${source}")
     if(MSVC)
         target_compile_options(${target} PRIVATE /utf-8)
     endif()
     target_include_directories(${target} PRIVATE "${IR_SDK_INCLUDE_DIR}")
-    target_link_libraries(${target} PRIVATE "${IR_STATION_LIBRARY}" "${IR_ANALYSIS_LIBRARY}")
+    target_link_libraries(${target} PRIVATE "${IR_ANALYSIS_LIBRARY}" ${extra_libs})
     if(WIN32)
+        set(runtime_bins "${IR_SDK_BIN_DIR}/IR_analysis.dll")
+        if(extra_libs)
+            list(APPEND runtime_bins "${IR_SDK_BIN_DIR}/IR_station.dll")
+        endif()
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "${IR_SDK_BIN_DIR}/IR_station.dll" "${IR_SDK_BIN_DIR}/IR_analysis.dll"
-                "$<TARGET_FILE_DIR:${target}>")
+                ${runtime_bins} "$<TARGET_FILE_DIR:${target}>")
     else()
         set_target_properties(${target} PROPERTIES BUILD_RPATH "$ORIGIN")
+        set(runtime_bins "${IR_SDK_BIN_DIR}/libIR_analysis.so")
+        if(extra_libs)
+            list(APPEND runtime_bins "${IR_SDK_BIN_DIR}/libIR_station.so")
+        endif()
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                "${IR_SDK_BIN_DIR}/libIR_station.so" "${IR_SDK_BIN_DIR}/libIR_analysis.so"
-                "$<TARGET_FILE_DIR:${target}>")
+                ${runtime_bins} "$<TARGET_FILE_DIR:${target}>")
     endif()
 endfunction()
 
-add_ir_client(ir_c_client "${IR_SDK_ROOT}/examples/c_client.c")
-add_ir_client(ir_cpp_client "${CMAKE_CURRENT_LIST_DIR}/cpp_client.cpp")
+add_ir_client(ir_c_client "${IR_SDK_ROOT}/examples/c_client.c" "${IR_STATION_LIBRARY}")
+add_ir_client(ir_cpp_client "${CMAKE_CURRENT_LIST_DIR}/cpp_client.cpp" "${IR_STATION_LIBRARY}")
+add_ir_client(ir_analysis_c_sample "${IR_SDK_ROOT}/examples/analysis_algorithms.c")
 
 add_executable(ir_run_recipe "${CMAKE_CURRENT_LIST_DIR}/ir_recipe_cli.cpp")
 if(MSVC)

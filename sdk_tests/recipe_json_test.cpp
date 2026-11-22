@@ -1,13 +1,20 @@
 #include "IR_recipe.h"
+#include "IR_analysis.h"
+#include "IR_station.h"
 #include <nlohmann/json.hpp>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace fs = std::filesystem;
 using Json = nlohmann::json;
@@ -22,6 +29,27 @@ std::string pathUtf8(const fs::path &path)
 {
     const auto value = path.u8string();
     return {reinterpret_cast<const char *>(value.data()), value.size()};
+}
+
+std::string readText(const fs::path &path)
+{
+    std::ifstream file(path, std::ios::binary);
+    check(file.is_open(), ("Cannot open file: " + pathUtf8(path)).c_str());
+    return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+}
+
+bool isIso8601UtcMillis(const std::string &value)
+{
+    if (value.size() != 24) return false;
+    const char *pattern = "dddd-dd-ddTdd:dd:dd.dddZ";
+    for (size_t index = 0; index < 24; ++index) {
+        if (pattern[index] == 'd') {
+            if (!std::isdigit(static_cast<unsigned char>(value[index]))) return false;
+        } else if (value[index] != pattern[index]) {
+            return false;
+        }
+    }
+    return true;
 }
 
 class TemporaryDirectory {
@@ -58,6 +86,7 @@ void writeRaw(const fs::path &path)
 Json makeRecipe(double noiseLimit)
 {
     return {
+        {"$schema", "../schemas/recipe.schema.json"},
         {"schema_version", 1},
         {"recipe_id", "roi-and-noise-test-v1"},
         {"steps", Json::array({
@@ -72,9 +101,68 @@ Json makeRecipe(double noiseLimit)
                                   {"value", noiseLimit}, {"unit", "DN"}}})}
     };
 }
+
+void checkBundledTemplates(const fs::path &examplesDir)
+{
+    const fs::path stationsDir = examplesDir / "stations";
+    const fs::path recipesDir = examplesDir / "recipes";
+    const std::vector<std::pair<std::string, std::string>> pairs{
+        {"offline.json", "noise_roi.json"},
+        {"roi_2x2.json", "noise_roi_2x2.json"},
+        {"sim_tcp.json", "noise_blackbody.json"},
+        {"sim_power_serial.json", "power_serial_smoke.json"},
+        {"sim_power_serial.json", "power_serial_output_cycle.json"},
+    };
+
+    std::set<std::string> checkedStations;
+    std::set<std::string> checkedRecipes;
+    char error[1024]{};
+    for (const auto &[stationName, recipeName] : pairs) {
+        const auto stationPath = stationsDir / stationName;
+        const auto recipePath = recipesDir / recipeName;
+        const auto stationText = readText(stationPath);
+        const auto recipeText = readText(recipePath);
+
+        const auto stationJson = Json::parse(stationText);
+        const auto recipeJson = Json::parse(recipeText);
+        check(stationJson.contains("$schema") && stationJson.at("$schema").is_string(),
+              "bundled station template must declare string $schema");
+        check(recipeJson.contains("$schema") && recipeJson.at("$schema").is_string(),
+              "bundled recipe template must declare string $schema");
+        const auto stationSchemaPath =
+            (stationPath.parent_path() / fs::path(stationJson.at("$schema").get<std::string>())).lexically_normal();
+        const auto recipeSchemaPath =
+            (recipePath.parent_path() / fs::path(recipeJson.at("$schema").get<std::string>())).lexically_normal();
+        check(fs::is_regular_file(stationSchemaPath), "station $schema target must exist");
+        check(fs::is_regular_file(recipeSchemaPath), "recipe $schema target must exist");
+
+        const auto status = IR_CheckRecipeJson(stationText.c_str(), recipeText.c_str(), error, sizeof error);
+        if (status != IR_OK) {
+            throw std::runtime_error("Template preflight failed for " + stationName + " + " +
+                                     recipeName + ": " + error);
+        }
+        checkedStations.insert(stationName);
+        checkedRecipes.insert(recipeName);
+    }
+
+    for (const auto &entry : fs::directory_iterator(stationsDir)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".json") {
+            const auto name = entry.path().filename().string();
+            check(checkedStations.contains(name),
+                  ("Uncovered station template in examples/stations: " + name).c_str());
+        }
+    }
+    for (const auto &entry : fs::directory_iterator(recipesDir)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".json") {
+            const auto name = entry.path().filename().string();
+            check(checkedRecipes.contains(name),
+                  ("Uncovered recipe template in examples/recipes: " + name).c_str());
+        }
+    }
+}
 }
 
-int main()
+int main(int argc, char **argv)
 {
     try {
         TemporaryDirectory temporary;
@@ -83,6 +171,7 @@ int main()
         writeRaw(rawPath);
 
         Json station{
+            {"$schema", "../schemas/station.schema.json"},
             {"schema_version", 1},
             {"acquisition", {{"backend", "raw_replay"}, {"source", pathUtf8(rawPath)},
                               {"valid_bits", 16}, {"max_batch_bytes", 64}}},
@@ -94,6 +183,30 @@ int main()
         char error[1024]{};
         check(IR_CheckRecipeJson(stationText.c_str(), recipeText.c_str(), error, sizeof error) == IR_OK,
               error);
+
+        auto badStationSchema = station;
+        badStationSchema["$schema"] = 123;
+        const auto badStationSchemaText = badStationSchema.dump();
+        check(IR_CheckRecipeJson(badStationSchemaText.c_str(), recipeText.c_str(), error, sizeof error) == IR_BAD_ARGUMENT,
+              "non-string station $schema must be rejected");
+
+        auto badRecipeSchema = recipe;
+        badRecipeSchema["$schema"] = nullptr;
+        const auto badRecipeSchemaText = badRecipeSchema.dump();
+        check(IR_CheckRecipeJson(stationText.c_str(), badRecipeSchemaText.c_str(), error, sizeof error) == IR_BAD_ARGUMENT,
+              "non-string recipe $schema must be rejected");
+
+        auto nestedStationSchema = station;
+        nestedStationSchema["acquisition"]["$schema"] = "../schemas/station.schema.json";
+        const auto nestedStationSchemaText = nestedStationSchema.dump();
+        check(IR_CheckRecipeJson(nestedStationSchemaText.c_str(), recipeText.c_str(), error, sizeof error) == IR_BAD_ARGUMENT,
+              "nested station $schema must be rejected");
+
+        auto nestedRecipeSchema = recipe;
+        nestedRecipeSchema["steps"][0]["$schema"] = "../schemas/recipe.schema.json";
+        const auto nestedRecipeSchemaText = nestedRecipeSchema.dump();
+        check(IR_CheckRecipeJson(stationText.c_str(), nestedRecipeSchemaText.c_str(), error, sizeof error) == IR_BAD_ARGUMENT,
+              "nested recipe $schema must be rejected");
 
         auto malformed = recipe;
         malformed["steps"][1]["not_a_field"] = true;
@@ -135,6 +248,15 @@ int main()
         check(pass.at("run_status") == "PASS" && pass.at("completed_frames") == 2,
               "pass recipe status and frame count");
         check(pass.at("recipe") == recipe && pass.at("cleanup_status") == IR_OK, "archived recipe and cleanup status");
+        check(pass.at("station_version") == IR_StationVersion(), "result.json station_version mismatch");
+        check(pass.at("analysis_version") == IR_AnalysisVersion(), "result.json analysis_version mismatch");
+        check(pass.at("source_commit").is_string() && !pass.at("source_commit").get<std::string>().empty(),
+              "result.json source_commit must be a nonempty string");
+        const auto startedUtc = pass.at("started_utc").get<std::string>();
+        const auto finishedUtc = pass.at("finished_utc").get<std::string>();
+        check(isIso8601UtcMillis(startedUtc), "result.json started_utc must be ISO-8601 UTC");
+        check(isIso8601UtcMillis(finishedUtc), "result.json finished_utc must be ISO-8601 UTC");
+        check(startedUtc <= finishedUtc, "result.json started_utc must not be after finished_utc");
         check(std::abs(pass.at("metrics").at("left.mean_dn").at("value").get<double>() - 41.0) < 1e-12,
               "ROI mean result");
         check(std::abs(pass.at("metrics").at("noise.mean_dn").at("value").get<double>() - 51.0) < 1e-12,
@@ -149,6 +271,10 @@ int main()
                                nullptr, error, sizeof error) == IR_OK, error);
         std::ifstream ngFile(temporary.path() / "ng-run" / "result.json", std::ios::binary);
         check(Json::parse(ngFile).at("run_status") == "NG", "limit miss is product NG, not SDK failure");
+
+        if (argc > 1) {
+            checkBundledTemplates(fs::path(argv[1]));
+        }
         return 0;
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';

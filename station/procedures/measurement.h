@@ -2,6 +2,7 @@
 
 #include "IR_device.h"
 #include <mutex>
+#include <string>
 
 namespace ir::acquisition { class Capture; }
 
@@ -29,4 +30,6 @@ struct BlackbodyTarget {
 // 从设温回读成功后开始计算等稳时限。
 IRBlackbodyReading waitForBlackbody(const acquisition::Capture &capture, IRHandle handle,
                                    const BlackbodyTarget &target);
+
+std::string utcTimestampNow();
 }

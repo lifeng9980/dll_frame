@@ -37,6 +37,13 @@ IR_STATION_API int32_t IR_SetBlackbody(IRHandle handle, double target_c, double 
 IR_STATION_API int32_t IR_ReadBlackbody(IRHandle handle, IRBlackbodyReading *reading,
     char *err, int32_t err_bytes);
 
+/* 等待已打开黑体在 tolerance_c 容差内连续保持 stable_window_ms 毫秒（可选要求设备自身稳定标志）。
+ * 支持从其他线程调用 IR_RequestStop() 中止等待；reading 不可为 NULL，成功时返回最后一次读数。
+ */
+IR_STATION_API int32_t IR_WaitBlackbodyStable(IRHandle handle, double target_c, double tolerance_c,
+    int32_t stable_window_ms, int32_t timeout_ms, int32_t require_device_stable,
+    IRBlackbodyReading *reading, char *err, int32_t err_bytes);
+
 typedef struct IRPowerReading {
     double setpoint_v;
     double current_limit_a;

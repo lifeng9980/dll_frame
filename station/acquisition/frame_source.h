@@ -13,6 +13,7 @@ public:
     virtual IRGeometry geometry() const = 0;
     virtual void start() = 0;
     virtual void read(uint16_t *pixels, IRFrameStamp &stamp, int timeoutMs) = 0;
+    virtual void flush() {}
     virtual void stop() = 0;
 };
 std::unique_ptr<FrameSource> openReplay(const char *directory);
@@ -37,12 +38,15 @@ public:
     // 采集启动和流程开始各建立一次停止范围。取帧阶段不重置流程的停止请求。
     void beginOperation() noexcept;
     void endOperation() noexcept;
+    bool tryEnterStandaloneStopScope() noexcept;
+    void leaveStandaloneStopScope(bool entered) noexcept;
     void requestStop() noexcept;
     void checkStop() const;
     void start();
     void stop();
     void read(int count, int timeoutMs, uint16_t *pixels, int64_t capacity,
               IRFrameStamp *stamps, int stampCapacity, int &completed);
+    void flush(int32_t discardFrames, int32_t timeoutMs, int32_t &discarded);
 
 private:
     enum class StopState { idle, active, requested };

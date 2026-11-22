@@ -5,6 +5,7 @@
 #include "save_raw.h"
 #include "station/acquisition/frame_source.h"
 #include "station/instruments/device_lease.h"
+#include "station/version.h"
 #include <algorithm>
 #include <exception>
 #include <filesystem>
@@ -237,7 +238,8 @@ Json analyzeBatch(const FrameBatch &batch, const RecipeConfig &recipe,
 
 void archive(const StationConfig &station, const RecipeConfig &recipe, const FrameBatch &batch,
              const Readbacks &readbacks, Json metrics, const fs::path &destination,
-             const ir::acquisition::Capture &capture, const IRRecipeResult &result)
+             const ir::acquisition::Capture &capture, const IRRecipeResult &result,
+             const std::string &startedUtc)
 {
     bool limitsPass = true;
     Json evaluatedLimits = Json::array();
@@ -251,12 +253,15 @@ void archive(const StationConfig &station, const RecipeConfig &recipe, const Fra
     }
     const char *runStatus = recipe.limits.empty() ? "COMPLETED" : (limitsPass ? "PASS" : "NG");
     const auto &geometry = batch.geometry;
+    const auto finishedUtc = utcTimestampNow();
     const Json record{
         {"schema_version", 1}, {"recipe_id", recipe.id}, {"recipe", recipe.definition},
         {"run_status", runStatus}, {"backend", backendName(station.backend)}, {"source_name", station.source},
         {"width", geometry.width}, {"height", geometry.height}, {"valid_bits", geometry.valid_bits},
         {"requested_frames", recipe.capture.frames}, {"completed_frames", result.completed_frames},
-        {"cleanup_status", result.cleanup_status}, {"analysis_version", IR_AnalysisVersion()},
+        {"cleanup_status", result.cleanup_status}, {"station_version", IR_StationVersion()},
+        {"analysis_version", IR_AnalysisVersion()}, {"source_commit", ir::station::sourceCommit()},
+        {"started_utc", startedUtc}, {"finished_utc", finishedUtc},
         {"conditions", readbacks.conditions}, {"instrument_readings", readbacks.instruments},
         {"metrics", std::move(metrics)}, {"limits", std::move(evaluatedLimits)}
     };
@@ -271,13 +276,14 @@ void runRecipe(ir::acquisition::Capture &capture, const StationConfig &station, 
     const auto destination = outputPath(directory);
     checkDestination(destination);
     capture.checkStop();
+    const auto startedUtc = utcTimestampNow();
     FrameBatch batch;
     Readbacks readbacks;
     try {
         acquireBatch(capture, station, recipe, batch, readbacks, progress);
         auto metrics = analyzeBatch(batch, recipe, capture, progress);
         progress.enter(IR_RECIPE_STAGE_ARCHIVE, &recipe.archive);
-        archive(station, recipe, batch, readbacks, std::move(metrics), destination, capture, progress.result);
+        archive(station, recipe, batch, readbacks, std::move(metrics), destination, capture, progress.result, startedUtc);
     } catch (const Error &error) {
         if (progress.step)
             throw Error(error.code, "Step '" + progress.step->id + "' failed: " + error.what());

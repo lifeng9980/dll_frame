@@ -195,6 +195,25 @@ public:
         }
     }
 
+    void flush() override
+    {
+        require(streaming_, IR_BAD_ARGUMENT, "Start V4L2 capture before flushing frames");
+        pollfd descriptor{fd_, POLLIN, 0};
+        for (size_t i = 0; i < mappings_.size(); ++i) {
+            descriptor.revents = 0;
+            const int status = poll(&descriptor, 1, 0);
+            if (status <= 0) break;
+            if (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) break;
+            v4l2_buffer buffer{};
+            buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            buffer.memory = V4L2_MEMORY_MMAP;
+            if (ioctl(fd_, VIDIOC_DQBUF, &buffer) < 0) break;
+            if (ioctl(fd_, VIDIOC_QBUF, &buffer) < 0) break;
+        }
+        hasPreviousFrame_ = false;
+        previousDriverSequence_ = 0;
+    }
+
     void stop() override
     {
         if (!streaming_) return;
@@ -214,7 +233,7 @@ public:
     }
 
 private:
-    static constexpr uint32_t BufferCount = 4;
+    static constexpr uint32_t BufferCount = 8;
 
     void releaseBuffers() noexcept
     {

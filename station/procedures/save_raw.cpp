@@ -1,6 +1,8 @@
 #include "save_raw.h"
+#include "measurement.h"
 #include "IR_analysis.h"
 #include "api_common.h"
+#include "station/version.h"
 #include <nlohmann/json.hpp>
 #include <atomic>
 #include <bit>
@@ -198,11 +200,16 @@ void saveNoiseRun(const fs::path &path, const IRNoiseRecipe &recipe, int backend
     const std::string &sourceName, IRGeometry geometry,
     const std::vector<uint16_t> &frames, const std::vector<IRFrameStamp> &stamps,
     const IRNoiseResult &result, double blackbodySetpointReadback,
-    const IRBlackbodyReading *blackbodyReading)
+    const IRBlackbodyReading *blackbodyReading, const std::string &startedUtc)
 {
+    const auto finishedUtc = utcTimestampNow();
     nlohmann::json record{
         {"recipe_id", recipe.recipe_id},
+        {"station_version", IR_StationVersion()},
         {"analysis_version", IR_AnalysisVersion()},
+        {"source_commit", ir::station::sourceCommit()},
+        {"started_utc", startedUtc},
+        {"finished_utc", finishedUtc},
         {"backend", backendName(backend)},
         {"source_name", sourceName},
         {"width", geometry.width}, {"height", geometry.height},

@@ -113,7 +113,8 @@ StationConfig parseStation(const char *text)
 {
     const auto root = parseJson(text, "station JSON");
     require(root.is_object(), IR_BAD_ARGUMENT, "station JSON must contain an object");
-    allowFields(root, {"schema_version", "acquisition", "devices"}, "station");
+    allowFields(root, {"$schema", "schema_version", "acquisition", "devices"}, "station");
+    (void)optionalString(root, "$schema", "", "station");
     require(integerField(root, "schema_version", 1, 1, "station") == 1,
             IR_BAD_ARGUMENT, "station.schema_version is unsupported");
 
@@ -243,7 +244,8 @@ RecipeConfig parseRecipe(const char *text, const StationConfig &station)
 {
     auto root = parseJson(text, "recipe JSON");
     require(root.is_object(), IR_BAD_ARGUMENT, "recipe JSON must contain an object");
-    allowFields(root, {"schema_version", "recipe_id", "steps", "limits"}, "recipe");
+    allowFields(root, {"$schema", "schema_version", "recipe_id", "steps", "limits"}, "recipe");
+    (void)optionalString(root, "$schema", "", "recipe");
     (void)integerField(root, "schema_version", 1, 1, "recipe");
 
     RecipeConfig recipe;

@@ -1,22 +1,22 @@
-# IR SDK 跨平台重建
+# IR SDK 跨平台设计说明
 
-`codex/sdk-cross-platform` 从独立空提交开始。Windows x64 与 Ubuntu 24.04 x86-64 使用同一份源码和公共 C 头文件，生成两个库。
+IR SDK 面向 Windows x64 与 Ubuntu 24.04 x86-64 使用同一份源码和公共 C 头文件，生成两个动态库。
 
 | 库 | Windows | Linux | 职责 |
 |---|---|---|---|
 | Station | `IR_station.dll` | `libIR_station.so` | 仪器控制、原始帧采集、JSON 测试流程与结果保存 |
-| Analysis | `IR_analysis.dll` | `libIR_analysis.so` | 帧均值、时域噪声和 ROI 均值 |
+| Analysis | `IR_analysis.dll` | `libIR_analysis.so` | 帧均值、时域噪声、ROI 均值、Noise3D 两阶段与 GB/GJB 核心评价（零 Qt/OpenCV） |
 
-应用包含 `IR_station.h`、`IR_device.h` 或 `IR_analysis.h`，以 `IR_*` 调用 C 接口。公共状态码与 UTF-8 错误缓冲区约定见 `IR_status.h`。当前发行结构提供 C、C++、C#、Python 示例和 JSON 配方命令行。客户程序只需要两个 SDK 库及所用语言的运行环境。
+应用包含 `IR_station.h`、`IR_device.h`、`IR_recipe.h` 或 `IR_analysis.h`，以 `IR_*` 调用 C 接口。两个库分别提供 `IR_StationVersion()` 与 `IR_AnalysisVersion()` 运行期版本查询；Windows DLL 同时内嵌 `VERSIONINFO` 文件版本资源。公共状态码与 UTF-8 错误缓冲区约定见 `IR_status.h`。当前发行结构提供 C、C++、C#、Python 示例、JSON Schema 配置校验文件和 JSON 配方命令行。客户程序只需要两个 SDK 库及所用语言的运行环境。
 
 ## 四层代码入口
 
 | 层 | 改动入口 | 输入和输出 |
 |---|---|---|
 | 仪器控制 | `station/instruments/` 按设备型号接入，`transport/asio_link.cpp` 共用 Asio TCP 与串口 | `IR_OpenDevice` 接收型号和连接 JSON，黑体示例提供设温回读和状态读取。新设备需说明哪些命令可以安全重试 |
-| 原始采集 | `station/acquisition/frame_source.h`，具体来源在 `raw_replay/`、`directshow/`、`v4l2/` | `IR_OpenFrames` 返回几何，`IR_ReadFrames` 输出紧密排列的 RAW16 像素、帧信息和连续完成数 |
-| 指标计算 | `analysis/`，可独立使用 `IR_analysis` | 现有 `IR_FrameStatisticsU16` 接收连续帧组，返回像元均值、标准差及全图汇总，单位 DN。标准算法按所需条件和帧组逐项接入 |
-| 流程编排 | `station/procedures/` | `IR_RunRecipeJson` 按测试 JSON 执行设备、采集、多个分析和归档步骤。量产配方提供产品限值 |
+| 原始采集 | `station/acquisition/frame_source.h`，具体来源在 `raw_replay/`、`directshow/`、`v4l2/` | `IR_OpenFrames` 返回几何，`IR_ReadFrames` 输出紧密排列的 RAW16 像素、帧信息和连续完成数；`IR_FlushFrames` 清空队列并重置序列连续性以支撑不停流多 Burst 采集 |
+| 指标计算 | `analysis/`，可独立使用 `IR_analysis` | `IR_FrameStatisticsU16`、`IR_ROIMeanU16`、`IR_Noise3D*`、`IR_Gb*` / `IR_Gjb*`（含可配置短路/断路阈值），以及两点 NUC、无损 NUC 统计、`15×15` 空间高低频（LRNU/HRNU）、算术扣噪/阈值掩码、任意长 1D FFT 与 `IR_GjbEvaluateBurstMetrics` |
+| 流程编排 | `station/procedures/` | `IR_RunRecipeJson` 按测试 JSON 执行设备、采集、多个分析和归档步骤；`IR_WaitBlackbodyStable` 提供独立等稳接口 |
 
 ## 线程和设备占用
 
@@ -26,7 +26,7 @@
 
 `IR_RunRecipeJson` 为 C/C# / Python 提供统一的 UTF-8 工位与流程 JSON 入口。`IR_CheckRecipeJson` 做静态预检。运行入口用实际画幅检查 ROI 和 RAW 容量，准备成功后才打开并预约配方引用的仪器。取帧结束后先停流、执行声明的设备收尾并释放连接，计算和归档继续复用同一批只读像素。一进程同时运行一条配方，RAW 像素默认上限为 256 MiB，帧标记和算法临时数组另计。
 
-跨线程停止作用于整次配方，由原工作线程在当前同步事务结束后检查并收尾。启用电源输出时，配方须同时声明 `off_after_run: true`。`IRRecipeResult` 报告失败阶段、步骤下标、完成帧数和收尾状态。完整结果归档会保留实际配方及指标方法版本。详见[测试人员配方指南](docs/测试人员配方指南.md)。
+跨线程停止作用于整次配方，由原工作线程在当前同步事务结束后检查并收尾。启用电源输出时，配方须同时声明 `off_after_run: true`。`IRRecipeResult` 报告失败阶段、步骤下标、完成帧数和收尾状态。完整结果归档会保留实际配方、指标方法版本以及 `station_version`、`analysis_version`、`source_commit`、`started_utc`、`finished_utc` 追溯字段。工位和配方 JSON 支持可选 `"$schema"` 字段，配合 `examples/schemas/` 进行编辑器校验。详见[测试人员配方指南](docs/测试人员配方指南.md)。
 
 DOC058 黑体连接中断或应答超时后最多重连三次，每次间隔 500 ms。重复读命令可在重新识别设备后执行。设温应答丢失时，只重连并读回目标温度，不重复发送设温命令。重试耗尽或设备身份不符时，流程停止并返回异常。流程失败时 `IRNoiseResult.completed` 保留连续完成帧数，`failed_step` 标明失败步骤，`cleanup_status` 报告采集停止结果。黑体保留流程设定值，当前配方没有自动恢复温度的动作。
 
@@ -34,7 +34,7 @@ DOC058 黑体连接中断或应答超时后最多重连三次，每次间隔 500
 
 安装包的 `examples/analysis_conditions.c` 演示同一个分析入口如何接收不同积分时间下的两组帧，并逐组返回均值和噪声。它只验证数据组织方式，不代表 GJB 或 EMVA 的指标实现。
 
-`IR_ROIMeanU16` 是新人算法扩展样板：用两帧 `2×2` 数据验证左列 ROI 均值 41 DN、整图均值 51 DN。添加新指标参见 [`docs/算法接入指南.md`](docs/算法接入指南.md)。
+`IR_ROIMeanU16` 是算法扩展样板：用两帧 `2×2` 数据验证左列 ROI 均值 41 DN、整图均值 51 DN。包内的 `examples/analysis_algorithms.c`（独立链接 `IR_analysis`，不依赖 `IR_station`）、`examples/python/ir_analysis.py` 与 `examples/csharp/AnalysisInterop.cs` 演示了独立 `IR_analysis` 库中的 3D 噪声（Noise3D DN 两阶段）、国标（GB，支持在 `IRGbCriteria` 配置短路/断路阈值，`<= 0` 时默认 `45000 / 20000`）/ 国军标（GJB）以及可组合算子（两点 NUC、`15×15` LRNU/HRNU、掩码组合、任意长度 1D FFT、多通道频谱与单 Burst 轻量评估）C 接口调用；其中 GB/GJB 噪声图 `vn` 使用总体标准差（`IR_FrameStatisticsU16(..., sample_std = 0)`，分母 `N`），而既有 `IR_RunNoise` 与 `temporal_noise` 保持样本标准差（`sample_std = 1`，分母 `N - 1`）不变。对于 5 小时温漂等不停流、不存盘的多 Burst 场景，应用可在单工位循环内复用 `IR_WaitBlackbodyStable`、`IR_FlushFrames`、`IR_ReadFrames` 与 `IR_FrameStatisticsNucU16` / `IR_GjbEvaluateBurstMetrics`。源码仓库内提供面向算法研发的完整接入指南与测试模板。
 
 ## SDK 依赖和构建
 
@@ -85,4 +85,4 @@ Windows 后端沿用 USB_test 使用的 DirectShow Sample Grabber COM 过滤器�
 4. 指定一个新目录即可保存 `frames.raw`、`frames.csv` 和 `result.json`。结果文件记录配方设定、设温回读和达到等稳时的实际温度/设备稳定标志。三个文件齐备后发布目录。再次打开保存目录可复算同一批数据。
 5. 用 `IR_CloseFrames` 和 `IR_CloseDevice` 释放连接。DOC058 黑体的串口和 TCP 读操作在传输失败后都会重新识别设备，最多重试三次。设温应答超时通过回读确认，SDK 不重发该写命令。`IR_RequestStop` 在当前仪器同步调用结束时中止流程。
 
-当前分支提供双平台 RAW 回放、黑体通信、固定时域噪声流程以及 DirectShow/V4L2 后端。PCIe-1433 的 NI-IMAQ 运行实现暂留空，接口编号已保留；Windows 驱动和 Linux 兼容性都未验收。Linux UVC 真机已读到 FX3 测试坡度图，但在 WSL USB/IP 下多帧接口检测到序号跳变，因此不计为连续采集通过。探测器参数控制、其他仪器、GB/GJB 和专项算法仍需按实际设备与对照数据验收。见 [验证记录](验证记录.md)。
+当前发行版本提供 RAW 回放、黑体通信、IT6332A 串口电源、时域噪声/ROI 均值/Noise3D/GB/GJB C API 与 JSON 配方流程，以及 DirectShow/V4L2 实时后端接口。PCIe-1433 的 NI-IMAQ 运行实现暂留空，接口编号已保留；多条件/多温点 JSON 流程编排、探测器参数控制、其他仪器、EMVA 1288 指标及实机长稳验收仍需按实际设备与对照数据逐项验收。各能力与平台的实际支持状态见[设备支持矩阵](docs/设备支持矩阵.md)。

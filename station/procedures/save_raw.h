@@ -13,5 +13,6 @@ void saveNoiseRun(const std::filesystem::path &path, const IRNoiseRecipe &recipe
     const std::string &sourceName,
     IRGeometry geometry, const std::vector<uint16_t> &frames,
     const std::vector<IRFrameStamp> &stamps, const IRNoiseResult &result,
-    double blackbodySetpointReadback, const IRBlackbodyReading *blackbodyReading);
+    double blackbodySetpointReadback, const IRBlackbodyReading *blackbodyReading,
+    const std::string &startedUtc);
 }

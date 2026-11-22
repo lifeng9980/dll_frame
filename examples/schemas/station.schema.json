@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ir-sdk.local/schemas/station.schema.json",
+  "title": "IR SDK Station Configuration (schema_version 1)",
+  "description": "Describes the frame acquisition source and optional instruments available on a measurement station.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "acquisition"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional JSON Schema reference for editor validation and autocompletion."
+    },
+    "schema_version": {
+      "const": 1,
+      "description": "Station configuration schema version."
+    },
+    "acquisition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backend",
+        "source",
+        "valid_bits"
+      ],
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": [
+            "raw_replay",
+            "directshow",
+            "v4l2"
+          ],
+          "description": "Frame source backend. directshow is Windows-only; v4l2 is Linux-only."
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "description": "RAW16 directory (relative to station JSON or absolute), DirectShow camera name, or V4L2 device node."
+        },
+        "valid_bits": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16,
+          "description": "Effective bit depth per uint16 pixel (0 = read from RAW index or unknown)."
+        },
+        "max_batch_bytes": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 9223372036854775807,
+          "default": 268435456,
+          "description": "Maximum RAW16 frame batch pixel buffer size in bytes (default 256 MiB)."
+        }
+      }
+    },
+    "devices": {
+      "type": "object",
+      "description": "Map of user-defined device alias to instrument definition.",
+      "additionalProperties": {
+        "$ref": "#/$defs/device"
+      }
+    }
+  },
+  "$defs": {
+    "device": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/pcn7ltDevice"
+        },
+        {
+          "$ref": "#/$defs/dcn1000Device"
+        },
+        {
+          "$ref": "#/$defs/it6332aDevice"
+        }
+      ]
+    },
+    "pcn7ltDevice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "connection"
+      ],
+      "properties": {
+        "kind": {
+          "const": "pcn7-lt"
+        },
+        "connection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "host"
+          ],
+          "properties": {
+            "host": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tcp_port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "default": 2101
+            },
+            "head": {
+              "type": "integer",
+              "minimum": -1,
+              "maximum": 1,
+              "default": -1
+            },
+            "expected_head_serial": {
+              "type": "string",
+              "description": "Optional head serial verification; requires head >= 0 when non-empty."
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 60000,
+              "default": 3000
+            }
+          },
+          "if": {
+            "required": [
+              "expected_head_serial"
+            ],
+            "properties": {
+              "expected_head_serial": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "head"
+            ],
+            "properties": {
+              "head": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "dcn1000Device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "connection"
+      ],
+      "properties": {
+        "kind": {
+          "const": "dcn1000"
+        },
+        "connection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "port"
+          ],
+          "properties": {
+            "port": {
+              "type": "string",
+              "minLength": 1
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 60000,
+              "default": 3000
+            }
+          }
+        }
+      }
+    },
+    "it6332aDevice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "connection"
+      ],
+      "properties": {
+        "kind": {
+          "const": "it6332a"
+        },
+        "connection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "port"
+          ],
+          "properties": {
+            "port": {
+              "type": "string",
+              "minLength": 1
+            },
+            "baud_rate": {
+              "type": "integer",
+              "minimum": 1200,
+              "maximum": 921600,
+              "default": 115200
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 60000,
+              "default": 1200
+            }
+          }
+        }
+      }
+    }
+  }
+}

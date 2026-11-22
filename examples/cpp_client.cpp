@@ -2,6 +2,7 @@
 #include "IR_station.h"
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 int main()
 {
@@ -16,8 +17,14 @@ int main()
         std::fprintf(stderr, "IR_FrameStatisticsU16: %s\n", error);
         return status;
     }
-    std::printf("analysis_version=%s\nmean_dn=%.17g\ntemporal_noise_dn=%.17g\n",
-                IR_AnalysisVersion(), summary[0], summary[1]);
-    return std::abs(summary[0] - 21.0) < 1e-12 &&
+    const char *stationVersion = IR_StationVersion();
+    const char *analysisVersion = IR_AnalysisVersion();
+    std::printf("station_version=%s\nanalysis_version=%s\nmean_dn=%.17g\ntemporal_noise_dn=%.17g\n",
+                stationVersion ? stationVersion : "(null)",
+                analysisVersion ? analysisVersion : "(null)",
+                summary[0], summary[1]);
+    return stationVersion && analysisVersion &&
+           std::strcmp(stationVersion, analysisVersion) == 0 &&
+           std::abs(summary[0] - 21.0) < 1e-12 &&
            std::abs(summary[1] - std::sqrt(2.0)) < 1e-12 ? 0 : 1;
 }

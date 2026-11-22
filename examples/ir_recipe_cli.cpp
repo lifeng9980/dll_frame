@@ -2,7 +2,10 @@
 #include <nlohmann/json.hpp>
 #ifdef _WIN32
 #include <Windows.h>
+#else
+#include <csignal>
 #endif
+#include <atomic>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -54,12 +57,26 @@ std::string readText(const fs::path &path)
 
 std::string resolveStationSource(const fs::path &stationPath, const std::string &stationText)
 {
-    auto station = Json::parse(stationText);
-    auto &acquisition = station.at("acquisition");
-    if (acquisition.at("backend") == "raw_replay") {
-        const auto source = pathFromUtf8(acquisition.at("source").get<std::string>());
-        const auto absolute = fs::absolute(stationPath.parent_path() / source).lexically_normal();
-        acquisition["source"] = pathUtf8(absolute);
+    Json station;
+    try {
+        station = Json::parse(stationText);
+    } catch (const Json::parse_error &) {
+        return stationText;
+    }
+    if (!station.is_object()) return stationText;
+    const auto acqIt = station.find("acquisition");
+    if (acqIt == station.end() || !acqIt->is_object()) return stationText;
+    auto &acquisition = *acqIt;
+    const auto backendIt = acquisition.find("backend");
+    const auto sourceIt = acquisition.find("source");
+    if (backendIt != acquisition.end() && backendIt->is_string() && *backendIt == "raw_replay" &&
+        sourceIt != acquisition.end() && sourceIt->is_string()) {
+        const auto rawSource = sourceIt->get<std::string>();
+        if (!rawSource.empty()) {
+            const auto source = pathFromUtf8(rawSource);
+            const auto absolute = fs::absolute(stationPath.parent_path() / source).lexically_normal();
+            acquisition["source"] = pathUtf8(absolute);
+        }
     }
     return station.dump();
 }
@@ -112,10 +129,72 @@ Arguments parseArguments(const std::vector<std::string> &values)
     return arguments;
 }
 
+std::atomic<bool> stopWindowActive{false};
+
+#ifdef _WIN32
+BOOL WINAPI consoleCtrlHandler(DWORD ctrlType)
+{
+    if (!stopWindowActive.load(std::memory_order_acquire))
+        return FALSE;
+    if (ctrlType == CTRL_C_EVENT || ctrlType == CTRL_BREAK_EVENT) {
+        IR_RequestStop();
+        return TRUE;
+    }
+    return FALSE;
+}
+
+class StopSignalGuard {
+public:
+    StopSignalGuard()
+    {
+        IR_RequestStop();  // Safe no-op while idle; initializes stop state before handler registration.
+        stopWindowActive.store(true, std::memory_order_release);
+        installed_ = SetConsoleCtrlHandler(consoleCtrlHandler, TRUE) != 0;
+        if (!installed_) stopWindowActive.store(false, std::memory_order_release);
+    }
+    ~StopSignalGuard()
+    {
+        stopWindowActive.store(false, std::memory_order_release);
+        if (installed_) SetConsoleCtrlHandler(consoleCtrlHandler, FALSE);
+    }
+private:
+    bool installed_{false};
+};
+#else
+void interruptHandler(int)
+{
+    if (stopWindowActive.load(std::memory_order_acquire))
+        IR_RequestStop();
+}
+
+class StopSignalGuard {
+public:
+    StopSignalGuard()
+    {
+        IR_RequestStop();
+        stopWindowActive.store(true, std::memory_order_release);
+        previousInt_ = std::signal(SIGINT, interruptHandler);
+        previousTerm_ = std::signal(SIGTERM, interruptHandler);
+    }
+    ~StopSignalGuard()
+    {
+        stopWindowActive.store(false, std::memory_order_release);
+        std::signal(SIGINT, previousInt_);
+        std::signal(SIGTERM, previousTerm_);
+    }
+private:
+    void (*previousInt_)(int){SIG_DFL};
+    void (*previousTerm_)(int){SIG_DFL};
+};
+#endif
+
 int execute(const std::vector<std::string> &values)
 {
+    bool isRunMode = false;
+    bool statusPrinted = false;
     try {
         const auto arguments = parseArguments(values);
+        isRunMode = arguments.mode == "--run";
         const auto stationPath = fs::absolute(arguments.station).lexically_normal();
         const auto recipePath = fs::absolute(arguments.recipe).lexically_normal();
         auto outputPath = arguments.output;
@@ -127,6 +206,10 @@ int execute(const std::vector<std::string> &values)
         char error[2048]{};
         auto status = IR_CheckRecipeJson(stationText.c_str(), recipeText.c_str(), error, sizeof error);
         if (status != IR_OK) {
+            if (isRunMode) {
+                statusPrinted = true;
+                std::cout << "run_status=ERROR\ncompleted_frames=0\n" << std::flush;
+            }
             std::fprintf(stderr, "recipe check status=%d %s\n", status, error);
             return status;
         }
@@ -138,23 +221,36 @@ int execute(const std::vector<std::string> &values)
 
         const auto outputText = pathUtf8(outputPath);
         IRRecipeResult run{};
-        status = IR_RunRecipeJson(stationText.c_str(), recipeText.c_str(), outputText.c_str(),
-                                  &run, error, sizeof error);
+        {
+            StopSignalGuard stopGuard;
+            status = IR_RunRecipeJson(stationText.c_str(), recipeText.c_str(), outputText.c_str(),
+                                      &run, error, sizeof error);
+        }
         if (status != IR_OK) {
+            const char *runStatus = status == IR_CANCELLED ? "CANCELLED" : "ERROR";
+            statusPrinted = true;
+            std::cout << "run_status=" << runStatus << '\n'
+                      << "completed_frames=" << run.completed_frames << '\n'
+                      << std::flush;
             std::fprintf(stderr, "recipe run status=%d stage=%d step_index=%d completed_frames=%d cleanup_status=%d %s\n",
                 status, run.failed_stage, run.failed_step_index, run.completed_frames, run.cleanup_status, error);
             return status;
         }
 
         const auto record = Json::parse(readText(outputPath / "result.json"));
-        std::cout << "run_status=" << record.at("run_status").get<std::string>() << '\n'
-                  << "completed_frames=" << record.at("completed_frames").get<int>() << '\n';
+        const auto runStatusText = record.at("run_status").get<std::string>();
+        const auto completedFrames = record.at("completed_frames").get<int>();
+        statusPrinted = true;
+        std::cout << "run_status=" << runStatusText << '\n'
+                  << "completed_frames=" << completedFrames << '\n';
         for (auto metric = record.at("metrics").begin(); metric != record.at("metrics").end(); ++metric)
             std::cout << "metric." << metric.key() << '=' << metric.value().at("value")
                       << ' ' << metric.value().at("unit").get<std::string>() << '\n';
-        if (record.at("run_status") == "NG") return 20;
+        if (runStatusText == "NG") return 20;
         return 0;
     } catch (const std::exception &error) {
+        if (isRunMode && !statusPrinted)
+            std::cout << "run_status=ERROR\ncompleted_frames=0\n" << std::flush;
         std::fprintf(stderr, "ir_run_recipe: %s\n", error.what());
         return 2;
     }

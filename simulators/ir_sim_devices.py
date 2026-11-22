@@ -7,13 +7,78 @@ import select
 import signal
 import socket
 import threading
+import time
+
+
+DOC058_ALIASES = {
+    "name": (ord("0"), 135),
+    "serial": (ord("0"), 136),
+    "head": (ord("0"), 56),
+    "mode": (ord("0"), 73),
+    "temperature": (ord("0"), 114),
+    "temp": (ord("0"), 114),
+    "read_temp": (ord("0"), 114),
+    "setpoint": (None, 97),
+    "read_setpoint": (ord("0"), 97),
+    "write_setpoint": (ord("1"), 97),
+    "set": (ord("1"), 97),
+    "set_temp": (ord("1"), 97),
+    "low_limit": (ord("0"), 67),
+    "high_limit": (ord("0"), 66),
+    "stable": (ord("0"), 92),
+}
+
+
+def parse_doc058_drop_spec(spec):
+    cleaned = spec.strip().lower()
+    if not cleaned:
+        return None
+    if cleaned in ("*", "any"):
+        return ("any", None)
+    if cleaned in DOC058_ALIASES:
+        return DOC058_ALIASES[cleaned]
+    direction = None
+    code_text = cleaned
+    if ":" in cleaned:
+        prefix, code_text = cleaned.split(":", 1)
+        if prefix in ("0", "read"):
+            direction = ord("0")
+        elif prefix in ("1", "write"):
+            direction = ord("1")
+        else:
+            raise ValueError(f"Unknown DOC058 drop direction: {spec}")
+    try:
+        function = int(code_text, 10)
+    except ValueError as error:
+        raise ValueError(f"Unknown DOC058 drop command: {spec}") from error
+    if not 0 <= function <= 255:
+        raise ValueError(f"DOC058 function code must be in 0..255: {spec}")
+    return (direction, function)
 
 
 class Blackbody:
-    def __init__(self, tcp, temperature, stable):
+    def __init__(self, tcp, temperature, stable, drop_command="", drop_count=0, log_io=False):
         self.tcp = tcp
         self.target = temperature
         self.stable = stable
+        self.drop_command = drop_command
+        self.drop_count = drop_count
+        self.log_io = log_io
+        self._drop_spec = parse_doc058_drop_spec(drop_command) if drop_command else None
+
+    def _should_drop(self, direction, function):
+        if not self.drop_command or self.drop_count <= 0:
+            return False
+        spec = self._drop_spec
+        if spec is None:
+            spec = parse_doc058_drop_spec(self.drop_command)
+            self._drop_spec = spec
+        if spec == ("any", None):
+            return True
+        expected_dir, expected_fn = spec
+        if expected_fn != function:
+            return False
+        return expected_dir is None or expected_dir == direction
 
     def handle(self, request):
         if len(request) < 3 or request[0] != 0x1B:
@@ -22,7 +87,10 @@ class Blackbody:
         function = request[2]
         argument = request[3:]
         if direction == ord("1") and function == 97:
-            self.target = float(argument.split(b",", 1)[0])
+            try:
+                self.target = float(argument.split(b",", 1)[0])
+            except ValueError:
+                return b"\x1b" + bytes([function]) + b"\x15\r"
             payload = b"\x06"
         elif direction == ord("0"):
             payloads = {
@@ -39,23 +107,42 @@ class Blackbody:
             payload = payloads.get(function, b"")
         else:
             return b""
+        if self._should_drop(direction, function):
+            self.drop_count -= 1
+            if self.log_io:
+                print(
+                    f"[DROP] dir={chr(direction)} fn={function} req={request!r} remaining={self.drop_count}",
+                    flush=True,
+                )
+            return None
         return b"\x1b" + bytes([function]) + payload + b"\r"
 
 
 class It6332a:
-    def __init__(self):
+    def __init__(self, drop_command="", drop_count=0, log_io=False):
         self.channel = 1
         self.voltage = [0.0, 0.0, 0.0]
         self.current_limit = [1.0, 1.0, 1.0]
         self.output = [False, False, False]
-        self.drop_command = ""
-        self.drop_count = 0
+        self.drop_command = drop_command
+        self.drop_count = drop_count
+        self.log_io = log_io
+
+    def _matches_drop(self, upper):
+        if not self.drop_command or self.drop_count <= 0:
+            return False
+        target = self.drop_command.strip().upper()
+        if target in ("*", "ANY"):
+            return True
+        return upper == target or upper.startswith(target + " ")
 
     def handle(self, command):
         command = command.strip().decode("ascii", errors="replace")
         upper = command.upper()
-        if upper == self.drop_command.upper() and self.drop_count > 0:
+        if self._matches_drop(upper):
             self.drop_count -= 1
+            if self.log_io:
+                print(f"[DROP] cmd={command!r} remaining={self.drop_count}", flush=True)
             return None
         if upper == "*IDN?":
             return b"ITECH,IT6332A,IR-SIMULATOR,1.0\n"
@@ -96,7 +183,22 @@ class It6332a:
         return b""
 
 
-def serve_tcp(host, port, controller, stop):
+def send_response(write_fn, response, fragment=False, log_io=False):
+    if not response:
+        return
+    if log_io:
+        print(f"[TX] {response!r}", flush=True)
+    if not fragment or len(response) <= 1:
+        write_fn(response)
+        return
+    step = max(1, min(3, len(response) // 2))
+    for offset in range(0, len(response), step):
+        write_fn(response[offset:offset + step])
+        if offset + step < len(response):
+            time.sleep(0.01)
+
+
+def serve_tcp(host, port, controller, stop, fragment=False, log_io=False):
     delimiter = b"\r"
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -118,14 +220,24 @@ def serve_tcp(host, port, controller, stop):
                         block = connection.recv(4096)
                     except socket.timeout:
                         continue
+                    except (ConnectionResetError, BrokenPipeError, OSError):
+                        break
                     if not block:
                         break
                     pending += block
+                    disconnected = False
                     while delimiter in pending:
                         request, pending = pending.split(delimiter, 1)
+                        if log_io:
+                            print(f"[RX] {request!r}", flush=True)
                         response = controller.handle(request)
-                        if response:
-                            connection.sendall(response)
+                        try:
+                            send_response(connection.sendall, response, fragment=fragment, log_io=log_io)
+                        except (ConnectionResetError, BrokenPipeError, OSError):
+                            disconnected = True
+                            break
+                    if disconnected:
+                        break
 
 
 def open_serial(port, baud):
@@ -153,10 +265,11 @@ def open_serial(port, baud):
     return descriptor
 
 
-def serve_serial(port, baud, controller, delimiter, stop):
+def serve_serial(port, baud, controller, delimiter, stop, fragment=False, log_io=False):
     handle = open_serial(port, baud)
     print(f"Serial simulator attached to {port} at {baud} baud", flush=True)
     pending = b""
+    write_fn = handle.write if os.name == "nt" else (lambda data: os.write(handle, data))
     try:
         while not stop.is_set():
             if os.name == "nt":
@@ -169,12 +282,10 @@ def serve_serial(port, baud, controller, delimiter, stop):
             pending += block
             while delimiter in pending:
                 request, pending = pending.split(delimiter, 1)
+                if log_io:
+                    print(f"[RX] {request!r}", flush=True)
                 response = controller.handle(request)
-                if response:
-                    if os.name == "nt":
-                        handle.write(response)
-                    else:
-                        os.write(handle, response)
+                send_response(write_fn, response, fragment=fragment, log_io=log_io)
     finally:
         if os.name == "nt":
             handle.close()
@@ -182,7 +293,7 @@ def serve_serial(port, baud, controller, delimiter, stop):
             os.close(handle)
 
 
-def serve_pty(controller, delimiter, baud, stop):
+def serve_pty(controller, delimiter, baud, stop, fragment=False, log_io=False):
     if os.name == "nt":
         raise RuntimeError("PTY mode is available on Linux; on Windows use a virtual COM pair and --device")
     import pty
@@ -210,9 +321,10 @@ def serve_pty(controller, delimiter, baud, stop):
             pending += os.read(master, 4096)
             while delimiter in pending:
                 request, pending = pending.split(delimiter, 1)
+                if log_io:
+                    print(f"[RX] {request!r}", flush=True)
                 response = controller.handle(request)
-                if response:
-                    os.write(master, response)
+                send_response(lambda data: os.write(master, data), response, fragment=fragment, log_io=log_io)
     finally:
         os.close(master)
         os.close(slave)
@@ -228,30 +340,58 @@ def main():
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--temperature", type=float, default=24.875)
     parser.add_argument("--unstable", action="store_true", help="report the blackbody as not stable")
+    parser.add_argument("--drop-command", default="",
+                        help="command name or DOC058 function code whose reply is dropped (e.g. 114, set, VOLT?)")
+    parser.add_argument("--drop-count", type=int, default=None,
+                        help="number of matching commands to drop (defaults to 1 when --drop-command is set)")
+    parser.add_argument("--fragment", action="store_true",
+                        help="split replies into small delayed chunks to exercise transport reassembly")
+    parser.add_argument("--log-io", action="store_true",
+                        help="log received requests, dropped commands, and transmitted replies")
     args = parser.parse_args()
+
+    drop_command = args.drop_command.strip()
+    drop_count = args.drop_count
+    if drop_count is None:
+        drop_count = 1 if drop_command else 0
+    if drop_count < 0:
+        parser.error("--drop-count must be nonnegative")
+    if drop_count > 0 and not drop_command:
+        parser.error("--drop-count requires --drop-command")
+    if args.mode.startswith("blackbody-") and drop_command:
+        try:
+            parse_doc058_drop_spec(drop_command)
+        except ValueError as error:
+            parser.error(str(error))
 
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     if args.mode == "blackbody-tcp":
-        serve_tcp(args.host, args.port, Blackbody(True, args.temperature, not args.unstable), stop)
+        controller = Blackbody(True, args.temperature, not args.unstable,
+                               drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
+        serve_tcp(args.host, args.port, controller, stop, fragment=args.fragment, log_io=args.log_io)
         return
     if args.mode == "blackbody-pty":
-        serve_pty(Blackbody(False, args.temperature, not args.unstable), b"\r", 9600, stop)
+        controller = Blackbody(False, args.temperature, not args.unstable,
+                               drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
+        serve_pty(controller, b"\r", 9600, stop, fragment=args.fragment, log_io=args.log_io)
         return
     if args.mode == "power-pty":
-        serve_pty(It6332a(), b"\n", 115200, stop)
+        controller = It6332a(drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
+        serve_pty(controller, b"\n", 115200, stop, fragment=args.fragment, log_io=args.log_io)
         return
     if not args.device:
         parser.error("--device is required for serial modes")
     if args.mode == "blackbody-serial":
-        controller = Blackbody(False, args.temperature, not args.unstable)
+        controller = Blackbody(False, args.temperature, not args.unstable,
+                               drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
         delimiter = b"\r"
         baud = 9600
     else:
-        controller = It6332a()
+        controller = It6332a(drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
         delimiter = b"\n"
         baud = args.baud
-    serve_serial(args.device, baud, controller, delimiter, stop)
+    serve_serial(args.device, baud, controller, delimiter, stop, fragment=args.fragment, log_io=args.log_io)
 
 
 if __name__ == "__main__":

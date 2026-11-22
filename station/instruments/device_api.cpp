@@ -142,36 +142,36 @@ auto findDevice(IRHandle handle)
     return pos;
 }
 
-template<class Action> void useBlackbody(IRHandle handle, Action action)
+template<class Action> void useSession(IRHandle handle, Action action)
 {
     std::shared_ptr<Session> device;
+    std::unique_lock<std::mutex> operationLock;
     {
         std::lock_guard lock(devicesMutex);
         device = findDevice(handle)->second;
+        require(device->workflowOwner == std::thread::id{} ||
+                device->workflowOwner == std::this_thread::get_id(),
+                IR_BUSY, "Instrument is reserved by a measurement procedure");
+        operationLock = std::unique_lock<std::mutex>(device->mutex, std::try_to_lock);
+        require(operationLock.owns_lock(), IR_BUSY, "Another instrument operation is active");
     }
-    std::unique_lock operationLock(device->mutex, std::try_to_lock);
-    require(operationLock.owns_lock(), IR_BUSY, "Another instrument operation is active");
-    require(device->workflowOwner == std::thread::id{} ||
-            device->workflowOwner == std::this_thread::get_id(),
-            IR_BUSY, "Instrument is reserved by a measurement procedure");
-    require(bool(device->blackbody), IR_BAD_ARGUMENT, "Device handle is not a blackbody");
-    action(*device->blackbody);
+    action(*device);
+}
+
+template<class Action> void useBlackbody(IRHandle handle, Action action)
+{
+    useSession(handle, [&](Session &device) {
+        require(bool(device.blackbody), IR_BAD_ARGUMENT, "Device handle is not a blackbody");
+        action(*device.blackbody);
+    });
 }
 
 template<class Action> void usePower(IRHandle handle, Action action)
 {
-    std::shared_ptr<Session> device;
-    {
-        std::lock_guard lock(devicesMutex);
-        device = findDevice(handle)->second;
-    }
-    std::unique_lock operationLock(device->mutex, std::try_to_lock);
-    require(operationLock.owns_lock(), IR_BUSY, "Another instrument operation is active");
-    require(device->workflowOwner == std::thread::id{} ||
-            device->workflowOwner == std::this_thread::get_id(),
-            IR_BUSY, "Instrument is reserved by a measurement procedure");
-    require(bool(device->power), IR_BAD_ARGUMENT, "Device handle is not an IT6332A power supply");
-    action(*device->power);
+    useSession(handle, [&](Session &device) {
+        require(bool(device.power), IR_BAD_ARGUMENT, "Device handle is not an IT6332A power supply");
+        action(*device.power);
+    });
 }
 }
 
@@ -203,9 +203,9 @@ DeviceLease::DeviceLease(const IRHandle *handles, std::size_t count)
     std::vector<std::unique_lock<std::mutex>> sessionLocks;
     sessionLocks.reserve(sessions.size());
     for (const auto &session : sessions) {
+        require(session->workflowOwner == std::thread::id{}, IR_BUSY, "Instrument is already reserved");
         sessionLocks.emplace_back(session->mutex, std::try_to_lock);
         require(sessionLocks.back().owns_lock(), IR_BUSY, "An instrument operation is active");
-        require(session->workflowOwner == std::thread::id{}, IR_BUSY, "Instrument is already reserved");
     }
     for (const auto &session : sessions) session->workflowOwner = owner;
 }
@@ -289,9 +289,9 @@ extern "C" int32_t IR_CloseDevice(IRHandle handle, char *err, int32_t bytes)
             std::lock_guard registryLock(devicesMutex);
             const auto pos = findDevice(handle);
             device = pos->second;
+            require(device->workflowOwner == std::thread::id{}, IR_BUSY, "Instrument is in use");
             deviceLock = std::unique_lock<std::mutex>(device->mutex, std::try_to_lock);
             require(deviceLock.owns_lock(), IR_BUSY, "Instrument operation is active");
-            require(device->workflowOwner == std::thread::id{}, IR_BUSY, "Instrument is in use");
             endpointKeys = device->endpointKeys;
             openingEndpoints.insert(endpointKeys.begin(), endpointKeys.end());
             closingBlackbody = std::move(device->blackbody);

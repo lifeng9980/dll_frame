@@ -45,6 +45,17 @@ bool parseOutput(const std::string &reply)
     if (value == "0" || value == "OFF") return false;
     throw Error(IR_IO_ERROR, "IT6332A returned an invalid output state: " + reply);
 }
+
+std::string formatFixed(double value)
+{
+    if (value == 0.0) value = 0.0;  // Avoid emitting "-0.000000" to SCPI power supplies.
+    char buffer[64];
+    const auto converted = std::to_chars(buffer, buffer + sizeof buffer, value,
+                                         std::chars_format::fixed, 6);
+    require(converted.ec == std::errc{}, IR_BAD_ARGUMENT,
+            "IT6332A setpoint cannot be formatted");
+    return std::string(buffer, converted.ptr);
+}
 }
 
 It6332aPower::It6332aPower(It6332aConfig config) : config_(std::move(config))
@@ -162,13 +173,15 @@ It6332aReading It6332aPower::setChannel(int channel, double voltageV, double cur
     require(std::isfinite(voltageV) && voltageV >= 0.0 &&
             std::isfinite(currentLimitA) && currentLimitA > 0.0,
             IR_BAD_ARGUMENT, "IT6332A voltage must be nonnegative and current limit must be positive");
+    const auto voltageText = formatFixed(voltageV);
+    const auto currentText = formatFixed(currentLimitA);
 
     try {
         if (!link_) connect();
         ensureRemote();
         selectChannel(channel);
-        write("VOLT " + std::to_string(voltageV));
-        write("CURR " + std::to_string(currentLimitA));
+        write("VOLT " + voltageText);
+        write("CURR " + currentText);
     } catch (const Error &error) {
         link_.reset();
         if (!transportFailure(error)) throw;

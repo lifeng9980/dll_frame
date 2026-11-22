@@ -1,4 +1,5 @@
 {
+  "$schema": "../schemas/recipe.schema.json",
   "schema_version": 1,
   "recipe_id": "sim-power-readback-v1",
   "steps": [

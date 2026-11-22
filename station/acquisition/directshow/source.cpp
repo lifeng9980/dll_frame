@@ -227,6 +227,12 @@ public:
         interrupted_ = false;
     }
 
+    void clearQueue()
+    {
+        std::lock_guard lock(mutex_);
+        frames_.clear();
+    }
+
     void wake()
     {
         {
@@ -248,7 +254,7 @@ public:
     }
 
 private:
-    static constexpr size_t QueueCapacity = 4;
+    static constexpr size_t QueueCapacity = 64;
     std::atomic<ULONG> references_{1};
     std::mutex mutex_;
     std::condition_variable ready_;
@@ -324,6 +330,14 @@ public:
             hasPreviousSequence_ = true;
             return;
         }
+    }
+
+    void flush() override
+    {
+        require(running_, IR_BAD_ARGUMENT, "Start DirectShow capture before flushing frames");
+        callback_->clearQueue();
+        previousSequence_ = 0;
+        hasPreviousSequence_ = false;
     }
 
     void stop() override

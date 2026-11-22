@@ -58,6 +58,15 @@ void Capture::checkOwner() const
 }
 void Capture::beginOperation() noexcept { stopState_.store(StopState::active); }
 void Capture::endOperation() noexcept { stopState_.store(StopState::idle); }
+bool Capture::tryEnterStandaloneStopScope() noexcept
+{
+    auto expected = StopState::idle;
+    return stopState_.compare_exchange_strong(expected, StopState::active);
+}
+void Capture::leaveStandaloneStopScope(bool entered) noexcept
+{
+    if (entered) stopState_.store(StopState::idle);
+}
 void Capture::requestStop() noexcept
 {
     auto expected = StopState::active;
@@ -120,6 +129,44 @@ void Capture::read(int count, int timeoutMs, uint16_t *out, int64_t capacity,
         checkStop();
     }
 }
+void Capture::flush(int32_t discardFrames, int32_t timeoutMs, int32_t &discarded)
+{
+    discarded = 0;
+    require(running && discardFrames >= 0 && timeoutMs >= 0, IR_BAD_ARGUMENT,
+            "Start source and specify nonnegative discard count and timeout");
+    checkStop();
+    source->flush();
+    if (discardFrames == 0)
+        return;
+
+    const auto g = source->geometry();
+    const auto n = pixels(g.height, g.width);
+    std::vector<uint16_t> scratch(static_cast<size_t>(n), 0);
+    for (int32_t i = 0; i < discardFrames; ++i) {
+        checkStop();
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(timeoutMs);
+        IRFrameStamp stamp{};
+        bool attempted = false;
+        for (;;) {
+            checkStop();
+            const auto now = std::chrono::steady_clock::now();
+            if (attempted && now >= deadline)
+                throw Error(IR_TIMEOUT, "Frame flush wait timed out");
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+            const auto wait = std::clamp<int64_t>(remaining, 0, 50);
+            try {
+                source->read(scratch.data(), stamp, int(wait));
+                break;
+            } catch (const Error &error) {
+                if (error.code != IR_TIMEOUT || std::chrono::steady_clock::now() >= deadline) throw;
+            }
+            attempted = true;
+        }
+        ++discarded;
+        checkStop();
+    }
+}
 }
 using namespace ir::acquisition;
 extern "C" int32_t IR_OpenFrames(int32_t backend, const char *name, int32_t bits,
@@ -155,6 +202,19 @@ extern "C" int32_t IR_ReadFrames(int32_t count, int32_t ms, uint16_t *out, int64
         auto lock = lockCapture(); auto &c = capture();
         c.checkOwner(); c.read(count, ms, out, cap, stamps, sc, *completed);
     });
+}
+extern "C" int32_t IR_FlushFrames(int32_t discard_frames, int32_t timeout_ms,
+    int32_t *discarded, char *err, int32_t size)
+{
+    int32_t localDiscarded = 0;
+    if (discarded) *discarded = 0;
+    const auto status = guarded(err, size, [&] {
+        auto lock = lockCapture(); auto &c = capture();
+        c.checkOwner();
+        c.flush(discard_frames, timeout_ms, localDiscarded);
+    });
+    if (discarded) *discarded = localDiscarded;
+    return status;
 }
 extern "C" void IR_RequestStop(void) { capture().requestStop(); }
 extern "C" int32_t IR_StopFrames(char *err, int32_t size)

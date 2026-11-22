@@ -73,6 +73,11 @@ def main():
     check_output_directory(output)
 
     sdk, dll_directory = load_station(args.library_dir.resolve())
+    sdk.IR_StationVersion.argtypes = []
+    sdk.IR_StationVersion.restype = c.c_char_p
+    station_version = sdk.IR_StationVersion()
+    if not station_version or not station_version.decode("utf-8"):
+        raise RuntimeError("IR_StationVersion returned an empty string")
     error_args = [c.c_char_p, c.c_int32]
     sdk.IR_CheckRecipeJson.argtypes = [c.c_char_p, c.c_char_p, *error_args]
     sdk.IR_RunRecipeJson.argtypes = [c.c_char_p, c.c_char_p, c.c_char_p, c.POINTER(RecipeResult), *error_args]

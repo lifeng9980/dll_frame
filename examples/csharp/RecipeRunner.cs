@@ -27,6 +27,8 @@ internal static class RecipeRunner
                 return 2;
             }
             IRStation.ConfigureNativeLibraries(Path.GetFullPath(libraryDirectory));
+            if (string.IsNullOrEmpty(IRStation.StationVersion()))
+                throw new InvalidOperationException("IR_StationVersion returned an empty string.");
 
             var stationPath = Path.GetFullPath(args[1]);
             var recipePath = Path.GetFullPath(args[2]);

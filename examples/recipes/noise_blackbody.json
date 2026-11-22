@@ -1,4 +1,5 @@
 {
+  "$schema": "../schemas/recipe.schema.json",
   "schema_version": 1,
   "recipe_id": "sim-blackbody-noise-v1",
   "steps": [

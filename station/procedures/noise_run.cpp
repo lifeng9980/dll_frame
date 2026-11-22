@@ -64,6 +64,7 @@ extern "C" int32_t IR_RunNoise(const IRNoiseRecipe *recipe, const char *output,
             }
             if (output) procedures::checkDestination(directory);
 
+            const auto startedUtc = procedures::utcTimestampNow();
             step = IR_NOISE_STEP_RESERVE;
             procedures::Measurement measurement;
             auto &capture = measurement.frames();
@@ -114,7 +115,7 @@ extern "C" int32_t IR_RunNoise(const IRNoiseRecipe *recipe, const char *output,
                     step = IR_NOISE_STEP_SAVE;
                     procedures::saveNoiseRun(directory, *recipe, capture.backend, capture.sourceName, geometry,
                                              frames, stamps, measured, blackbodySetpointReadback,
-                                             recipe->blackbody ? &blackbodyReading : nullptr);
+                                             recipe->blackbody ? &blackbodyReading : nullptr, startedUtc);
                 }
                 *result = measured;
                 result->failed_step = IR_NOISE_STEP_NONE;

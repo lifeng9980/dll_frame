@@ -15,6 +15,9 @@ typedef uint64_t IRHandle;
 #ifdef __cplusplus
 extern "C" {
 #endif
+/* 版本字符串为 UTF-8，由库持有，库卸载前有效。 */
+IR_STATION_API const char *IR_StationVersion(void);
+
 enum IRBackend {
     IR_DIRECTSHOW = 1, /* Windows DirectShow device name, e.g. FX3. */
     IR_RAW_REPLAY = 2,
@@ -60,6 +63,11 @@ IR_STATION_API int32_t IR_StartFrames(char *err, int32_t err_bytes);
 IR_STATION_API int32_t IR_ReadFrames(int32_t count, int32_t timeout_ms, uint16_t *pixels,
     int64_t pixel_capacity, IRFrameStamp *stamps, int32_t stamp_capacity, int32_t *completed,
     char *err, int32_t err_bytes);
+/* 清空底层已排队帧并重置连续性检查起点，同时按 timeout_ms 读取并丢弃 discard_frames 个稳定过渡帧（不因组间停顿触发 IR_FRAME_GAP）。
+ * 适用于长时多组采集中保持采集源不断流、按 Burst 分段读取。discarded 可为 NULL。
+ */
+IR_STATION_API int32_t IR_FlushFrames(int32_t discard_frames, int32_t timeout_ms,
+    int32_t *discarded, char *err, int32_t err_bytes);
 /* 可以从其他线程请求停止当前采集或自动流程。等待取帧时分段检查取消，
    同步设备事务结束后也会检查。原工作线程负责停流和收尾。空闲时的请求不影响下一次运行。 */
 IR_STATION_API void IR_RequestStop(void);

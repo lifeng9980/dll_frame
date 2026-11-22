@@ -59,6 +59,8 @@ class Controller:
         self.writes = 0
         self.error = None
         self.stable_reply = threading.Event()
+        self.stable_reply_count = 0
+        self.stable_reply_cond = threading.Condition()
 
     def reply(self, request, send):
         assert request[:1] == b"\x1b"
@@ -112,6 +114,9 @@ class Controller:
             send(b"\x1b" + bytes([function]) + payload + b"\r")
         if function == 92:
             self.stable_reply.set()
+            with self.stable_reply_cond:
+                self.stable_reply_count += 1
+                self.stable_reply_cond.notify_all()
         return True
 
     def serve(self, read, send, stop):
@@ -197,6 +202,78 @@ def exercise(sdk, controller, config):
     check(sdk.IR_ReadBlackbody, handle, c.byref(reading), expected=invalid_handle)
 
 
+def exercise_wait_blackbody_stable(sdk, controller, config):
+    handle = c.c_uint64()
+    error = c.create_string_buffer(1024)
+    error_args = [c.c_char_p, c.c_int32]
+    sdk.IR_WaitBlackbodyStable.argtypes = [
+        c.c_uint64, c.c_double, c.c_double, c.c_int32, c.c_int32, c.c_int32,
+        c.POINTER(Reading), *error_args,
+    ]
+    sdk.IR_WaitBlackbodyStable.restype = c.c_int32
+    sdk.IR_RequestStop.argtypes = []
+    sdk.IR_RequestStop.restype = None
+
+    kind = 2 if controller.tcp else 3
+    status = sdk.IR_OpenDevice(kind, json.dumps(config).encode(), c.byref(handle), error, len(error))
+    assert status == 0, (status, error.value)
+    prev_stable = controller.stable
+    try:
+        target = float(controller.target)
+        reading = Reading()
+
+        controller.stable = True
+        status = sdk.IR_WaitBlackbodyStable(
+            handle, target, 0.05, 80, 1200, 1, c.byref(reading), error, len(error)
+        )
+        assert status == 0 and reading.actual_c == target and reading.stable == 1, (
+            status, reading.actual_c, reading.stable, error.value
+        )
+
+        controller.stable = False
+        status = sdk.IR_WaitBlackbodyStable(
+            handle, target, 0.05, 100, 200, 1, c.byref(reading), error, len(error)
+        )
+        assert status == 7, (status, error.value)
+
+        with controller.stable_reply_cond:
+            before_replies = controller.stable_reply_count
+        worker_status = []
+        worker_err = c.create_string_buffer(1024)
+        worker_reading = Reading()
+
+        def wait_worker():
+            worker_status.append(
+                sdk.IR_WaitBlackbodyStable(
+                    handle, target, 0.05, 500, 5000, 1,
+                    c.byref(worker_reading), worker_err, len(worker_err),
+                )
+            )
+
+        t = threading.Thread(target=wait_worker)
+        t.start()
+        try:
+            with controller.stable_reply_cond:
+                assert controller.stable_reply_cond.wait_for(
+                    lambda: controller.stable_reply_count > before_replies, timeout=2.0
+                ), "IR_WaitBlackbodyStable did not poll controller"
+            sdk.IR_RequestStop()
+        finally:
+            t.join(5)
+            assert not t.is_alive()
+        assert worker_status == [8], (worker_status, worker_err.value)
+
+        controller.stable = True
+        status = sdk.IR_WaitBlackbodyStable(
+            handle, target, 0.05, 50, 1200, 1, c.byref(reading), error, len(error)
+        )
+        assert status == 0 and reading.stable == 1, (status, error.value)
+    finally:
+        controller.stable = prev_stable
+        close_status = sdk.IR_CloseDevice(handle, error, len(error))
+        assert close_status == 0, (close_status, error.value)
+
+
 def exercise_recipe(args, sdk, controller, config):
     env = os.environ.copy()
     if os.name == "nt":
@@ -252,6 +329,10 @@ def exercise_saved_recipe(sdk, controller, config, fixture):
             status = sdk.IR_RunNoise(c.byref(recipe), str(output).encode(), c.byref(result), error, len(error))
             assert status == 0, error.value
             saved = json.loads((output / "result.json").read_text(encoding="utf8"))
+            assert saved["station_version"] == saved["analysis_version"] and saved["station_version"]
+            assert isinstance(saved["source_commit"], str) and saved["source_commit"]
+            assert saved["started_utc"].endswith("Z") and saved["finished_utc"].endswith("Z")
+            assert saved["started_utc"] <= saved["finished_utc"]
             blackbody = saved["blackbody"]
             assert blackbody["temperature_c"] == blackbody["setpoint_readback_c"] == 32
             assert blackbody["actual_c"] == 32 and blackbody["device_stable"] is True, blackbody
@@ -305,6 +386,10 @@ def exercise_json_recipe(sdk, controller, config, fixture):
     assert (result.completed_frames, result.failed_stage, result.failed_step_index, result.cleanup_status) == (2, 0, -1, 0)
     record = json.loads((output / "result.json").read_text(encoding="utf8"))
     assert record["run_status"] == "PASS" and record["completed_frames"] == 2
+    assert record["station_version"] == record["analysis_version"] and record["station_version"]
+    assert isinstance(record["source_commit"], str) and record["source_commit"]
+    assert record["started_utc"].endswith("Z") and record["finished_utc"].endswith("Z")
+    assert record["started_utc"] <= record["finished_utc"]
     assert record["conditions"][0]["setpoint_readback_c"] == 32.0
     assert math.isclose(record["metrics"]["noise.temporal_noise_dn"]["value"],
                         math.sqrt(2), rel_tol=0, abs_tol=1e-12)
@@ -510,6 +595,145 @@ def exercise_json_recipe_ownership(args, sdk, controller, config):
         assert result["completed_frames"] == 2 and result["run_status"] == "COMPLETED"
 
 
+def exercise_concurrent_polling_regression(args, sdk, controller, config):
+    """Hammer IR_ReadBlackbody, IR_SetBlackbody, and IR_CloseDevice from other threads during stabilization."""
+    error_args = [c.c_char_p, c.c_int32]
+    sdk.IR_OpenDevice.argtypes = [c.c_int32, c.c_char_p, c.POINTER(c.c_uint64), *error_args]
+    sdk.IR_CloseDevice.argtypes = [c.c_uint64, *error_args]
+    sdk.IR_SetBlackbody.argtypes = [c.c_uint64, c.c_double, c.POINTER(c.c_double), *error_args]
+    sdk.IR_ReadBlackbody.argtypes = [c.c_uint64, c.POINTER(Reading), *error_args]
+    sdk.IR_OpenFrames.argtypes = [c.c_int32, c.c_char_p, c.c_int32, c.POINTER(Geometry), *error_args]
+    sdk.IR_CloseFrames.argtypes = error_args
+    sdk.IR_RunNoise.argtypes = [c.POINTER(NoiseRecipe), c.c_char_p, c.POINTER(NoiseResult), *error_args]
+
+    with TemporaryDirectory(prefix="polling-race-", dir=args.fixture_parent) as temporary:
+        fixture = Path(temporary)
+        (fixture / "frames.raw").write_bytes(b"\x14\x00\x16\x00")
+        (fixture / "frames.csv").write_text(
+            "frame_index,width,height,stride_bytes,pixel_format,bit_depth,endianness\n"
+            "0,1,1,2,RAW16_LE,16,little\n1,1,1,2,RAW16_LE,16,little\n", encoding="utf8")
+
+        error = c.create_string_buffer(1024)
+        handle = c.c_uint64()
+        kind = 2 if controller.tcp else 3
+        status = sdk.IR_OpenDevice(kind, json.dumps(config).encode(), c.byref(handle), error, len(error))
+        assert status == 0, error.value
+
+        controller.stable = False
+        with controller.stable_reply_cond:
+            controller.stable_reply_count = 0
+
+        recipe = NoiseRecipe(b"polling-race-regression", 0, handle.value, 0, 0, 0, 32.0, 0.01,
+                             200, 10000, 1, 2, 0)
+        outcome = {}
+
+        def run_worker():
+            worker_error = c.create_string_buffer(1024)
+            geometry = Geometry()
+            opened = sdk.IR_OpenFrames(2, str(fixture).encode(), 0, c.byref(geometry),
+                                       worker_error, len(worker_error))
+            if opened != 0:
+                outcome["open"] = (opened, worker_error.value)
+                return
+            try:
+                result = NoiseResult()
+                run_status = sdk.IR_RunNoise(c.byref(recipe), None, c.byref(result),
+                                             worker_error, len(worker_error))
+                outcome["run"] = (run_status, worker_error.value, result)
+            finally:
+                closed = sdk.IR_CloseFrames(worker_error, len(worker_error))
+                outcome["close_frames"] = (closed, worker_error.value)
+
+        worker = threading.Thread(target=run_worker)
+        worker.start()
+        closed_cleanly = False
+
+        try:
+            with controller.stable_reply_cond:
+                reached = controller.stable_reply_cond.wait_for(
+                    lambda: controller.stable_reply_count >= 1, timeout=5.0)
+            assert reached, "procedure did not enter stabilization polling"
+
+            stop_attackers = threading.Event()
+            attacker_errors = []
+            counts = {"read": 0, "set": 0, "close": 0}
+
+            def hammer_read():
+                local_error = c.create_string_buffer(256)
+                reading = Reading()
+                while not stop_attackers.is_set():
+                    code = sdk.IR_ReadBlackbody(handle, c.byref(reading), local_error, len(local_error))
+                    if code != 9:
+                        attacker_errors.append(("IR_ReadBlackbody", code, local_error.value))
+                        break
+                    counts["read"] += 1
+
+            def hammer_set():
+                local_error = c.create_string_buffer(256)
+                readback = c.c_double()
+                while not stop_attackers.is_set():
+                    code = sdk.IR_SetBlackbody(handle, 35.0, c.byref(readback), local_error, len(local_error))
+                    if code != 9:
+                        attacker_errors.append(("IR_SetBlackbody", code, local_error.value))
+                        break
+                    counts["set"] += 1
+
+            def hammer_close():
+                local_error = c.create_string_buffer(256)
+                while not stop_attackers.is_set():
+                    code = sdk.IR_CloseDevice(handle, local_error, len(local_error))
+                    if code != 9:
+                        attacker_errors.append(("IR_CloseDevice", code, local_error.value))
+                        break
+                    counts["close"] += 1
+
+            reader = threading.Thread(target=hammer_read)
+            setter = threading.Thread(target=hammer_set)
+            closer = threading.Thread(target=hammer_close)
+            reader.start()
+            setter.start()
+            closer.start()
+            try:
+                with controller.stable_reply_cond:
+                    polled = controller.stable_reply_cond.wait_for(
+                        lambda: controller.stable_reply_count >= 5 or not worker.is_alive(),
+                        timeout=6.0)
+                assert polled, f"stabilization polling stalled at {controller.stable_reply_count}"
+                deadline = time.monotonic() + 5.0
+                while (counts["read"] < 20 or counts["set"] < 20 or counts["close"] < 20) and time.monotonic() < deadline and not attacker_errors:
+                    time.sleep(0.01)
+            finally:
+                stop_attackers.set()
+                reader.join(3)
+                setter.join(3)
+                closer.join(3)
+                assert not reader.is_alive() and not setter.is_alive() and not closer.is_alive()
+
+            assert not attacker_errors, f"concurrent calls did not return IR_BUSY: {attacker_errors}"
+            assert counts["read"] >= 20 and counts["set"] >= 20 and counts["close"] >= 20, counts
+            assert worker.is_alive(), f"worker aborted prematurely during concurrent polling: {outcome}"
+
+            controller.stable = True
+            worker.join(8)
+            assert not worker.is_alive(), "worker did not finish after blackbody stabilized"
+            assert "open" not in outcome, outcome
+            assert outcome["close_frames"][0] == 0, outcome["close_frames"]
+            run_status, run_err, result = outcome["run"]
+            assert run_status == 0, (run_status, run_err, result.failed_step, result.cleanup_status)
+            assert (result.completed, result.failed_step, result.cleanup_status) == (2, 0, 0)
+
+            reading = Reading()
+            assert sdk.IR_ReadBlackbody(handle, c.byref(reading), error, len(error)) == 0, error.value
+            assert sdk.IR_CloseDevice(handle, error, len(error)) == 0, error.value
+            closed_cleanly = True
+        finally:
+            controller.stable = True
+            if worker.is_alive():
+                worker.join(8)
+            if not closed_cleanly:
+                sdk.IR_CloseDevice(handle, error, len(error))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=["tcp", "serial"])
@@ -573,9 +797,11 @@ def main():
     server.start()
     try:
         exercise(sdk, controller, config)
+        exercise_wait_blackbody_stable(sdk, controller, config)
         exercise_recipe(args, sdk, controller, config)
         exercise_recipe_ownership(args, sdk, controller, config)
         exercise_json_recipe_ownership(args, sdk, controller, config)
+        exercise_concurrent_polling_regression(args, sdk, controller, config)
     finally:
         stop.set()
         server.join(5)

@@ -33,7 +33,14 @@ int main(int argc, char **argv)
         fprintf(stderr, "Device: %s\n", error);
         return 1;
     }
-    const char *version = IR_AnalysisVersion();
-    puts(version);
-    return argc > 1 && strcmp(argv[1], version) != 0;
+    const char *analysis_version = IR_AnalysisVersion();
+    const char *station_version = IR_StationVersion();
+    if (!analysis_version || !station_version || strcmp(analysis_version, station_version) != 0) {
+        fprintf(stderr, "Version mismatch: analysis=%s station=%s\n",
+            analysis_version ? analysis_version : "(null)",
+            station_version ? station_version : "(null)");
+        return 1;
+    }
+    puts(station_version);
+    return argc > 1 && strcmp(argv[1], station_version) != 0;
 }
