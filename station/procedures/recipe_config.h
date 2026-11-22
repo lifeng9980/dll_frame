@@ -185,6 +185,28 @@ struct DetectorGpolStep {
     double gpolV{};
 };
 
+struct DetectorRegisterStep {
+    StepRef ref;
+    std::string device;
+    uint8_t commandCode{};
+    std::vector<uint8_t> payload;
+    std::string payloadHex;
+};
+
+struct DetectorCurrentStep {
+    StepRef ref;
+    std::string device;
+    std::string name;
+    int32_t gainCode{};
+    uint16_t channelCode{};
+};
+
+struct CoolerReadStep {
+    StepRef ref;
+    std::string device;
+    std::string name;
+};
+
 struct MetricV2Operations {
     std::function<void(IRGeometry)> checkGeometry;
     std::function<void(ExecutionContext &)> execute;
@@ -201,7 +223,8 @@ struct AnalysisStepV2 {
 
 using InnerStepV2 = std::variant<
     BlackbodyStep, PowerStep, OvenStabilizeStep, OvenStandbyStep, DmmReadStep,
-    DetectorTimingStep, DetectorGpolStep, FlushStep, CaptureStepV2, AnalysisStepV2>;
+    DetectorTimingStep, DetectorGpolStep, DetectorRegisterStep, DetectorCurrentStep,
+    CoolerReadStep, FlushStep, CaptureStepV2, AnalysisStepV2>;
 
 struct RepeatBurstStep {
     StepRef ref;
@@ -215,8 +238,9 @@ struct RepeatBurstStep {
 
 using StepV2 = std::variant<
     BlackbodyStep, PowerStep, OvenStabilizeStep, OvenStandbyStep, DmmReadStep,
-    DetectorTimingStep, DetectorGpolStep, FlushStep, CaptureStepV2,
-    AnalysisStepV2, SaveRawStepV2, RepeatBurstStep>;
+    DetectorTimingStep, DetectorGpolStep, DetectorRegisterStep, DetectorCurrentStep,
+    CoolerReadStep, FlushStep, CaptureStepV2, AnalysisStepV2, SaveRawStepV2,
+    RepeatBurstStep>;
 
 struct RecipeConfigV2 {
     std::string id;

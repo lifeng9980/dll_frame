@@ -11,7 +11,8 @@ enum IRDeviceKind {
     IR_IT6332A = 4,
     IR_OVEN_GWS_STEN = 5,
     IR_DMM6500 = 6,
-    IR_DETECTOR_SERIAL = 7
+    IR_DETECTOR_SERIAL = 7,
+    IR_COOLER_MODBUS = 8
 };
 
 typedef struct IRBlackbodyReading {
@@ -59,7 +60,8 @@ typedef struct IRPowerReading {
     int32_t output_enabled;
 } IRPowerReading;
 
-/* IT6332A 串口配置 JSON 含 port，可选 baud_rate（默认 115200）和 timeout_ms（默认 1200）。
+/* IT6332A 配置 JSON 含串口 port（baud_rate 默认 115200，可选 data_bits/parity/stop_bits）
+ * 或 TCP host/tcp_port（默认 5026）二选一，以及可选 timeout_ms（默认 1200）。
  * 打开时确认 *IDN? 返回 IT6332A，并切换到远程控制。每个操作先确认所选通道。
  * 读数单位为 V 和 A。通道号由设备支持范围 1～3 校验。
  * 指定设备正被流程预约时，本组操作返回 IR_BUSY。
@@ -138,6 +140,13 @@ IR_STATION_API int32_t IR_ReadDmm(IRHandle handle, int32_t expected_mode,
 
 /* ======================== 探测器串口控制 (CC 帧协议) ======================== */
 
+typedef struct IRDetectorCurrentReading {
+    uint32_t raw_code;          /* 24-bit ADC 原始码 */
+    uint32_t reserved;          /* 对齐保留，置 0 */
+    double sense_voltage_v;     /* 采样电阻端电压，V */
+    double current_ma;          /* 换算电流，mA（R = 1 Ohm） */
+} IRDetectorCurrentReading;
+
 /* 探测器串口控制配置 JSON 含 port（默认 115200 baud）或 host/tcp_port（默认 2102）二选一，
  * 可选 timeout_ms（默认 1200）与 inter_command_ms（默认 0）。
  */
@@ -147,6 +156,23 @@ IR_STATION_API int32_t IR_SetDetectorGpol(IRHandle handle, double gpol_v,
     char *err, int32_t err_bytes);
 IR_STATION_API int32_t IR_SetDetectorRegister(IRHandle handle, uint8_t command_code,
     const uint8_t *payload, int32_t payload_bytes, char *err, int32_t err_bytes);
+IR_STATION_API int32_t IR_MeasureDetectorCurrent(IRHandle handle, int32_t gain_code,
+    uint16_t channel_code, IRDetectorCurrentReading *reading,
+    char *err, int32_t err_bytes);
+
+/* ======================== 制冷机监测 (Modbus RTU) ======================== */
+
+typedef struct IRCoolerReading {
+    uint32_t raw_value;         /* Modbus 保持寄存器 32 位无符号值 */
+    int32_t valid;              /* 1=有效 */
+    double voltage_mv;          /* 温度电压，mV = raw_value / 100.0 */
+} IRCoolerReading;
+
+/* 制冷机 Modbus RTU 配置 JSON 含 port（默认 9600 baud 8N2）或 host/tcp_port（默认 5020）二选一，
+ * 可选 slave_address（1..247，默认 1）、register_address（0..65535，默认 0x7A52）与 timeout_ms（默认 2000）。
+ */
+IR_STATION_API int32_t IR_ReadCooler(IRHandle handle, IRCoolerReading *reading,
+    char *err, int32_t err_bytes);
 
 #ifdef __cplusplus
 }

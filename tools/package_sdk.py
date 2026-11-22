@@ -23,6 +23,7 @@ REQUIRED_CUSTOMER_FILES = (
     "docs/第三方组件.md",
     "examples/schemas/station.schema.json",
     "examples/schemas/recipe.schema.json",
+    "examples/schemas/recipe.v2.schema.json",
 )
 FORBIDDEN_PACKAGE_FILES = (
     "实施计划.md",

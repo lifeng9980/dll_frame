@@ -13,10 +13,10 @@ IR SDK 面向 Windows x64 与 Ubuntu 24.04 x86-64 使用同一份源码和公共
 
 | 层 | 改动入口 | 输入和输出 |
 |---|---|---|
-| 仪器控制 | `station/instruments/` 按设备型号接入，`transport/asio_link.cpp` 共用 Asio TCP 与串口 | `IR_OpenDevice` 接收型号和连接 JSON，黑体/电源提供设温、输出、回读；`1.5.0` 新增 GWS STEN 烘箱（`IR_OVEN_GWS_STEN`：`IR_SetOven`/`IR_ReadOven`/`IR_StopOven`/`IR_WaitOvenStable`）、Keithley DMM6500 SCPI（`IR_DMM6500`：`IR_SetDmmMode`/`IR_ReadDmm`）与探测器 `0xCC` 串口控制（`IR_DETECTOR_SERIAL`：`IR_SetDetectorTiming`/`IR_SetDetectorGpol`/`IR_SetDetectorRegister`）；`IR_RunNoise` 支持 `recipe->detector != 0` 下发积分/空扫时间（`IR_NOISE_STEP_SET_DETECTOR`）；`IR_ListSerialPorts` 枚举可用串口。新设备需说明哪些命令可以安全重试 |
+| 仪器控制 | `station/instruments/` 按设备型号接入，`transport/asio_link.cpp` 共用 Asio TCP 与串口 | `IR_OpenDevice` 接收型号和连接 JSON，黑体、IT6332A 电源（支持 `host` TCP / `port` 串口二选一）、GWS STEN 烘箱（`IR_OVEN_GWS_STEN`：`IR_SetOven`/`IR_ReadOven`/`IR_StopOven`/`IR_WaitOvenStable`）、Keithley DMM6500 SCPI（`IR_DMM6500`：`IR_SetDmmMode`/`IR_ReadDmm`）、探测器 `0xCC` 串口控制（`IR_DETECTOR_SERIAL`：`IR_SetDetectorTiming`/`IR_SetDetectorGpol`/`IR_SetDetectorRegister`/`IR_MeasureDetectorCurrent` 7 字节 ADC 电流读取）与制冷机 Modbus RTU（`IR_COOLER_MODBUS`：`IR_ReadCooler`，默认 `8N2`）；`IR_RunNoise` 支持 `recipe->detector != 0` 下发积分/空扫时间（`IR_NOISE_STEP_SET_DETECTOR`）；`IR_ListSerialPorts` 枚举可用串口 |
 | 原始采集 | `station/acquisition/frame_source.h`，具体来源在 `raw_replay/`、`directshow/`、`v4l2/` | `IR_ListCaptureDevices` 枚举相机；`IR_OpenFrames` 返回几何，`IR_ReadFrames` 输出紧密排列的 RAW16 像素；`IR_FlushFrames` 支撑不停流多 Burst 采集；`IR_TryReadLatestFrame` / `IR_GetCaptureStats` 提供无阻塞预览与有界 `FrameQueue` 诊断 |
 | 指标计算 | `analysis/`，可独立使用 `IR_analysis` | `IR_FrameStatisticsU16`、`IR_ROIMeanU16`、`IR_Noise3D*`、`IR_Gb*` / `IR_Gjb*`（含可配置短路/断路阈值）、`IR_FlickerDetectU16` 闪元检测，以及两点 NUC、无损 NUC 统计、`15×15` 空间高低频（盒式均值与掩码归一化高斯 `IR_SPATIAL_FILTER_GAUSSIAN`）、算术扣噪/阈值掩码、任意长 1D FFT 与 `IR_GjbEvaluateBurstMetrics` |
-| 流程编排 | `station/procedures/` | `IR_RunRecipeJson` 同时支持 Schema v1 单批配方与 Schema v2（多温点/多条件、`oven_stabilize`/`oven_standby`/`dmm_read`/`detector_timing`/`detector_gpol`、中间图与掩码跨步引用、`flush_frames`、可选 `save_raw`、`repeat_burst` 周期无存盘温漂、开放 15 项 `IR_analysis` 算子登记及 `safety.blackbody_standby`/`safety.oven_standby` 安全待机收尾）；`IR_WaitBlackbodyStable` 与 `IR_WaitOvenStable` 提供独立等稳接口 |
+| 流程编排 | `station/procedures/` | `IR_RunRecipeJson` 同时支持 Schema v1 单批配方与 Schema v2（多温点/多条件、`oven_stabilize`/`oven_standby`/`dmm_read`/`detector_timing`/`detector_gpol`/`detector_register`/`detector_current`/`cooler_read`、中间图与掩码跨步引用、`flush_frames`、可选 `save_raw`、`repeat_burst` 周期无存盘温漂、开放 15 项 `IR_analysis` 算子登记及 `safety.blackbody_standby`/`safety.oven_standby` 安全待机收尾）；`IR_WaitBlackbodyStable` 与 `IR_WaitOvenStable` 提供独立等稳接口 |
 
 ## 线程和设备占用
 
@@ -28,9 +28,9 @@ IR SDK 面向 Windows x64 与 Ubuntu 24.04 x86-64 使用同一份源码和公共
 
 跨线程停止作用于整次配方，由原工作线程在当前同步事务结束后检查并收尾。启用电源输出时，配方须同时声明 `off_after_run: true`；Schema v2 另可在 `safety.blackbody_standby` 声明结束/异常时统一恢复的黑体待机温度，并在 `safety.oven_standby`（或 `oven_stabilize` 步骤的 `standby_after_run: true`）声明结束后自动切回 `STANDBY` 的烘箱别名。`IRRecipeResult` 报告失败阶段、步骤下标、完成帧数和收尾状态。完整结果归档会保留实际配方、`raw_saved` / `saved_batches` / `burst_runs`、指标方法版本以及 `station_version`、`analysis_version`、`source_commit`、`started_utc`、`finished_utc` 追溯字段。详见[测试人员配方指南](docs/测试人员配方指南.md)。
 
-DOC058 黑体连接中断或应答超时后最多重连三次，每次间隔 500 ms。重复读命令可在重新识别设备后执行。设温应答丢失时，只重连并读回目标温度，不重复发送设温命令。重试耗尽或设备身份不符时，流程停止并返回异常。流程失败时 `IRNoiseResult.completed` 保留连续完成帧数，`failed_step` 标明失败步骤，`cleanup_status` 报告采集停止结果。黑体保留流程设定值，当前配方没有自动恢复温度的动作。
+DOC058 黑体连接中断或应答超时后最多重连三次，每次间隔 500 ms。重复读命令可在重新识别设备后执行。设温应答丢失时，只重连并读回目标温度，不重复发送设温命令。重试耗尽或设备身份不符时，流程停止并返回异常。流程失败时 `IRNoiseResult.completed` 保留连续完成帧数，`failed_step` 标明失败步骤，`cleanup_status` 报告采集停止结果。`IR_RunNoise` 固定流程保留配方黑体设定值，不擅自修改温度；需要自动恢复待机温度或烘箱待机时，使用 Schema v2 的 `safety.blackbody_standby` / `safety.oven_standby`。
 
-安装包的 `examples/noise_recipe.c` 演示固定噪声 C API。`ir_run_recipe` 与 C#/Python 的配方例子通过 `IR_RunRecipeJson` 使用同一执行器，覆盖设备等稳、取帧、多个指标和归档。自动测试使用 RAW16 小数组以及 TCP/PTY 模拟器。
+安装包的 `examples/noise_recipe.c` 演示固定噪声 C API。`ir_run_recipe` 与 C#/Python 的配方例子通过 `IR_RunRecipeJson` 使用同一执行器，覆盖设备等稳、取帧、多个指标和归档。自动测试使用 RAW16 小数组、`simulators/ir_sim_devices.py` 单机模拟及 `simulators/ir_virtual_station.py` 组合式虚拟工位（覆盖全 6 类设备耦合 HIL 与 `CTRL_BREAK_EVENT` 取消收尾）。
 
 安装包的 `examples/analysis_conditions.c` 演示同一个分析入口如何接收不同积分时间下的两组帧，并逐组返回均值和噪声。它只验证数据组织方式，不代表 GJB 或 EMVA 的指标实现。
 
@@ -63,7 +63,7 @@ Windows 后端沿用 USB_test 使用的 DirectShow Sample Grabber COM 过滤器�
 
 两个实时后端只接受设备提供的 16 位原始传输格式，不做 RGB/YUV 彩色转换。Windows 接受 FX3 的 RGB565 或 YUY2 媒体类型；Linux 接受 FX3 的 YUYV 格式。数据按行紧密排列为 `uint16_t` 像素。实时源的有效位数由调用方按探测器配置传入；传 0 表示未知。V4L2 会跳过空帧和不完整帧；读取过程中发现帧序号跳变时返回 `IR_FRAME_GAP`，`completed` 和对应缓冲区前缀仍有效。Windows DirectShow 也会记录回调队列中的帧序号跳变。
 
-相机帧采集和探测器开流命令是两个独立动作。调用方先启动实时采集，再通过探测器接口打开数据流，最后调用 `IR_ReadFrames`。当前 SDK 还没有纳入面阵测试串口开关命令；本次硬件联调使用 SSCOM 配置中的测试命令只验证了链路，不代表最终上位机协议。
+相机帧采集和探测器参数/开流命令可协同或分步执行。`1.6.0` 已在 `IR_DETECTOR_SERIAL` 接入 `0xCC` 串口时序（`IR_SetDetectorTiming`）、GPOL（`IR_SetDetectorGpol`）、通用寄存器下发（`IR_SetDetectorRegister` / Schema v2 `detector_register`）及 `0x41` 7 字节 ADC 电流读取（`IR_MeasureDetectorCurrent`），可配合 `IR_StartFrames` / `IR_ReadFrames` 联调；真机具体寄存器定义与开流时序仍需按实际探测器型号核对。
 
 ## 仪器和流程
 
@@ -85,4 +85,4 @@ Windows 后端沿用 USB_test 使用的 DirectShow Sample Grabber COM 过滤器�
 4. 指定一个新目录即可保存 `frames.raw`、`frames.csv` 和 `result.json`。结果文件记录配方设定、设温回读和达到等稳时的实际温度/设备稳定标志。三个文件齐备后发布目录。再次打开保存目录可复算同一批数据。
 5. 用 `IR_CloseFrames` 和 `IR_CloseDevice` 释放连接。DOC058 黑体的串口和 TCP 读操作在传输失败后都会重新识别设备，最多重试三次。设温应答超时通过回读确认，SDK 不重发该写命令。`IR_RequestStop` 在当前仪器同步调用结束时中止流程。
 
-当前发行版本（`1.5.0`）提供 RAW 回放、DOC058 TCP/串口黑体、IT6332A 串口电源、GWS STEN 烘箱（TCP/串口）、Keithley DMM6500 SCPI 万用表（TCP/串口）、探测器 `0xCC` 串口控制器（TCP/串口）、时域噪声/ROI 均值/Noise3D/GB/GJB/闪元检测与高斯滤波 C API、Schema v1/v2 JSON 配方流程，以及 DirectShow/V4L2 实时后端接口。PCIe-1433 的 NI-IMAQ 运行实现暂留空，接口编号已保留；FX3 DirectShow/V4L2 实机长稳、物理硬件与真实串口设备、EMVA 1288 指标仍需按实际设备与对照数据逐项验收。各能力与平台的实际支持状态见[设备支持矩阵](docs/设备支持矩阵.md)。
+当前发行版本（`1.6.0`）提供 RAW 回放、DOC058 TCP/串口黑体、IT6332A 串口/TCP 电源、GWS STEN 烘箱（TCP/串口）、Keithley DMM6500 SCPI 万用表（TCP/串口）、探测器 `0xCC` 串口控制器（含 `IR_SetDetectorRegister` 与 `IR_MeasureDetectorCurrent`）、制冷机 Modbus RTU（`IR_COOLER_MODBUS`，默认 `8N2` TCP/串口）、时域噪声/ROI 均值/Noise3D/GB/GJB/闪元检测与高斯滤波 C API、Schema v1/v2 JSON 配方流程、组合式虚拟工位 `simulators/ir_virtual_station.py`（支持 TCP 与虚拟 COM 混合在环），以及 DirectShow/V4L2 实时后端接口。PCIe-1433 的 NI-IMAQ 运行实现暂留空，接口编号已保留；FX3 DirectShow/V4L2 实机长稳、物理硬件与真实串口设备、EMVA 1288 指标仍需按实际设备与对照数据逐项验收。各能力与平台的实际支持状态见[设备支持矩阵](docs/设备支持矩阵.md)。

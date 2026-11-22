@@ -1,4 +1,8 @@
-"""Exercise the IT6332A C API over a Linux PTY-backed serial simulator."""
+"""Exercise the IT6332A C API over TCP loopback (Windows/Linux) or Linux PTY serial."""
+
+import sys
+
+sys.dont_write_bytecode = True
 
 import argparse
 import copy
@@ -6,12 +10,10 @@ import ctypes as c
 import json
 import os
 from pathlib import Path
-import pty
 import select
-import sys
+import socket
 import tempfile
 import threading
-import tty
 
 
 SIMULATOR_DIR = Path(__file__).resolve().parents[1] / "simulators"
@@ -47,15 +49,19 @@ def run_recipe(sdk, station, recipe, output):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tcp", action="store_true", help="use loopback TCP transport instead of Linux PTY")
     parser.add_argument("library", type=Path)
     parser.add_argument("--fixture-parent", type=Path, default=Path.cwd())
     args = parser.parse_args()
 
+    if not args.tcp and os.name == "nt":
+        raise RuntimeError("The PTY simulator test runs in Linux; pass --tcp on Windows")
+
     if os.name == "nt":
         with os.add_dll_directory(str(args.library.resolve().parent)):
             sdk = c.CDLL(str(args.library.resolve()))
-        raise RuntimeError("The PTY simulator test runs in Linux; Windows needs a virtual COM pair")
-    sdk = c.CDLL(str(args.library.resolve()))
+    else:
+        sdk = c.CDLL(str(args.library.resolve()))
     error_args = [c.c_char_p, c.c_int32]
     sdk.IR_OpenDevice.argtypes = [c.c_int32, c.c_char_p, c.POINTER(c.c_uint64), *error_args]
     sdk.IR_CloseDevice.argtypes = [c.c_uint64, *error_args]
@@ -69,43 +75,94 @@ def main():
     sdk.IR_RequestStop.argtypes = []
     sdk.IR_RequestStop.restype = None
 
-    master, slave = pty.openpty()
-    tty.setraw(slave)
-    port = os.ttyname(slave)
     controller = It6332a()
     stop = threading.Event()
     server_error = []
     commands = []
     command_hook = None
+    listener = None
+    master = slave = None
 
-    def serve():
-        nonlocal command_hook
-        pending = b""
-        try:
-            while not stop.is_set():
-                ready, _, _ = select.select([master], [], [], 0.05)
-                if not ready:
-                    continue
-                pending += os.read(master, 4096)
-                while b"\n" in pending:
-                    command, pending = pending.split(b"\n", 1)
-                    commands.append(command.strip())
-                    response = controller.handle(command)
-                    if command_hook and command.strip() == command_hook[0]:
-                        _, callback = command_hook
-                        command_hook = None
-                        callback()
-                    if response:
-                        os.write(master, response)
-        except Exception as error:
-            if not stop.is_set():
-                server_error.append(error)
+    if args.tcp:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        listener.settimeout(0.05)
+        config_dict = {"host": "127.0.0.1", "tcp_port": listener.getsockname()[1], "timeout_ms": 500}
+
+        def serve():
+            nonlocal command_hook
+            try:
+                while not stop.is_set():
+                    try:
+                        conn, _ = listener.accept()
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        break
+                    with conn:
+                        conn.settimeout(0.05)
+                        pending = b""
+                        while not stop.is_set():
+                            try:
+                                block = conn.recv(4096)
+                            except socket.timeout:
+                                continue
+                            except (ConnectionResetError, BrokenPipeError, OSError):
+                                break
+                            if not block:
+                                break
+                            pending += block
+                            while b"\n" in pending:
+                                command, pending = pending.split(b"\n", 1)
+                                commands.append(command.strip())
+                                response = controller.handle(command)
+                                if command_hook and command.strip() == command_hook[0]:
+                                    _, callback = command_hook
+                                    command_hook = None
+                                    callback()
+                                if response:
+                                    conn.sendall(response)
+            except Exception as error:
+                if not stop.is_set():
+                    server_error.append(error)
+    else:
+        import pty
+        import tty
+
+        master, slave = pty.openpty()
+        tty.setraw(slave)
+        config_dict = {"port": os.ttyname(slave), "baud_rate": 115200, "timeout_ms": 500}
+
+        def serve():
+            nonlocal command_hook
+            pending = b""
+            try:
+                while not stop.is_set():
+                    ready, _, _ = select.select([master], [], [], 0.05)
+                    if not ready:
+                        continue
+                    pending += os.read(master, 4096)
+                    while b"\n" in pending:
+                        command, pending = pending.split(b"\n", 1)
+                        commands.append(command.strip())
+                        response = controller.handle(command)
+                        if command_hook and command.strip() == command_hook[0]:
+                            _, callback = command_hook
+                            command_hook = None
+                            callback()
+                        if response:
+                            os.write(master, response)
+            except Exception as error:
+                if not stop.is_set():
+                    server_error.append(error)
 
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     handle = c.c_uint64()
     error = c.create_string_buffer(1024)
-    config = json.dumps({"port": port, "baud_rate": 115200, "timeout_ms": 500}).encode()
+    config = json.dumps(config_dict).encode()
 
     def check(status, expected=0):
         assert status == expected, (status, expected, error.value.decode(errors="replace"))
@@ -270,9 +327,16 @@ def main():
             assert report == (0, 2, 0, -1, 0), (report, detail)
     finally:
         stop.set()
+        if listener is not None:
+            try:
+                listener.close()
+            except OSError:
+                pass
         thread.join(2)
-        os.close(master)
-        os.close(slave)
+        if master is not None:
+            os.close(master)
+        if slave is not None:
+            os.close(slave)
     assert not thread.is_alive()
     assert not server_error, server_error
 

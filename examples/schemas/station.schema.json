@@ -91,6 +91,9 @@
         },
         {
           "$ref": "#/$defs/detectorSerialDevice"
+        },
+        {
+          "$ref": "#/$defs/coolerModbusDevice"
         }
       ]
     },
@@ -209,29 +212,74 @@
           "const": "it6332a"
         },
         "connection": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "port"
-          ],
-          "properties": {
-            "port": {
-              "type": "string",
-              "minLength": 1
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "port"
+              ],
+              "properties": {
+                "port": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "baud_rate": {
+                  "type": "integer",
+                  "minimum": 1200,
+                  "maximum": 921600,
+                  "default": 115200
+                },
+                "data_bits": {
+                  "type": "integer",
+                  "minimum": 5,
+                  "maximum": 8,
+                  "default": 8
+                },
+                "parity": {
+                  "type": "string",
+                  "enum": ["none", "odd", "even"],
+                  "default": "none"
+                },
+                "stop_bits": {
+                  "type": "integer",
+                  "enum": [1, 2],
+                  "default": 1
+                },
+                "timeout_ms": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 60000,
+                  "default": 1200
+                }
+              }
             },
-            "baud_rate": {
-              "type": "integer",
-              "minimum": 1200,
-              "maximum": 921600,
-              "default": 115200
-            },
-            "timeout_ms": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 60000,
-              "default": 1200
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "host"
+              ],
+              "properties": {
+                "host": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "tcp_port": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535,
+                  "default": 5026
+                },
+                "timeout_ms": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 60000,
+                  "default": 1200
+                }
+              }
             }
-          }
+          ]
         }
       }
     },
@@ -344,6 +392,45 @@
                 "tcp_port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 2102 },
                 "inter_command_ms": { "type": "integer", "minimum": 0, "maximum": 2000, "default": 0 },
                 "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 60000, "default": 1200 }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "coolerModbusDevice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "connection"],
+      "properties": {
+        "kind": { "const": "cooler-modbus" },
+        "connection": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["port"],
+              "properties": {
+                "port": { "type": "string", "minLength": 1 },
+                "baud_rate": { "type": "integer", "minimum": 1200, "maximum": 921600, "default": 9600 },
+                "data_bits": { "type": "integer", "minimum": 5, "maximum": 8, "default": 8 },
+                "parity": { "type": "string", "enum": ["none", "odd", "even"], "default": "none" },
+                "stop_bits": { "type": "integer", "enum": [1, 2], "default": 2 },
+                "slave_address": { "type": "integer", "minimum": 1, "maximum": 247, "default": 1 },
+                "register_address": { "type": "integer", "minimum": 0, "maximum": 65535, "default": 31314 },
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 60000, "default": 2000 }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["host"],
+              "properties": {
+                "host": { "type": "string", "minLength": 1 },
+                "tcp_port": { "type": "integer", "minimum": 1, "maximum": 65535, "default": 5020 },
+                "slave_address": { "type": "integer", "minimum": 1, "maximum": 247, "default": 1 },
+                "register_address": { "type": "integer", "minimum": 0, "maximum": 65535, "default": 31314 },
+                "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 60000, "default": 2000 }
               }
             }
           ]

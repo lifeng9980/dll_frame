@@ -1,6 +1,7 @@
 #include "IR_device.h"
 #include "api_common.h"
 #include "station/instruments/blackbody/doc058.h"
+#include "station/instruments/cooler/cooler_modbus.h"
 #include "station/instruments/detector/detector_serial.h"
 #include "station/instruments/device_lease.h"
 #include "station/instruments/dmm/dmm6500.h"
@@ -23,6 +24,8 @@
 namespace {
 using Json = nlohmann::json;
 using ir::instruments::BlackbodyConfig;
+using ir::instruments::CoolerModbus;
+using ir::instruments::CoolerModbusConfig;
 using ir::instruments::DetectorSerial;
 using ir::instruments::DetectorSerialConfig;
 using ir::instruments::Dmm6500;
@@ -40,6 +43,7 @@ struct Session {
     std::unique_ptr<GwsStenOven> oven;
     std::unique_ptr<Dmm6500> dmm;
     std::unique_ptr<DetectorSerial> detector;
+    std::unique_ptr<CoolerModbus> cooler;
     std::thread::id workflowOwner;
 };
 std::mutex devicesMutex;
@@ -138,16 +142,6 @@ std::pair<BlackbodyConfig, std::vector<std::string>> parseBlackbodyConfig(int ki
     return {std::move(result), {serialEndpointKey(name)}};
 }
 
-std::pair<ir::instruments::It6332aConfig, std::vector<std::string>> parsePowerConfig(const char *config)
-{
-    const auto json = parseConfigJson(config);
-    ir::instruments::It6332aConfig result;
-    result.port = text(json, "port", true);
-    result.baud = static_cast<unsigned>(integer(json, "baud_rate", 115200, 1200, 921600));
-    result.timeout = std::chrono::milliseconds(integer(json, "timeout_ms", 1200, 1, 60000));
-    return {std::move(result), {serialEndpointKey(text(json, "port", true))}};
-}
-
 double floating(const Json &json, const char *key, double fallback)
 {
     const auto value = json.find(key);
@@ -171,7 +165,7 @@ int parseParity(const std::string &parityText)
 
 std::pair<std::variant<ir::transport::TcpEndpoint, ir::transport::SerialEndpoint>, std::vector<std::string>>
 parseTcpOrSerialEndpoint(const Json &json, uint16_t defaultTcpPort, unsigned defaultBaud,
-                         std::chrono::milliseconds resolveTimeout)
+                         std::chrono::milliseconds resolveTimeout, int defaultStopBits = 1)
 {
     using namespace ir::transport;
     const bool hasHost = json.contains("host");
@@ -198,8 +192,18 @@ parseTcpOrSerialEndpoint(const Json &json, uint16_t defaultTcpPort, unsigned def
     sp.baud = static_cast<unsigned>(integer(json, "baud_rate", static_cast<int>(defaultBaud), 1200, 921600));
     sp.dataBits = static_cast<unsigned>(integer(json, "data_bits", 8, 5, 8));
     sp.parity = parseParity(text(json, "parity", false));
-    sp.stopBits = integer(json, "stop_bits", 1, 1, 2);
+    sp.stopBits = integer(json, "stop_bits", defaultStopBits, 1, 2);
     return {std::move(sp), {serialEndpointKey(portName)}};
+}
+
+std::pair<ir::instruments::It6332aConfig, std::vector<std::string>> parsePowerConfig(const char *config)
+{
+    const auto json = parseConfigJson(config);
+    ir::instruments::It6332aConfig result;
+    result.timeout = std::chrono::milliseconds(integer(json, "timeout_ms", 1200, 1, 60000));
+    auto [ep, keys] = parseTcpOrSerialEndpoint(json, 5026, 115200, result.timeout, 1);
+    result.endpoint = std::move(ep);
+    return {std::move(result), std::move(keys)};
 }
 
 std::pair<GwsStenConfig, std::vector<std::string>> parseOvenConfig(const char *config)
@@ -241,6 +245,18 @@ std::pair<DetectorSerialConfig, std::vector<std::string>> parseDetectorConfig(co
     result.timeout = std::chrono::milliseconds(integer(json, "timeout_ms", 1200, 1, 60000));
     result.interCommandDelay = std::chrono::milliseconds(integer(json, "inter_command_ms", 0, 0, 2000));
     auto [ep, keys] = parseTcpOrSerialEndpoint(json, 2102, 115200, result.timeout);
+    result.endpoint = std::move(ep);
+    return {std::move(result), std::move(keys)};
+}
+
+std::pair<CoolerModbusConfig, std::vector<std::string>> parseCoolerConfig(const char *config)
+{
+    const auto json = parseConfigJson(config);
+    CoolerModbusConfig result;
+    result.timeout = std::chrono::milliseconds(integer(json, "timeout_ms", 2000, 1, 60000));
+    result.slaveAddress = static_cast<uint8_t>(integer(json, "slave_address", 1, 1, 247));
+    result.registerAddress = static_cast<uint16_t>(integer(json, "register_address", 0x7A52, 0, 65535));
+    auto [ep, keys] = parseTcpOrSerialEndpoint(json, 5020, 9600, result.timeout, 2);
     result.endpoint = std::move(ep);
     return {std::move(result), std::move(keys)};
 }
@@ -307,6 +323,14 @@ template<class Action> void useDetector(IRHandle handle, Action action)
         action(*device.detector);
     });
 }
+
+template<class Action> void useCooler(IRHandle handle, Action action)
+{
+    useSession(handle, [&](Session &device) {
+        require(bool(device.cooler), IR_BAD_ARGUMENT, "Device handle is not a cooler Modbus monitor");
+        action(*device.cooler);
+    });
+}
 }
 
 namespace ir::instruments {
@@ -363,13 +387,15 @@ extern "C" int32_t IR_OpenDevice(int32_t kind, const char *config, IRHandle *out
     return guarded(err, bytes, [&] {
         needed(out, 1, 1);
         require(kind == IR_PCN7LT || kind == IR_DCN1000 || kind == IR_IT6332A ||
-                kind == IR_OVEN_GWS_STEN || kind == IR_DMM6500 || kind == IR_DETECTOR_SERIAL,
+                kind == IR_OVEN_GWS_STEN || kind == IR_DMM6500 || kind == IR_DETECTOR_SERIAL ||
+                kind == IR_COOLER_MODBUS,
                 IR_UNSUPPORTED, "Unsupported instrument kind");
         BlackbodyConfig blackbodyOptions;
         ir::instruments::It6332aConfig powerOptions;
         GwsStenConfig ovenOptions;
         Dmm6500Config dmmOptions;
         DetectorSerialConfig detectorOptions;
+        CoolerModbusConfig coolerOptions;
         std::vector<std::string> endpointKeys;
         if (kind == IR_IT6332A) {
             auto parsed = parsePowerConfig(config);
@@ -386,6 +412,10 @@ extern "C" int32_t IR_OpenDevice(int32_t kind, const char *config, IRHandle *out
         } else if (kind == IR_DETECTOR_SERIAL) {
             auto parsed = parseDetectorConfig(config);
             detectorOptions = std::move(parsed.first);
+            endpointKeys = std::move(parsed.second);
+        } else if (kind == IR_COOLER_MODBUS) {
+            auto parsed = parseCoolerConfig(config);
+            coolerOptions = std::move(parsed.first);
             endpointKeys = std::move(parsed.second);
         } else {
             auto parsed = parseBlackbodyConfig(kind, config);
@@ -417,6 +447,8 @@ extern "C" int32_t IR_OpenDevice(int32_t kind, const char *config, IRHandle *out
                 device->dmm = std::make_unique<Dmm6500>(std::move(dmmOptions));
             else if (kind == IR_DETECTOR_SERIAL)
                 device->detector = std::make_unique<DetectorSerial>(std::move(detectorOptions));
+            else if (kind == IR_COOLER_MODBUS)
+                device->cooler = std::make_unique<CoolerModbus>(std::move(coolerOptions));
             else
                 device->blackbody = std::make_unique<Doc058Blackbody>(std::move(blackbodyOptions));
         } catch (...) {
@@ -442,6 +474,7 @@ extern "C" int32_t IR_CloseDevice(IRHandle handle, char *err, int32_t bytes)
         std::unique_ptr<GwsStenOven> closingOven;
         std::unique_ptr<Dmm6500> closingDmm;
         std::unique_ptr<DetectorSerial> closingDetector;
+        std::unique_ptr<CoolerModbus> closingCooler;
         std::unique_lock<std::mutex> deviceLock;
         std::vector<std::string> endpointKeys;
         {
@@ -458,6 +491,7 @@ extern "C" int32_t IR_CloseDevice(IRHandle handle, char *err, int32_t bytes)
             closingOven = std::move(device->oven);
             closingDmm = std::move(device->dmm);
             closingDetector = std::move(device->detector);
+            closingCooler = std::move(device->cooler);
             devices.erase(pos);
         }
         closingBlackbody.reset();
@@ -465,6 +499,7 @@ extern "C" int32_t IR_CloseDevice(IRHandle handle, char *err, int32_t bytes)
         closingOven.reset();
         closingDmm.reset();
         closingDetector.reset();
+        closingCooler.reset();
         deviceLock.unlock();
         {
             std::lock_guard registryLock(devicesMutex);
@@ -596,6 +631,29 @@ extern "C" int32_t IR_SetDetectorRegister(IRHandle handle, uint8_t command_code,
         needed(payload, payload_bytes, 1);
         useDetector(handle, [&](DetectorSerial &det) {
             det.setRegister(command_code, payload, payload_bytes);
+        });
+    });
+}
+
+extern "C" int32_t IR_MeasureDetectorCurrent(IRHandle handle, int32_t gain_code,
+    uint16_t channel_code, IRDetectorCurrentReading *reading, char *err, int32_t bytes)
+{
+    if (reading) *reading = {};
+    return guarded(err, bytes, [&] {
+        needed(reading, 1, 1);
+        useDetector(handle, [&](DetectorSerial &det) {
+            *reading = det.measureCurrent(gain_code, channel_code);
+        });
+    });
+}
+
+extern "C" int32_t IR_ReadCooler(IRHandle handle, IRCoolerReading *reading, char *err, int32_t bytes)
+{
+    if (reading) *reading = {};
+    return guarded(err, bytes, [&] {
+        needed(reading, 1, 1);
+        useCooler(handle, [&](CoolerModbus &cooler) {
+            *reading = cooler.read();
         });
     });
 }

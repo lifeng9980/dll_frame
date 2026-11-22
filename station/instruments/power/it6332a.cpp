@@ -67,14 +67,24 @@ void It6332aPower::connect()
 {
     link_.reset();
     try {
-        link_ = std::make_unique<transport::AsioLink>(
-            transport::SerialEndpoint{config_.port, config_.baud});
+        if (std::holds_alternative<transport::TcpEndpoint>(config_.endpoint)) {
+            link_ = std::make_unique<transport::AsioLink>(
+                std::get<transport::TcpEndpoint>(config_.endpoint),
+                Clock::now() + config_.timeout);
+        } else {
+            link_ = std::make_unique<transport::AsioLink>(
+                std::get<transport::SerialEndpoint>(config_.endpoint));
+        }
+    } catch (const Error &) {
+        link_.reset();
+        throw;
     } catch (const std::system_error &error) {
-        throw Error(IR_IO_ERROR, std::string("Cannot open IT6332A serial port: ") + error.what());
+        link_.reset();
+        throw Error(IR_IO_ERROR, std::string("Cannot open IT6332A transport: ") + error.what());
     }
     const auto identity = query("*IDN?");
     if (upper(identity).find("IT6332A") == std::string::npos)
-        throw Error(IR_IO_ERROR, "Serial device is not an IT6332A: " + identity);
+        throw Error(IR_IO_ERROR, "Device is not an IT6332A: " + identity);
     remote_ = false;
 }
 

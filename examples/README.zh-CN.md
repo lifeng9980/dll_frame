@@ -24,6 +24,7 @@ SDK 提供两个库：`IR_station` 负责设备、RAW16 采集和流程，`IR_an
 - `stations/sim_tcp.json` + `recipes/noise_blackbody.json`：TCP 黑体设温等稳后采集。
 - `stations/sim_power_serial.json` + `recipes/power_serial_smoke.json`：IT6332A 串口设定/回读后采集，不打开输出。
 - `stations/sim_power_serial.json` + `recipes/power_serial_output_cycle.json`：在模拟工位练习打开输出，取帧后关闭并回读确认。
+- `stations/sim_virtual_station_tcp.json` + `recipes/virtual_station_hil_v2.json`：配合 `python .\simulators\ir_virtual_station.py --mode tcp` 一键跑通 6 类耦合设备（CH1/CH2 上电与自动下电、烘箱等稳/待机、黑体等稳/回位、探测器时序/GPOL/通用寄存器/ADC 电流、DMM 与制冷机 Modbus RTU）全闭环在环测试。
 
 CLI 调用公开的 `IR_CheckRecipeJson` 与 `IR_RunRecipeJson`。C# 和 Python 的 `RecipeRunner` 示例也直接调用这两个入口，不需要自行实现设备和采集逻辑。输出目录需是新目录；结果的 `PASS`、`NG` 和 `COMPLETED` 含义见[测试人员指南](../docs/测试人员配方指南.md)。
 
@@ -43,7 +44,7 @@ cmake --build build-client --config Release
 
 ## C# P/Invoke
 
-`csharp/IRSdkSample.csproj` 面向 .NET 10。它包含传统 RAW/噪声调用、JSON 流程调用（`RecipeRunner.cs`）、`IR_analysis` 核心算法 P/Invoke 声明（`AnalysisInterop.cs`），以及 `IRStation.OvenReading`、`IRStation.DmmReading` 与烘箱/万用表/探测器 9 个 C ABI P/Invoke 声明（`Program.cs`）：
+`csharp/IRSdkSample.csproj` 面向 .NET 10。它包含传统 RAW/噪声调用、JSON 流程调用（`RecipeRunner.cs`）、`IR_analysis` 核心算法 P/Invoke 声明（`AnalysisInterop.cs`），以及完整的设备控制枚举 `IRStation.DeviceKind`、读数结构（`BlackbodyReading`、`PowerReading`、`OvenReading`、`DmmReading`、`DetectorCurrentReading`、`CoolerReading`）与对应 P/Invoke 声明（`Program.cs`）：
 
 ```powershell
 $env:IR_SDK_LIB_DIR = (Resolve-Path '.\windows-x64\bin').Path
@@ -78,5 +79,5 @@ python3 examples/python/ir_analysis.py
 
 ## Schema 校验与算法扩展
 
-- `examples/schemas/station.schema.json`、`examples/schemas/recipe.schema.json` 与 `examples/schemas/recipe.v2.schema.json` 提供 JSON Schema（Draft 2020-12）定义（`1.5.0` 已覆盖 `gws-sten`/`dmm6500`/`detector-serial` 工位及 `oven_stabilize`/`oven_standby`/`dmm_read`/`detector_timing`/`detector_gpol`、`safety.oven_standby` 配方步校验），随包工位与配方模板已通过 `"$schema"` 引用，可在编辑器中直接校验字段；`simulators/ir_sim_devices.py` 同步提供 `oven-*`、`dmm6500-*`、`detector-*` TCP/串口模拟模式。
+- `examples/schemas/station.schema.json`、`examples/schemas/recipe.schema.json` 与 `examples/schemas/recipe.v2.schema.json` 提供 JSON Schema（Draft 2020-12）定义（`1.6.0` 已覆盖 `it6332a` TCP/串口、`gws-sten`、`dmm6500`、`detector-serial`、`cooler-modbus` 工位及 `detector_register`/`detector_current`/`cooler_read` 等全设备配方步校验），随包工位与配方模板已通过 `"$schema"` 引用，可在编辑器中直接校验字段；`simulators/ir_sim_devices.py` 提供单机多设备模拟，[`simulators/ir_virtual_station.py`](../simulators/ir_virtual_station.py) 提供统一组合式虚拟工位（支持 `--mode tcp` 与 Windows 虚拟 COM `--mode serial-map`）。
 - 源码级二次开发时，新增指标放在 `analysis/`，公共 C 函数放在 `include/IR_analysis.h`，小数据预期结果放在 `sdk_tests/`；Schema v1 方法登记在 `station/procedures/recipe_metrics.cpp`，Schema v2 开放算子登记在 `station/procedures/recipe_metrics_v2.cpp`（详细开发与算法接入规范位于 SDK Git 源码仓库的 `docs/` 目录）。

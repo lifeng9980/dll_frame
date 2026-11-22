@@ -1,0 +1,65 @@
+{
+  "$schema": "../schemas/station.schema.json",
+  "schema_version": 1,
+  "acquisition": {
+    "backend": "raw_replay",
+    "source": "../data/raw16",
+    "valid_bits": 16
+  },
+  "devices": {
+    "bb": {
+      "kind": "pcn7-lt",
+      "connection": {
+        "host": "127.0.0.1",
+        "tcp_port": 21010,
+        "head": 0,
+        "expected_head_serial": "HEAD-SIMULATOR",
+        "timeout_ms": 1500
+      }
+    },
+    "supply": {
+      "kind": "it6332a",
+      "connection": {
+        "host": "127.0.0.1",
+        "tcp_port": 5026,
+        "timeout_ms": 1200
+      }
+    },
+    "oven": {
+      "kind": "gws-sten",
+      "connection": {
+        "host": "127.0.0.1",
+        "tcp_port": 5000,
+        "address": 1,
+        "delimiter": "crlf",
+        "timeout_ms": 1500
+      }
+    },
+    "dmm": {
+      "kind": "dmm6500",
+      "connection": {
+        "host": "127.0.0.1",
+        "tcp_port": 5025,
+        "timeout_ms": 1500
+      }
+    },
+    "det": {
+      "kind": "detector-serial",
+      "connection": {
+        "host": "127.0.0.1",
+        "tcp_port": 2102,
+        "timeout_ms": 1200
+      }
+    },
+    "cooler": {
+      "kind": "cooler-modbus",
+      "connection": {
+        "host": "127.0.0.1",
+        "tcp_port": 5020,
+        "slave_address": 1,
+        "register_address": 31314,
+        "timeout_ms": 1500
+      }
+    }
+  }
+}

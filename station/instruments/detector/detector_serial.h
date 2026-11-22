@@ -1,4 +1,5 @@
 #pragma once
+#include "IR_device.h"
 #include "station/instruments/transport/asio_link.h"
 #include <chrono>
 #include <cstdint>
@@ -19,6 +20,7 @@ public:
     void setTiming(int32_t integrationUs, int32_t frameHz, int32_t emptyUs);
     void setGpol(double gpolV);
     void setRegister(uint8_t commandCode, const uint8_t *payload, int32_t payloadBytes);
+    IRDetectorCurrentReading measureCurrent(int32_t gainCode, uint16_t channelCode);
 
 private:
     using Clock = std::chrono::steady_clock;

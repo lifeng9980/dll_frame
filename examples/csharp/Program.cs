@@ -3,6 +3,17 @@ using System.Text;
 
 internal static class IRStation
 {
+    internal enum DeviceKind
+    {
+        Pcn7Lt = 2,
+        Dcn1000 = 3,
+        It6332a = 4,
+        OvenGwsSten = 5,
+        Dmm6500 = 6,
+        DetectorSerial = 7,
+        CoolerModbus = 8
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     internal struct Geometry
     {
@@ -100,6 +111,33 @@ internal static class IRStation
         public int Valid;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct PowerReading
+    {
+        public double SetpointV;
+        public double CurrentLimitA;
+        public double MeasuredV;
+        public double MeasuredA;
+        public int OutputEnabled;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct DetectorCurrentReading
+    {
+        public uint RawCode;
+        public uint Reserved;
+        public double SenseVoltageV;
+        public double CurrentMa;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct CoolerReading
+    {
+        public uint RawValue;
+        public int Valid;
+        public double VoltageMv;
+    }
+
     [DllImport("IR_station", EntryPoint = "IR_StationVersion", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr StationVersionPtr();
 
@@ -178,6 +216,44 @@ internal static class IRStation
     [DllImport("IR_station", EntryPoint = "IR_SetDetectorRegister", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int SetDetectorRegister(ulong handle, byte commandCode,
         byte[] payload, int payloadBytes, byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_OpenDevice", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int OpenDevice(int kind,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string configJson,
+        out ulong handle, byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_CloseDevice", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int CloseDevice(ulong handle, byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_SetBlackbody", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int SetBlackbody(ulong handle, double targetC, out double readbackC,
+        byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_ReadBlackbody", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ReadBlackbody(ulong handle, out BlackbodyReading reading,
+        byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_SetPowerChannel", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int SetPowerChannel(ulong handle, int channel,
+        double voltageV, double currentLimitA, out PowerReading readback,
+        byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_SetPowerOutput", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int SetPowerOutput(ulong handle, int channel, int enabled,
+        out PowerReading readback, byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_ReadPower", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ReadPower(ulong handle, int channel, out PowerReading reading,
+        byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_MeasureDetectorCurrent", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int MeasureDetectorCurrent(ulong handle, int gainCode,
+        ushort channelCode, out DetectorCurrentReading reading,
+        byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_ReadCooler", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ReadCooler(ulong handle, out CoolerReading reading,
+        byte[] error, int errorBytes);
 
     [DllImport("IR_station", EntryPoint = "IR_CheckRecipeJson", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int CheckRecipeJson(
@@ -363,6 +439,9 @@ internal static class Program
                 Marshal.SizeOf<IRStation.BlackbodyReading>() != 24 ||
                 Marshal.SizeOf<IRStation.OvenReading>() != 24 ||
                 Marshal.SizeOf<IRStation.DmmReading>() != 16 ||
+                Marshal.SizeOf<IRStation.PowerReading>() != 40 ||
+                Marshal.SizeOf<IRStation.DetectorCurrentReading>() != 24 ||
+                Marshal.SizeOf<IRStation.CoolerReading>() != 16 ||
                 Marshal.SizeOf<IRStation.FrameStamp>() != 40 ||
                 Marshal.SizeOf<IRStation.CaptureStats>() != 64)
                 throw new InvalidOperationException("The C# structures do not match the IR SDK x64 C ABI.");

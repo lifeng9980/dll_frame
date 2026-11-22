@@ -330,6 +330,42 @@
         "gpol_v": { "type": "number", "minimum": 0.0, "maximum": 5.0 }
       }
     },
+    "detectorRegisterStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "device", "command_code", "payload_hex"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyIdentifier" },
+        "type": { "const": "detector_register" },
+        "device": { "$ref": "#/$defs/nonEmptyIdentifier" },
+        "command_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "payload_hex": { "type": "string", "pattern": "^([0-9A-Fa-f]{2}){1,255}$" }
+      }
+    },
+    "detectorCurrentStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "device", "gain_code", "channel_code"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyIdentifier" },
+        "type": { "const": "detector_current" },
+        "device": { "$ref": "#/$defs/nonEmptyIdentifier" },
+        "name": { "$ref": "#/$defs/nonEmptyIdentifier" },
+        "gain_code": { "type": "integer", "minimum": 0, "maximum": 7 },
+        "channel_code": { "type": "integer", "minimum": 0, "maximum": 65535 }
+      }
+    },
+    "coolerReadStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "device"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyIdentifier" },
+        "type": { "const": "cooler_read" },
+        "device": { "$ref": "#/$defs/nonEmptyIdentifier" },
+        "name": { "$ref": "#/$defs/nonEmptyIdentifier" }
+      }
+    },
     "flushFramesStep": {
       "type": "object",
       "additionalProperties": false,
@@ -506,6 +542,15 @@
           "$ref": "#/$defs/detectorGpolStep"
         },
         {
+          "$ref": "#/$defs/detectorRegisterStep"
+        },
+        {
+          "$ref": "#/$defs/detectorCurrentStep"
+        },
+        {
+          "$ref": "#/$defs/coolerReadStep"
+        },
+        {
           "$ref": "#/$defs/flushFramesStep"
         },
         {
@@ -595,6 +640,15 @@
         },
         {
           "$ref": "#/$defs/detectorGpolStep"
+        },
+        {
+          "$ref": "#/$defs/detectorRegisterStep"
+        },
+        {
+          "$ref": "#/$defs/detectorCurrentStep"
+        },
+        {
+          "$ref": "#/$defs/coolerReadStep"
         },
         {
           "$ref": "#/$defs/flushFramesStep"

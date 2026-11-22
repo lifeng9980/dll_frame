@@ -3,12 +3,12 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <variant>
 
 namespace ir::instruments {
 
 struct It6332aConfig {
-    std::string port;
-    unsigned baud{115200};
+    std::variant<transport::TcpEndpoint, transport::SerialEndpoint> endpoint;
     std::chrono::milliseconds timeout{1200};
 };
 

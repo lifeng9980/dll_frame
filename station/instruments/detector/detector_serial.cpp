@@ -139,4 +139,66 @@ void DetectorSerial::setRegister(uint8_t commandCode, const uint8_t *payload, in
     sendCommandAndVerifyAck(commandCode, payload, static_cast<size_t>(payloadBytes));
 }
 
+IRDetectorCurrentReading DetectorSerial::measureCurrent(int32_t gainCode, uint16_t channelCode)
+{
+    static_assert(sizeof(IRDetectorCurrentReading) == 24, "Unexpected IRDetectorCurrentReading size");
+    require(gainCode >= 0 && gainCode <= 7, IR_BAD_ARGUMENT,
+            "Detector current gain_code must be within 0..7");
+    const int gainMultiplier = 1 << gainCode;
+
+    const std::array<uint8_t, 1> gainPayload{static_cast<uint8_t>(gainCode)};
+    sendCommandAndVerifyAck(0x40, gainPayload.data(), gainPayload.size());
+
+    const std::array<uint8_t, 2> channelPayload{
+        static_cast<uint8_t>((channelCode >> 8) & 0xFF),
+        static_cast<uint8_t>(channelCode & 0xFF)
+    };
+    sendCommandAndVerifyAck(0x30, channelPayload.data(), channelPayload.size());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+
+    if (!link_) connect();
+    if (config_.interCommandDelay.count() > 0)
+        std::this_thread::sleep_for(config_.interCommandDelay);
+
+    const std::string queryFrame{
+        static_cast<char>(0xCC),
+        static_cast<char>(0x01),
+        static_cast<char>(0x41),
+        static_cast<char>(0x03)
+    };
+    const auto deadline = Clock::now() + config_.timeout;
+    std::string response;
+    try {
+        link_->discardSerialInput();
+        link_->writeAll(queryFrame, deadline);
+        response = link_->readExact(7, deadline);
+    } catch (const Error &) {
+        link_.reset();
+        throw;
+    } catch (const std::system_error &e) {
+        link_.reset();
+        throw Error(IR_IO_ERROR, std::string("Detector current read I/O failed: ") + e.what());
+    }
+
+    const auto byteAt = [&](size_t idx) -> uint8_t {
+        return static_cast<uint8_t>(static_cast<unsigned char>(response[idx]));
+    };
+    if (response.size() != 7 || byteAt(0) != 0x55 || byteAt(1) != 0x00 ||
+        byteAt(2) != 0x03 || byteAt(3) != 0x41) {
+        link_.reset();
+        throw Error(IR_IO_ERROR,
+                    "Detector current response mismatch: received " + formatBytesHex(response) +
+                    ", expected 55 00 03 41 <ADC_H> <ADC_M> <ADC_L>");
+    }
+
+    const uint32_t rawCode = (static_cast<uint32_t>(byteAt(4)) << 16) |
+                             (static_cast<uint32_t>(byteAt(5)) << 8) |
+                             static_cast<uint32_t>(byteAt(6));
+    const double adcVoltageV = (static_cast<double>(rawCode) / 8388608.0 - 1.0) * 2.5;
+    const double senseVoltageV = adcVoltageV / static_cast<double>(gainMultiplier);
+    const double currentMa = std::abs(senseVoltageV) * 1000.0;
+    return {rawCode, 0, senseVoltageV, currentMa};
+}
+
 } // namespace ir::instruments

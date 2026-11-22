@@ -18,10 +18,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "simulators"))
 
 from ir_sim_devices import (  # noqa: E402
+    CoolerModbus,
     DetectorController,
     Dmm6500,
     GwsStenOven,
-    _consume_detector_buffer,
+    _consume_modbus_buffer,
+    _dispatch_buffer,
 )
 
 # Status codes (IR_status.h)
@@ -37,6 +39,7 @@ IR_RAW_REPLAY = 2
 IR_OVEN_GWS_STEN = 5
 IR_DMM6500 = 6
 IR_DETECTOR_SERIAL = 7
+IR_COOLER_MODBUS = 8
 
 # Oven / DMM enums (IR_device.h)
 IR_OVEN_MODE_STANDBY = 1
@@ -60,6 +63,23 @@ class DmmReading(c.Structure):
         ("value", c.c_double),
         ("mode", c.c_int32),
         ("valid", c.c_int32),
+    ]
+
+
+class DetectorCurrentReading(c.Structure):
+    _fields_ = [
+        ("raw_code", c.c_uint32),
+        ("reserved", c.c_uint32),
+        ("sense_voltage_v", c.c_double),
+        ("current_ma", c.c_double),
+    ]
+
+
+class CoolerReading(c.Structure):
+    _fields_ = [
+        ("raw_value", c.c_uint32),
+        ("valid", c.c_int32),
+        ("voltage_mv", c.c_double),
     ]
 
 
@@ -131,6 +151,10 @@ def load_sdk(path: Path):
     sdk.IR_SetDetectorRegister.argtypes = [
         c.c_uint64, c.c_uint8, c.POINTER(c.c_uint8), c.c_int32, *err_args,
     ]
+    sdk.IR_MeasureDetectorCurrent.argtypes = [
+        c.c_uint64, c.c_int32, c.c_uint16, c.POINTER(DetectorCurrentReading), *err_args,
+    ]
+    sdk.IR_ReadCooler.argtypes = [c.c_uint64, c.POINTER(CoolerReading), *err_args]
 
     sdk.IR_OpenFrames.argtypes = [c.c_int32, c.c_char_p, c.c_int32, c.POINTER(Geometry), *err_args]
     sdk.IR_CloseFrames.argtypes = err_args
@@ -146,9 +170,10 @@ def load_sdk(path: Path):
 class EphemeralTcpServer:
     """Loopback TCP server wrapper around a simulator controller with ephemeral port 0."""
 
-    def __init__(self, controller, delimiter):
+    def __init__(self, controller, delimiter, consume_fn=None):
         self.controller = controller
         self.delimiter = delimiter
+        self.consume_fn = consume_fn
         self.stop = threading.Event()
         self.error = None
         self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -195,25 +220,12 @@ class EphemeralTcpServer:
                             if not block:
                                 break
                             pending += block
-                            disconnected = False
-                            if self.delimiter is None:
-                                try:
-                                    pending = _consume_detector_buffer(
-                                        pending, self.controller, conn.sendall, fragment=False, log_io=False
-                                    )
-                                except (ConnectionResetError, BrokenPipeError, OSError):
-                                    disconnected = True
-                            else:
-                                while self.delimiter in pending:
-                                    request, pending = pending.split(self.delimiter, 1)
-                                    response = self.controller.handle(request)
-                                    if response:
-                                        try:
-                                            conn.sendall(response)
-                                        except (ConnectionResetError, BrokenPipeError, OSError):
-                                            disconnected = True
-                                            break
-                            if disconnected:
+                            try:
+                                pending = _dispatch_buffer(
+                                    pending, self.controller, self.delimiter, conn.sendall,
+                                    fragment=False, log_io=False, consume_fn=self.consume_fn,
+                                )
+                            except (ConnectionResetError, BrokenPipeError, OSError):
                                 break
         except Exception as exc:  # pragma: no cover
             self.error = exc
@@ -384,6 +396,22 @@ def exercise_detector(sdk, det: DetectorController, det_port: int, fixture_dir: 
         check(sdk.IR_SetDetectorRegister, handle, 0x79, reg_buf2, 1, expected=IR_IO_ERROR)
         det.bad_ack = False
 
+        # Current measurement (7-byte 55 00 03 41 ADC response)
+        curr = DetectorCurrentReading()
+        check(sdk.IR_MeasureDetectorCurrent, handle, 0, 0x0102, c.byref(curr))
+        assert math.isclose(curr.current_ma, 25.0, abs_tol=1e-3), curr.current_ma
+        assert math.isclose(curr.sense_voltage_v, 0.025, abs_tol=1e-6), curr.sense_voltage_v
+
+        check(sdk.IR_MeasureDetectorCurrent, handle, 3, 0x0102, c.byref(curr))
+        assert math.isclose(curr.current_ma, 25.0, abs_tol=1e-3), curr.current_ma
+        assert det.gain_code == 3 and det.channel_code == 0x0102
+
+        check(sdk.IR_MeasureDetectorCurrent, handle, 8, 0x0102, c.byref(curr), expected=IR_BAD_ARGUMENT)
+
+        det.bad_ack = True
+        check(sdk.IR_MeasureDetectorCurrent, handle, 0, 0x0102, c.byref(curr), expected=IR_IO_ERROR)
+        det.bad_ack = False
+
         # IR_RunNoise with detector != 0
         det.frames.clear()
         geom = Geometry()
@@ -410,9 +438,47 @@ def exercise_detector(sdk, det: DetectorController, det_port: int, fixture_dir: 
         check(sdk.IR_CloseDevice, handle)
 
 
+def exercise_cooler(sdk, cooler: CoolerModbus, cooler_port: int):
+    cfg = json.dumps({
+        "host": "127.0.0.1",
+        "tcp_port": cooler_port,
+        "slave_address": 1,
+        "register_address": 0x7A52,
+        "timeout_ms": 250,
+    }).encode("utf-8")
+    handle = c.c_uint64()
+    check(sdk.IR_OpenDevice, IR_COOLER_MODBUS, cfg, c.byref(handle))
+    assert handle.value != 0
+
+    try:
+        assert cooler.requests[-1] == bytes.fromhex("01037a5200027cc2"), cooler.requests[-1].hex()
+
+        reading = CoolerReading()
+        check(sdk.IR_ReadCooler, handle, c.byref(reading))
+        assert reading.valid == 1 and reading.raw_value == 108000
+        assert math.isclose(reading.voltage_mv, 1080.0, abs_tol=1e-6)
+
+        # Drop 1 reply -> reconnect recovery
+        cooler.drop_count = 1
+        reading = CoolerReading()
+        check(sdk.IR_ReadCooler, handle, c.byref(reading))
+        assert cooler.drop_count == 0
+        assert math.isclose(reading.voltage_mv, 1080.0, abs_tol=1e-6)
+
+        # Persistent CRC failure -> IR_IO_ERROR, then clean recovery
+        cooler.bad_crc = True
+        check(sdk.IR_ReadCooler, handle, c.byref(reading), expected=IR_IO_ERROR)
+        cooler.bad_crc = False
+        check(sdk.IR_ReadCooler, handle, c.byref(reading))
+        assert math.isclose(reading.voltage_mv, 1080.0, abs_tol=1e-6)
+    finally:
+        check(sdk.IR_CloseDevice, handle)
+
+
 def exercise_recipe_v2(sdk, oven: GwsStenOven, oven_port: int,
                        dmm: Dmm6500, dmm_port: int,
                        det: DetectorController, det_port: int,
+                       cooler: CoolerModbus, cooler_port: int,
                        fixture_dir: Path, work_dir: Path):
     station = {
         "schema_version": 1,
@@ -434,6 +500,10 @@ def exercise_recipe_v2(sdk, oven: GwsStenOven, oven_port: int,
                 "kind": "detector-serial",
                 "connection": {"host": "127.0.0.1", "tcp_port": det_port, "timeout_ms": 400},
             },
+            "cooler": {
+                "kind": "cooler-modbus",
+                "connection": {"host": "127.0.0.1", "tcp_port": cooler_port, "timeout_ms": 400},
+            },
         },
     }
     pass_recipe = {
@@ -447,7 +517,10 @@ def exercise_recipe_v2(sdk, oven: GwsStenOven, oven_port: int,
             },
             {"id": "dt1", "type": "detector_timing", "device": "det", "integration_us": 800, "frame_hz": 50, "empty_us": 100},
             {"id": "dg1", "type": "detector_gpol", "device": "det", "gpol_v": 2.5},
+            {"id": "dr1", "type": "detector_register", "device": "det", "command_code": 0x65, "payload_hex": "08"},
+            {"id": "dc1", "type": "detector_current", "device": "det", "name": "det_curr", "gain_code": 0, "channel_code": 1},
             {"id": "dm1", "type": "dmm_read", "device": "dmm", "name": "dmm", "set_mode": True, "mode": "diode"},
+            {"id": "cl1", "type": "cooler_read", "device": "cooler", "name": "cooler"},
             {"id": "cap", "type": "capture", "frames": 2, "frame_timeout_ms": 0, "output": "batch0"},
             {"id": "st1", "type": "analyze", "method": "frame_stats", "name": "stats", "input": "batch0"},
         ],
@@ -455,6 +528,8 @@ def exercise_recipe_v2(sdk, oven: GwsStenOven, oven_port: int,
         "limits": [
             {"metric": "dmm.value", "operator": "min", "value": 0.5, "unit": "V"},
             {"metric": "dmm.value", "operator": "max", "value": 0.8, "unit": "V"},
+            {"metric": "cooler.voltage_mv", "operator": "min", "value": 1000.0, "unit": "mV"},
+            {"metric": "det_curr.current_ma", "operator": "min", "value": 20.0, "unit": "mA"},
         ],
     }
     station_bytes = json.dumps(station).encode("utf-8")
@@ -477,6 +552,8 @@ def exercise_recipe_v2(sdk, oven: GwsStenOven, oven_port: int,
     assert record["run_status"] == "PASS", record["run_status"]
     assert record["raw_saved"] is False
     assert math.isclose(record["metrics"]["dmm.value"]["value"], 0.6125, abs_tol=1e-9)
+    assert math.isclose(record["metrics"]["cooler.voltage_mv"]["value"], 1080.0, abs_tol=1e-6)
+    assert math.isclose(record["metrics"]["det_curr.current_ma"]["value"], 25.0, abs_tol=1e-2)
     assert math.isclose(record["metrics"]["stats.mean_dn"]["value"], 21.0, abs_tol=1e-9)
     assert oven.mode == "STANDBY"
     assert "MODE, STANDBY" in oven.commands
@@ -484,6 +561,10 @@ def exercise_recipe_v2(sdk, oven: GwsStenOven, oven_port: int,
         (0x50, (800).to_bytes(3, "little")),
         (0x51, (100).to_bytes(3, "little")),
         (0x21, (32768).to_bytes(2, "little")),
+        (0x65, b"\x08"),
+        (0x40, b"\x00"),
+        (0x30, b"\x00\x01"),
+        (0x41, b"\x03"),
     ], det.frames
 
     # Repeat-burst v2 check emitting dmm.value in CSV
@@ -552,15 +633,19 @@ def main():
 
     assert c.sizeof(OvenReading) == 24, c.sizeof(OvenReading)
     assert c.sizeof(DmmReading) == 16, c.sizeof(DmmReading)
+    assert c.sizeof(DetectorCurrentReading) == 24, c.sizeof(DetectorCurrentReading)
+    assert c.sizeof(CoolerReading) == 16, c.sizeof(CoolerReading)
 
     sdk = load_sdk(args.library.resolve())
     oven = GwsStenOven(address=1, temperature=25.0, setpoint=25.0, mode="STANDBY")
     dmm = Dmm6500(mode="DIOD", value=0.6125)
     det = DetectorController()
+    cooler = CoolerModbus(slave_address=1, register_address=0x7A52, voltage_mv=1080.0)
 
     with EphemeralTcpServer(oven, b"\r\n") as oven_srv, \
          EphemeralTcpServer(dmm, b"\n") as dmm_srv, \
          EphemeralTcpServer(det, None) as det_srv, \
+         EphemeralTcpServer(cooler, None, consume_fn=_consume_modbus_buffer) as cooler_srv, \
          TemporaryDirectory(prefix="instruments-mock-", dir=args.fixture_parent) as tmp:
         work_dir = Path(tmp)
         fixture_dir = work_dir / "raw"
@@ -570,8 +655,10 @@ def main():
         exercise_oven(sdk, oven, oven_srv.port)
         exercise_dmm6500(sdk, dmm, dmm_srv.port)
         exercise_detector(sdk, det, det_srv.port, fixture_dir)
+        exercise_cooler(sdk, cooler, cooler_srv.port)
         exercise_recipe_v2(
-            sdk, oven, oven_srv.port, dmm, dmm_srv.port, det, det_srv.port, fixture_dir, work_dir
+            sdk, oven, oven_srv.port, dmm, dmm_srv.port, det, det_srv.port,
+            cooler, cooler_srv.port, fixture_dir, work_dir
         )
 
 

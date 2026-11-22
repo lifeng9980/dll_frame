@@ -290,7 +290,9 @@ foreach ($sym in @(
     "IR_ReadDmm",
     "IR_SetDetectorTiming",
     "IR_SetDetectorGpol",
-    "IR_SetDetectorRegister"
+    "IR_SetDetectorRegister",
+    "IR_MeasureDetectorCurrent",
+    "IR_ReadCooler"
 )) {
     Assert-True ($stationExports -match "\b$sym\b") "IR_station.dll must export $sym"
 }
@@ -746,7 +748,7 @@ recipe_schema = json.loads((pkg / "examples/schemas/recipe.schema.json").read_te
 recipe_v2_schema = json.loads((pkg / "examples/schemas/recipe.v2.schema.json").read_text(encoding="utf-8"))
 stations = sorted((pkg / "examples/stations").glob("*.json"))
 recipes = sorted((pkg / "examples/recipes").glob("*.json"))
-assert len(stations) == 4 and len(recipes) == 6, (len(stations), len(recipes))
+assert len(stations) == 5 and len(recipes) == 7, (len(stations), len(recipes))
 for p in [*stations, *recipes]:
     data = json.loads(p.read_text(encoding="utf-8"))
     ref = (p.parent / data["$schema"]).resolve()
@@ -785,6 +787,12 @@ bad_stations = [
      "devices": {"dt": {"kind": "detector-serial", "connection": {"host": "127.0.0.1", "port": "COM5"}}}},
     {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
      "devices": {"ov": {"kind": "gws-sten", "connection": {"host": "127.0.0.1", "delimiter": "tab"}}}},
+    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
+     "devices": {"pw": {"kind": "it6332a", "connection": {"host": "127.0.0.1", "port": "COM8"}}}},
+    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
+     "devices": {"cl": {"kind": "cooler-modbus", "connection": {"host": "127.0.0.1", "port": "COM9"}}}},
+    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
+     "devices": {"cl": {"kind": "cooler-modbus", "connection": {"host": "127.0.0.1", "slave_address": 250}}}},
 ]
 for idx, s in enumerate(bad_stations):
     assert not sv.is_valid(s), f"bad station #{idx} unexpectedly validated"
@@ -794,18 +802,22 @@ good_stations_extra = [
         "schema_version": 1,
         "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
         "devices": {
+            "pw": {"kind": "it6332a", "connection": {"port": "COM8", "baud_rate": 115200}},
             "ov": {"kind": "gws-sten", "connection": {"port": "COM3", "baud_rate": 9600, "data_bits": 8, "parity": "none", "stop_bits": 1, "address": 1, "delimiter": "crlf"}},
             "dm": {"kind": "dmm6500", "connection": {"port": "COM4", "baud_rate": 115200}},
             "dt": {"kind": "detector-serial", "connection": {"port": "COM5", "baud_rate": 115200, "inter_command_ms": 5}},
+            "cl": {"kind": "cooler-modbus", "connection": {"port": "COM9", "baud_rate": 9600, "stop_bits": 2, "slave_address": 1}},
         },
     },
     {
         "schema_version": 1,
         "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
         "devices": {
+            "pw": {"kind": "it6332a", "connection": {"host": "127.0.0.1", "tcp_port": 5026}},
             "ov": {"kind": "gws-sten", "connection": {"host": "127.0.0.1", "tcp_port": 5000}},
             "dm": {"kind": "dmm6500", "connection": {"host": "127.0.0.1", "tcp_port": 5025}},
             "dt": {"kind": "detector-serial", "connection": {"host": "127.0.0.1", "tcp_port": 2102}},
+            "cl": {"kind": "cooler-modbus", "connection": {"host": "127.0.0.1", "tcp_port": 5020, "slave_address": 1}},
         },
     },
 ]
@@ -820,12 +832,18 @@ good_recipes_v2_extra = [
             {"id": "ov1", "type": "oven_stabilize", "device": "ov", "target_c": 25.0, "tolerance_c": 0.5, "stable_window_ms": 100, "timeout_ms": 5000, "require_no_alarm": True, "standby_after_run": True},
             {"id": "dt1", "type": "detector_timing", "device": "dt", "integration_us": 1000, "frame_hz": 50, "empty_us": 200},
             {"id": "dg1", "type": "detector_gpol", "device": "dt", "gpol_v": 2.5},
+            {"id": "dr1", "type": "detector_register", "device": "dt", "command_code": 101, "payload_hex": "08"},
+            {"id": "dc1", "type": "detector_current", "device": "dt", "name": "dc", "gain_code": 0, "channel_code": 1},
             {"id": "dm1", "type": "dmm_read", "device": "dm", "name": "dmm", "mode": "diode", "set_mode": True},
+            {"id": "cl1", "type": "cooler_read", "device": "cl", "name": "cooler"},
             {"id": "c1", "type": "capture", "frames": 2, "frame_timeout_ms": 0, "output": "b0"},
             {"id": "ov2", "type": "oven_standby", "device": "ov"},
         ],
         "safety": {"oven_standby": ["ov"]},
-        "limits": [{"metric": "dmm.value", "operator": "max", "value": 0.8, "unit": "V"}],
+        "limits": [
+            {"metric": "dmm.value", "operator": "max", "value": 0.8, "unit": "V"},
+            {"metric": "cooler.voltage_mv", "operator": "min", "value": 500.0, "unit": "mV"},
+        ],
     }
 ]
 for r in good_recipes_v2_extra:
@@ -880,6 +898,12 @@ bad_recipes_v2 = [
     {"schema_version": 2, "recipe_id": "bad-safety-oven", "steps": [
         {"id": "c", "type": "capture", "frames": 2, "frame_timeout_ms": 0}
     ], "safety": {"oven_standby": [123]}},
+    {"schema_version": 2, "recipe_id": "bad-reg-hex", "steps": [
+        {"id": "dr", "type": "detector_register", "device": "dt", "command_code": 101, "payload_hex": "0"}
+    ]},
+    {"schema_version": 2, "recipe_id": "bad-curr-gain", "steps": [
+        {"id": "dc", "type": "detector_current", "device": "dt", "gain_code": 8, "channel_code": 1}
+    ]},
 ]
 for idx, r in enumerate(bad_recipes_v2):
     assert not rv2.is_valid(r), f"bad recipe v2 #{idx} unexpectedly validated"

@@ -1,0 +1,172 @@
+{
+  "$schema": "../schemas/recipe.v2.schema.json",
+  "schema_version": 2,
+  "recipe_id": "virtual-station-hil-v2",
+  "steps": [
+    {
+      "id": "pwr_ch1_cfg",
+      "type": "power_set",
+      "device": "supply",
+      "channel": 1,
+      "voltage_v": 12.0,
+      "current_limit_a": 2.0
+    },
+    {
+      "id": "pwr_ch1_on",
+      "type": "power_output",
+      "device": "supply",
+      "channel": 1,
+      "enabled": true,
+      "off_after_run": true
+    },
+    {
+      "id": "pwr_ch2_cfg",
+      "type": "power_set",
+      "device": "supply",
+      "channel": 2,
+      "voltage_v": 12.0,
+      "current_limit_a": 1.5
+    },
+    {
+      "id": "pwr_ch2_on",
+      "type": "power_output",
+      "device": "supply",
+      "channel": 2,
+      "enabled": true,
+      "off_after_run": true
+    },
+    {
+      "id": "oven_stab",
+      "type": "oven_stabilize",
+      "device": "oven",
+      "target_c": 30.0,
+      "tolerance_c": 0.5,
+      "stable_window_ms": 20,
+      "timeout_ms": 2000,
+      "require_no_alarm": true,
+      "standby_after_run": true
+    },
+    {
+      "id": "bb_stab",
+      "type": "blackbody_stabilize",
+      "device": "bb",
+      "target_c": 32.0,
+      "tolerance_c": 0.2,
+      "stable_window_ms": 20,
+      "timeout_ms": 2000,
+      "require_device_stable": true
+    },
+    {
+      "id": "det_timing",
+      "type": "detector_timing",
+      "device": "det",
+      "integration_us": 1000,
+      "frame_hz": 50,
+      "empty_us": 200
+    },
+    {
+      "id": "det_gpol",
+      "type": "detector_gpol",
+      "device": "det",
+      "gpol_v": 2.5
+    },
+    {
+      "id": "det_freq_reg",
+      "type": "detector_register",
+      "device": "det",
+      "command_code": 101,
+      "payload_hex": "08"
+    },
+    {
+      "id": "det_curr",
+      "type": "detector_current",
+      "device": "det",
+      "name": "det_curr",
+      "gain_code": 0,
+      "channel_code": 1
+    },
+    {
+      "id": "dmm",
+      "type": "dmm_read",
+      "device": "dmm",
+      "name": "dmm",
+      "mode": "diode",
+      "set_mode": true
+    },
+    {
+      "id": "cooler",
+      "type": "cooler_read",
+      "device": "cooler",
+      "name": "cooler"
+    },
+    {
+      "id": "cap",
+      "type": "capture",
+      "frames": 2,
+      "frame_timeout_ms": 0,
+      "output": "b0"
+    },
+    {
+      "id": "stats",
+      "type": "analyze",
+      "method": "frame_stats",
+      "name": "stats",
+      "input": "b0"
+    }
+  ],
+  "safety": {
+    "blackbody_standby": [
+      {
+        "device": "bb",
+        "target_c": 25.0
+      }
+    ],
+    "oven_standby": [
+      "oven"
+    ]
+  },
+  "limits": [
+    {
+      "metric": "dmm.value",
+      "operator": "min",
+      "value": 0.9,
+      "unit": "V"
+    },
+    {
+      "metric": "dmm.value",
+      "operator": "max",
+      "value": 1.2,
+      "unit": "V"
+    },
+    {
+      "metric": "cooler.voltage_mv",
+      "operator": "min",
+      "value": 900.0,
+      "unit": "mV"
+    },
+    {
+      "metric": "cooler.voltage_mv",
+      "operator": "max",
+      "value": 1200.0,
+      "unit": "mV"
+    },
+    {
+      "metric": "det_curr.current_ma",
+      "operator": "min",
+      "value": 10.0,
+      "unit": "mA"
+    },
+    {
+      "metric": "det_curr.current_ma",
+      "operator": "max",
+      "value": 25.0,
+      "unit": "mA"
+    },
+    {
+      "metric": "stats.mean_dn",
+      "operator": "max",
+      "value": 60.0,
+      "unit": "DN"
+    }
+  ]
+}

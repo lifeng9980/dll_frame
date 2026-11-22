@@ -7,6 +7,7 @@
 #include "station/instruments/device_lease.h"
 #include "station/version.h"
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <climits>
 #include <cmath>
@@ -199,6 +200,68 @@ VariantType parseSharedControlOrCaptureOrFlushOrAnalyze(
                 path + ".gpol_v must be within [0.0, 5.0]");
         usedDevices.insert(alias);
         return DetectorGpolStep{std::move(ref), alias, gpol};
+    }
+    if (type == "detector_register") {
+        allowFields(fields, {"id", "type", "device", "command_code", "payload_hex"}, path);
+        const auto alias = stringField(fields, "device", path);
+        requireDeviceKind(station, alias, IR_DETECTOR_SERIAL, path, "detector-serial");
+        const int32_t cmd = integerField(fields, "command_code", 0, 255, path);
+        const auto hexText = stringField(fields, "payload_hex", path);
+        require(hexText.size() >= 2 && hexText.size() <= 510 && (hexText.size() % 2) == 0,
+                IR_BAD_ARGUMENT, path + ".payload_hex must contain 1..255 hex bytes");
+        auto hexVal = [&](char ch) -> int {
+            if (ch >= '0' && ch <= '9') return ch - '0';
+            if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+            if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+            return -1;
+        };
+        std::vector<uint8_t> payload;
+        payload.reserve(hexText.size() / 2);
+        for (size_t i = 0; i < hexText.size(); i += 2) {
+            const int hi = hexVal(hexText[i]);
+            const int lo = hexVal(hexText[i + 1]);
+            require(hi >= 0 && lo >= 0, IR_BAD_ARGUMENT, path + ".payload_hex contains non-hex characters");
+            payload.push_back(static_cast<uint8_t>((hi << 4) | lo));
+        }
+        usedDevices.insert(alias);
+        return DetectorRegisterStep{std::move(ref), alias, static_cast<uint8_t>(cmd), std::move(payload), hexText};
+    }
+    if (type == "detector_current") {
+        allowFields(fields, {"id", "type", "device", "name", "gain_code", "channel_code"}, path);
+        const auto alias = stringField(fields, "device", path);
+        requireDeviceKind(station, alias, IR_DETECTOR_SERIAL, path, "detector-serial");
+        const std::string stepName = fields.contains("name") ? stringField(fields, "name", path) : ref.id;
+        const int32_t gainCode = integerField(fields, "gain_code", 0, 7, path);
+        const uint16_t channelCode = static_cast<uint16_t>(integerField(fields, "channel_code", 0, 65535, path));
+        require(analysisNames.insert(stepName).second, IR_BAD_ARGUMENT,
+                path + ".name is duplicated: " + stepName);
+        const std::string mCurrent = stepName + ".current_ma";
+        const std::string mSense = stepName + ".sense_voltage_v";
+        require(metricUnits.emplace(mCurrent, "mA").second, IR_BAD_ARGUMENT,
+                path + " produces duplicate metric name: " + mCurrent);
+        require(metricUnits.emplace(mSense, "V").second, IR_BAD_ARGUMENT,
+                path + " produces duplicate metric name: " + mSense);
+        if (producedMetricsOrder) {
+            producedMetricsOrder->push_back(mCurrent);
+            producedMetricsOrder->push_back(mSense);
+        }
+        usedDevices.insert(alias);
+        return DetectorCurrentStep{std::move(ref), alias, stepName, gainCode, channelCode};
+    }
+    if (type == "cooler_read") {
+        allowFields(fields, {"id", "type", "device", "name"}, path);
+        const auto alias = stringField(fields, "device", path);
+        requireDeviceKind(station, alias, IR_COOLER_MODBUS, path, "cooler-modbus");
+        const std::string stepName = fields.contains("name") ? stringField(fields, "name", path) : ref.id;
+        require(analysisNames.insert(stepName).second, IR_BAD_ARGUMENT,
+                path + ".name is duplicated: " + stepName);
+        const std::string metricKey = stepName + ".voltage_mv";
+        require(metricUnits.emplace(metricKey, "mV").second, IR_BAD_ARGUMENT,
+                path + " produces duplicate metric name: " + metricKey);
+        if (producedMetricsOrder)
+            producedMetricsOrder->push_back(metricKey);
+        usedDevices.insert(alias);
+        return CoolerReadStep{std::move(ref), alias, stepName};
     }
     if (type == "flush_frames") {
         allowFields(fields, {"id", "type", "discard_frames", "timeout_ms"}, path);
@@ -435,6 +498,83 @@ void runControlDetectorGpol(IRHandle handle, const DetectorGpolStep &step, V2Rea
         {"kind", "detector_gpol"},
         {"gpol_v", step.gpolV}
     });
+}
+
+void runControlDetectorRegister(IRHandle handle, const DetectorRegisterStep &step, V2Readbacks &readbacks)
+{
+    char error[1024]{};
+    checkStatus(IR_SetDetectorRegister(handle, step.commandCode, step.payload.data(),
+                                       static_cast<int32_t>(step.payload.size()), error, sizeof error), error);
+    readbacks.conditions.push_back({
+        {"step", step.ref.id},
+        {"device", step.device},
+        {"kind", "detector_register"},
+        {"command_code", step.commandCode},
+        {"payload_hex", step.payloadHex}
+    });
+}
+
+void runControlDetectorCurrent(IRHandle handle, const DetectorCurrentStep &step,
+                               V2Readbacks &readbacks, ExecutionContext &ctx)
+{
+    char error[1024]{};
+    IRDetectorCurrentReading reading{};
+    checkStatus(IR_MeasureDetectorCurrent(handle, step.gainCode, step.channelCode,
+                                          &reading, error, sizeof error), error);
+    readbacks.instruments.push_back({
+        {"step", step.ref.id},
+        {"device", step.device},
+        {"operation", "detector_current"},
+        {"gain_code", step.gainCode},
+        {"channel_code", step.channelCode},
+        {"reading", {
+            {"raw_code", reading.raw_code},
+            {"sense_voltage_v", reading.sense_voltage_v},
+            {"current_ma", reading.current_ma}
+        }}
+    });
+    const std::string kCur = step.name + ".current_ma";
+    const std::string kSense = step.name + ".sense_voltage_v";
+    ctx.scalarValues[kCur] = reading.current_ma;
+    ctx.scalarValues[kSense] = reading.sense_voltage_v;
+    ctx.metrics[kCur] = {
+        {"value", reading.current_ma},
+        {"unit", "mA"},
+        {"method", "detector_current_adc"},
+        {"version", 1}
+    };
+    ctx.metrics[kSense] = {
+        {"value", reading.sense_voltage_v},
+        {"unit", "V"},
+        {"method", "detector_current_adc"},
+        {"version", 1}
+    };
+}
+
+void runControlCoolerRead(IRHandle handle, const CoolerReadStep &step,
+                          V2Readbacks &readbacks, ExecutionContext &ctx)
+{
+    char error[1024]{};
+    IRCoolerReading reading{};
+    checkStatus(IR_ReadCooler(handle, &reading, error, sizeof error), error);
+    readbacks.instruments.push_back({
+        {"step", step.ref.id},
+        {"device", step.device},
+        {"operation", "cooler_read"},
+        {"reading", {
+            {"raw_value", reading.raw_value},
+            {"voltage_mv", reading.voltage_mv},
+            {"valid", reading.valid != 0}
+        }}
+    });
+    const std::string key = step.name + ".voltage_mv";
+    ctx.scalarValues[key] = reading.voltage_mv;
+    ctx.metrics[key] = {
+        {"value", reading.voltage_mv},
+        {"unit", "mV"},
+        {"method", "cooler_modbus"},
+        {"version", 1}
+    };
 }
 
 void validateInnerGeometry(const InnerStepV2 &step, IRGeometry geom, int64_t maxBatchElements)
@@ -748,6 +888,21 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
                     progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
                     capture.checkStop();
                     runControlDetectorGpol(devices.at(s.device), s, readbacks);
+                    capture.checkStop();
+                } else if constexpr (std::is_same_v<T, DetectorRegisterStep>) {
+                    progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
+                    capture.checkStop();
+                    runControlDetectorRegister(devices.at(s.device), s, readbacks);
+                    capture.checkStop();
+                } else if constexpr (std::is_same_v<T, DetectorCurrentStep>) {
+                    progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
+                    capture.checkStop();
+                    runControlDetectorCurrent(devices.at(s.device), s, readbacks, ctx);
+                    capture.checkStop();
+                } else if constexpr (std::is_same_v<T, CoolerReadStep>) {
+                    progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
+                    capture.checkStop();
+                    runControlCoolerRead(devices.at(s.device), s, readbacks, ctx);
                     capture.checkStop();
                 } else if constexpr (std::is_same_v<T, FlushStep>) {
                     progress.enter(IR_RECIPE_STAGE_CAPTURE, &s.ref);

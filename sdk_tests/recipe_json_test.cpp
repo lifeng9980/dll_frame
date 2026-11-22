@@ -113,6 +113,7 @@ void checkBundledTemplates(const fs::path &examplesDir)
         {"sim_tcp.json", "noise_blackbody.json"},
         {"sim_power_serial.json", "power_serial_smoke.json"},
         {"sim_power_serial.json", "power_serial_output_cycle.json"},
+        {"sim_virtual_station_tcp.json", "virtual_station_hil_v2.json"},
     };
 
     std::set<std::string> checkedStations;
