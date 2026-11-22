@@ -471,7 +471,8 @@ IR_ANALYSIS_API int32_t IR_GjbEvaluateMaps(
 
 enum IRSpatialFilterKind
 {
-    IR_SPATIAL_FILTER_BOX_MEAN = 0
+    IR_SPATIAL_FILTER_BOX_MEAN = 0,
+    IR_SPATIAL_FILTER_GAUSSIAN = 1
 };
 
 enum IRMapBinaryOp
@@ -652,6 +653,7 @@ IR_ANALYSIS_API int32_t IR_MapSummaryF64(
     int32_t err_bytes);
 
 /* 掩码感知空间低频/高频分解：仅聚合 valid_mask==1 且有限的邻域像元，边界自动裁剪。
+ * filter_kind 支持 IR_SPATIAL_FILTER_BOX_MEAN（盒式均值）与 IR_SPATIAL_FILTER_GAUSSIAN（归一化可分离高斯核）。
  * kernel_w / kernel_h 必须为 >=1 的奇数（例如 15x15 对应 LRNU/HRNU）。
  * out_low_map 与 out_high_map 至少一个非 NULL；high = valid_finite ? (in - low) : 0。
  */
@@ -769,6 +771,48 @@ IR_ANALYSIS_API int32_t IR_GjbEvaluateBurstMetrics(
     int64_t pixel_capacity,
     const IRGjbDriftContext *ctx,
     IRGjbBurstMetrics *metrics,
+    char *err,
+    int32_t err_bytes);
+
+/* ======================== 闪烁像元（闪元 / RTS）检测 ======================== */
+
+typedef struct IRFlickerSummary
+{
+    double std_dev_multiplier;
+    double flicker_ratio_pct;
+    double mean_frame_mean_dn;
+    double mean_frame_sigma_dn;
+    int32_t exceed_count_threshold;
+    int32_t frame_count;
+    int32_t valid_pixel_count;
+    int32_t flicker_count;
+} IRFlickerSummary;
+
+/* 闪元检测（逐帧总体标准差阈值统计）：
+ * frames 为紧密 [帧][行][列] uint16_t（frame_count >= 1）；若同时提供 k_map 与 b_map 则在库内执行 NUC (k*raw+b)。
+ * 跳过 valid_mask==0、原始值==0、或校正后非有限/==0 的像元；仅对当帧观察到的有效像元计算均值与总体标准差 sigma，
+ * 若 |val - frame_mean| > std_dev_multiplier * frame_sigma，则该像元超限次数 +1；
+ * 若总观察有效像元超限次数 > exceed_count_threshold（0 <= threshold < frame_count），标记为闪元（out_flicker_mask=1）。
+ * out_exceed_count_map、out_flicker_mask、out_frame_means、out_frame_sigmas 均可为 NULL。
+ */
+IR_ANALYSIS_API int32_t IR_FlickerDetectU16(
+    const uint16_t *frames,
+    int64_t frame_elements,
+    int32_t frame_count,
+    int32_t rows,
+    int32_t cols,
+    const double *k_map,
+    const double *b_map,
+    const uint8_t *valid_mask,
+    double std_dev_multiplier,
+    int32_t exceed_count_threshold,
+    IRFlickerSummary *summary,
+    int32_t *out_exceed_count_map,
+    uint8_t *out_flicker_mask,
+    int64_t pixel_capacity,
+    double *out_frame_means,
+    double *out_frame_sigmas,
+    int32_t frame_stats_capacity,
     char *err,
     int32_t err_bytes);
 #ifdef __cplusplus

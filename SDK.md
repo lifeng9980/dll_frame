@@ -13,10 +13,10 @@ IR SDK 面向 Windows x64 与 Ubuntu 24.04 x86-64 使用同一份源码和公共
 
 | 层 | 改动入口 | 输入和输出 |
 |---|---|---|
-| 仪器控制 | `station/instruments/` 按设备型号接入，`transport/asio_link.cpp` 共用 Asio TCP 与串口 | `IR_OpenDevice` 接收型号和连接 JSON，黑体示例提供设温回读和状态读取。新设备需说明哪些命令可以安全重试 |
-| 原始采集 | `station/acquisition/frame_source.h`，具体来源在 `raw_replay/`、`directshow/`、`v4l2/` | `IR_OpenFrames` 返回几何，`IR_ReadFrames` 输出紧密排列的 RAW16 像素；`IR_FlushFrames` 支撑不停流多 Burst 采集；`IR_TryReadLatestFrame` / `IR_GetCaptureStats` 提供无阻塞预览与有界 `FrameQueue` 诊断 |
-| 指标计算 | `analysis/`，可独立使用 `IR_analysis` | `IR_FrameStatisticsU16`、`IR_ROIMeanU16`、`IR_Noise3D*`、`IR_Gb*` / `IR_Gjb*`（含可配置短路/断路阈值），以及两点 NUC、无损 NUC 统计、`15×15` 空间高低频（LRNU/HRNU）、算术扣噪/阈值掩码、任意长 1D FFT 与 `IR_GjbEvaluateBurstMetrics` |
-| 流程编排 | `station/procedures/` | `IR_RunRecipeJson` 同时支持 Schema v1 单批配方与 Schema v2（多温点/多条件、中间图与掩码跨步引用、`flush_frames`、可选 `save_raw`、`repeat_burst` 周期无存盘温漂、开放 14 项 `IR_analysis` 算子登记与安全待机收尾）；`IR_WaitBlackbodyStable` 提供独立等稳接口 |
+| 仪器控制 | `station/instruments/` 按设备型号接入，`transport/asio_link.cpp` 共用 Asio TCP 与串口 | `IR_OpenDevice` 接收型号和连接 JSON，黑体/电源提供设温、输出、回读；`IR_ListSerialPorts` 枚举可用串口。新设备需说明哪些命令可以安全重试 |
+| 原始采集 | `station/acquisition/frame_source.h`，具体来源在 `raw_replay/`、`directshow/`、`v4l2/` | `IR_ListCaptureDevices` 枚举相机；`IR_OpenFrames` 返回几何，`IR_ReadFrames` 输出紧密排列的 RAW16 像素；`IR_FlushFrames` 支撑不停流多 Burst 采集；`IR_TryReadLatestFrame` / `IR_GetCaptureStats` 提供无阻塞预览与有界 `FrameQueue` 诊断 |
+| 指标计算 | `analysis/`，可独立使用 `IR_analysis` | `IR_FrameStatisticsU16`、`IR_ROIMeanU16`、`IR_Noise3D*`、`IR_Gb*` / `IR_Gjb*`（含可配置短路/断路阈值）、`IR_FlickerDetectU16` 闪元检测，以及两点 NUC、无损 NUC 统计、`15×15` 空间高低频（盒式均值与掩码归一化高斯 `IR_SPATIAL_FILTER_GAUSSIAN`）、算术扣噪/阈值掩码、任意长 1D FFT 与 `IR_GjbEvaluateBurstMetrics` |
+| 流程编排 | `station/procedures/` | `IR_RunRecipeJson` 同时支持 Schema v1 单批配方与 Schema v2（多温点/多条件、中间图与掩码跨步引用、`flush_frames`、可选 `save_raw`、`repeat_burst` 周期无存盘温漂、开放 15 项 `IR_analysis` 算子登记与安全待机收尾）；`IR_WaitBlackbodyStable` 提供独立等稳接口 |
 
 ## 线程和设备占用
 
@@ -34,7 +34,7 @@ DOC058 黑体连接中断或应答超时后最多重连三次，每次间隔 500
 
 安装包的 `examples/analysis_conditions.c` 演示同一个分析入口如何接收不同积分时间下的两组帧，并逐组返回均值和噪声。它只验证数据组织方式，不代表 GJB 或 EMVA 的指标实现。
 
-`IR_ROIMeanU16` 是算法扩展样板：用两帧 `2×2` 数据验证左列 ROI 均值 41 DN、整图均值 51 DN。包内的 `examples/analysis_algorithms.c`（独立链接 `IR_analysis`，不依赖 `IR_station`）、`examples/python/ir_analysis.py` 与 `examples/csharp/AnalysisInterop.cs` 演示了独立 `IR_analysis` 库中的 3D 噪声（Noise3D DN 两阶段）、国标（GB，支持在 `IRGbCriteria` 配置短路/断路阈值，`<= 0` 时默认 `45000 / 20000`）/ 国军标（GJB）以及可组合算子（两点 NUC、`15×15` LRNU/HRNU、掩码组合、任意长度 1D FFT、多通道频谱与单 Burst 轻量评估）C 接口调用；其中 GB/GJB 噪声图 `vn` 使用总体标准差（`IR_FrameStatisticsU16(..., sample_std = 0)`，分母 `N`），而既有 `IR_RunNoise` 与 `temporal_noise` 保持样本标准差（`sample_std = 1`，分母 `N - 1`）不变。对于 5 小时温漂等不停流、不存盘的多 Burst 场景，应用可在单工位循环内复用 `IR_WaitBlackbodyStable`、`IR_FlushFrames`、`IR_ReadFrames` 与 `IR_FrameStatisticsNucU16` / `IR_GjbEvaluateBurstMetrics`。源码仓库内提供面向算法研发的完整接入指南与测试模板。
+`IR_ROIMeanU16` 是算法扩展样板：用两帧 `2×2` 数据验证左列 ROI 均值 41 DN、整图均值 51 DN。包内的 `examples/analysis_algorithms.c`（独立链接 `IR_analysis`，不依赖 `IR_station`）、`examples/python/ir_analysis.py` 与 `examples/csharp/AnalysisInterop.cs` 演示了独立 `IR_analysis` 库中的 3D 噪声（Noise3D DN 两阶段）、国标（GB，支持在 `IRGbCriteria` 配置短路/断路阈值，`<= 0` 时默认 `45000 / 20000`）/ 国军标（GJB）、闪元检测（`IR_FlickerDetectU16`）以及可组合算子（两点 NUC、`15×15` 盒式/高斯空间高低频、掩码组合、任意长度 1D FFT、多通道频谱与单 Burst 轻量评估）C 接口调用；此外包内提供通用硬件验收与长稳拷机命令行 `ir_capture_accept`（支持 `--list` 枚举与多轮启停/`--flush-between` 连续流 + 并发无阻塞预览压测）。其中 GB/GJB 噪声图 `vn` 使用总体标准差（`IR_FrameStatisticsU16(..., sample_std = 0)`，分母 `N`），而既有 `IR_RunNoise` 与 `temporal_noise` 保持样本标准差（`sample_std = 1`，分母 `N - 1`）不变。对于 5 小时温漂等不停流、不存盘的多 Burst 场景，应用可在单工位循环内复用 `IR_WaitBlackbodyStable`、`IR_FlushFrames`、`IR_ReadFrames` 与 `IR_FrameStatisticsNucU16` / `IR_GjbEvaluateBurstMetrics`。源码仓库内提供面向算法研发的完整接入指南与测试模板。
 
 ## SDK 依赖和构建
 

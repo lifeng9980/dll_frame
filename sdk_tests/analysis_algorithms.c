@@ -17,7 +17,8 @@ static int check_abi_sizes(void)
         sizeof(IRNoise3DComputeParams) != 32 ||
         sizeof(IRMapSummary) != 80 ||
         sizeof(IRGjbDriftContext) != 64 ||
-        sizeof(IRGjbBurstMetrics) != 168) {
+        sizeof(IRGjbBurstMetrics) != 168 ||
+        sizeof(IRFlickerSummary) != 48) {
         fprintf(stderr, "Unexpected fixed-width struct size in IR_analysis.h\n");
         return 1;
     }
@@ -277,11 +278,41 @@ int main(void)
         return 1;
     }
 
+    double g_low[225] = {0}, g_high[225] = {0};
+    status = IR_SpatialLowHighPassF64(mean15, NULL, 15, 15, 225,
+                                      IR_SPATIAL_FILTER_GAUSSIAN, 5, 5,
+                                      g_low, g_high, err, (int32_t)sizeof err);
+    if (status != IR_OK || !isfinite(g_low[center_idx]) ||
+        fabs(mean15[center_idx] - (g_low[center_idx] + g_high[center_idx])) > 1e-9) {
+        fprintf(stderr, "IR_SpatialLowHighPassF64(GAUSSIAN) failed: status=%d err=%s\n", status, err);
+        return 1;
+    }
+    const int gaussian_ok = 1;
+
+    uint16_t flick_frames[16] = {
+        1000, 1000, 1000, 1020,
+        1000, 1000, 1000, 1020,
+        1000, 1000, 1000, 1020,
+        1000, 1000, 1000, 1000
+    };
+    IRFlickerSummary flick = {0};
+    uint8_t flick_mask[4] = {0};
+    status = IR_FlickerDetectU16(flick_frames, 16, 4, 1, 4, NULL, NULL, NULL,
+                                 1.5, 2, &flick, NULL, flick_mask, 4,
+                                 NULL, NULL, 0, err, (int32_t)sizeof err);
+    if (status != IR_OK || flick.flicker_count != 1 || flick_mask[3] != 1) {
+        fprintf(stderr, "IR_FlickerDetectU16 failed: status=%d err=%s\n", status, err);
+        return 1;
+    }
+    const int flicker_ok = 1;
+
     printf("analysis_version=%s\n", version);
     printf("gb_grade=%c\n", grade_char(gb.bad_pixels.chip_grade));
     printf("gjb_bad_count=%d\n", gjb.bad_pixels.total_bad_count);
     printf("noise3d_total=%.12g\n", scalars[IR_NOISE3D_SCALAR_DELTA_TOTAL]);
     printf("lrnu_ok=%d\n", lrnu_ok);
     printf("fft_ok=%d\n", fft_ok);
+    printf("gaussian_ok=%d\n", gaussian_ok);
+    printf("flicker_ok=%d\n", flicker_ok);
     return 0;
 }

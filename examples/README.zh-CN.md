@@ -29,7 +29,7 @@ CLI 调用公开的 `IR_CheckRecipeJson` 与 `IR_RunRecipeJson`。C# 和 Python 
 
 ## C 与 C++ 客户端
 
-`examples/CMakeLists.txt` 从 `IR_SDK_ROOT` 指定的解压目录加载公共头文件、导入库和运行库，构建纯 C（`ir_c_client`、`ir_analysis_c_sample`）、C++（`ir_cpp_client`）和流程 CLI（`ir_run_recipe`）样例；其中 `ir_analysis_c_sample`（源码对应 `analysis_algorithms.c`）**仅链接并运行 `IR_analysis`**（不依赖 `IR_station`），演示 `IR_Noise3D*`、`IR_Gb*` / `IR_Gjb*`、两点 NUC、`15×15` LRNU/HRNU、1D FFT 与单 Burst 温漂评估及 ABI 结构体大小校对：
+`examples/CMakeLists.txt` 从 `IR_SDK_ROOT` 指定的解压目录加载公共头文件、导入库和运行库，构建纯 C（`ir_c_client`、`ir_analysis_c_sample`）、C++（`ir_cpp_client`）、流程 CLI（`ir_run_recipe`）与硬件采帧验收/拷机工具（`ir_capture_accept`）样例；其中 `ir_analysis_c_sample`（源码对应 `analysis_algorithms.c`）**仅链接并运行 `IR_analysis`**（不依赖 `IR_station`），演示 `IR_Noise3D*`、`IR_Gb*` / `IR_Gjb*`、`IR_FlickerDetectU16`、两点 NUC、`15×15` 盒式/高斯空间滤波（LRNU/HRNU）、1D FFT 与单 Burst 温漂评估及 ABI 结构体大小校对；`ir_capture_accept`（源码对应 `ir_capture_accept.cpp`）可用于 `--list` 枚举串口/相机，以及对 `raw_replay`、`directshow` 或 `v4l2` 进行多轮启停或 `--flush-between` 连续流 + 并发无阻塞预览拷机并输出 JSON 报告：
 
 ```powershell
 cmake -S .\examples -B .\build-client -DIR_SDK_ROOT="$PWD"

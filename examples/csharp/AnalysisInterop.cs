@@ -16,6 +16,7 @@ internal static class IRAnalysis
     internal const int Noise3DMetaCount = 32;
 
     internal const int SpatialFilterBoxMean = 0;
+    internal const int SpatialFilterGaussian = 1;
 
     internal const int MapOpSub = 0;
     internal const int MapOpAdd = 1;
@@ -335,6 +336,19 @@ internal static class IRAnalysis
         public long ValidPixelCount;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct FlickerSummary
+    {
+        public double StdDevMultiplier;
+        public double FlickerRatioPct;
+        public double MeanFrameMeanDn;
+        public double MeanFrameSigmaDn;
+        public int ExceedCountThreshold;
+        public int FrameCount;
+        public int ValidPixelCount;
+        public int FlickerCount;
+    }
+
     internal static void VerifyAbiSizes()
     {
         if (Marshal.SizeOf<CalcParameters>() != 80 ||
@@ -350,6 +364,7 @@ internal static class IRAnalysis
             Marshal.SizeOf<MapSummary>() != 80 ||
             Marshal.SizeOf<GjbDriftContext>() != 64 ||
             Marshal.SizeOf<GjbBurstMetrics>() != 168 ||
+            Marshal.SizeOf<FlickerSummary>() != 48 ||
             (IntPtr.Size == 8 && (
                 Marshal.SizeOf<GbBadPixelMasks>() != 64 ||
                 Marshal.SizeOf<GjbBadPixelMasks>() != 64 ||
@@ -488,4 +503,13 @@ internal static class IRAnalysis
     internal static extern int GjbEvaluateBurstMetrics(
         double[] meanMap, double[] vnMap, byte[]? validMask, int rows, int cols, long pixelCapacity,
         ref GjbDriftContext ctx, out GjbBurstMetrics metrics, byte[] error, int errorBytes);
+
+    [DllImport("IR_analysis", EntryPoint = "IR_FlickerDetectU16", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int FlickerDetectU16(
+        ushort[] frames, long frameElements, int frameCount, int rows, int cols,
+        double[]? kMap, double[]? bMap, byte[]? validMask,
+        double stdDevMultiplier, int exceedCountThreshold,
+        out FlickerSummary summary, int[]? outExceedCountMap, byte[]? outFlickerMask, long pixelCapacity,
+        double[]? outFrameMeans, double[]? outFrameSigmas, int frameStatsCapacity,
+        byte[] error, int errorBytes);
 }

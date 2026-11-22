@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(IRSDK VERSION 1.3.0 LANGUAGES C CXX)
+project(IRSDK VERSION 1.4.0 LANGUAGES C CXX)
 include(CTest)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -61,7 +61,8 @@ add_library(IR_analysis SHARED
     analysis/noise3d_dn.cpp
     analysis/gb_gjb.cpp
     analysis/composable_ops.cpp
-    analysis/spectral_ops.cpp)
+    analysis/spectral_ops.cpp
+    analysis/flicker.cpp)
 add_dependencies(IR_analysis ir_build_info)
 target_compile_definitions(IR_analysis PRIVATE IR_ANALYSIS_BUILD
     IR_ANALYSIS_VERSION="${PROJECT_VERSION}")
@@ -74,6 +75,7 @@ add_dependencies(IR_station ir_build_info)
 target_sources(IR_station PRIVATE
     station/version.cpp
     station/instruments/device_api.cpp
+    station/instruments/discovery.cpp
     station/instruments/blackbody/doc058.cpp
     station/instruments/power/it6332a.cpp
     station/instruments/transport/asio_link.cpp)
@@ -113,7 +115,7 @@ target_include_directories(IR_station SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/thir
 target_link_libraries(IR_station PRIVATE IR_analysis Threads::Threads)
 if(WIN32)
     target_compile_definitions(IR_station PRIVATE _WIN32_WINNT=0x0A00)
-    target_link_libraries(IR_station PRIVATE ws2_32 mswsock)
+    target_link_libraries(IR_station PRIVATE ws2_32 mswsock advapi32)
 endif()
 foreach(target IR_station IR_analysis)
     target_include_directories(${target} PUBLIC "${PROJECT_SOURCE_DIR}/include"
@@ -127,6 +129,12 @@ target_include_directories(ir_run_recipe SYSTEM PRIVATE
     "${PROJECT_SOURCE_DIR}/third_party/nlohmann_json/include")
 target_link_libraries(ir_run_recipe PRIVATE IR_station)
 set_target_properties(ir_run_recipe PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
+
+add_executable(ir_capture_accept examples/ir_capture_accept.cpp)
+target_include_directories(ir_capture_accept SYSTEM PRIVATE
+    "${PROJECT_SOURCE_DIR}/third_party/nlohmann_json/include")
+target_link_libraries(ir_capture_accept PRIVATE IR_station IR_analysis Threads::Threads)
+set_target_properties(ir_capture_accept PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
 
 if(BUILD_TESTING)
     add_executable(c_client sdk_tests/c_client.c)
@@ -187,10 +195,24 @@ if(BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/third_party/nlohmann_json/include")
     target_link_libraries(recipe_v2_test PRIVATE IR_station IR_analysis)
     add_test(NAME recipe_v2 COMMAND recipe_v2_test)
+    add_executable(flicker_test sdk_tests/flicker_test.cpp)
+    target_link_libraries(flicker_test PRIVATE IR_analysis)
+    add_test(NAME flicker COMMAND flicker_test)
+    add_executable(discovery_test sdk_tests/discovery_test.cpp)
+    target_include_directories(discovery_test SYSTEM PRIVATE
+        "${PROJECT_SOURCE_DIR}/third_party/nlohmann_json/include")
+    target_link_libraries(discovery_test PRIVATE IR_station)
+    add_test(NAME discovery COMMAND discovery_test)
     add_test(NAME ir_run_recipe_offline_check COMMAND ir_run_recipe --check
         --station "${PROJECT_SOURCE_DIR}/examples/stations/offline.json"
         --recipe "${PROJECT_SOURCE_DIR}/examples/recipes/noise_roi.json"
         --output "recipe-smoke-output")
+    add_test(NAME ir_capture_accept_list COMMAND ir_capture_accept --list)
+    add_test(NAME ir_capture_accept_soak COMMAND ir_capture_accept
+        --backend raw_replay
+        --source "${PROJECT_SOURCE_DIR}/examples/data/roi_2x2"
+        --frames 2 --cycles 3 --preview-ms 5
+        --report "${PROJECT_BINARY_DIR}/capture_accept_smoke.json")
     add_executable(noise_recipe sdk_tests/noise_recipe.c)
     target_link_libraries(noise_recipe PRIVATE IR_station)
     find_package(Python3 COMPONENTS Interpreter QUIET)
@@ -214,7 +236,7 @@ endif()
 
 install(TARGETS IR_station IR_analysis RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib ARCHIVE DESTINATION lib)
-install(TARGETS ir_run_recipe RUNTIME DESTINATION bin)
+install(TARGETS ir_run_recipe ir_capture_accept RUNTIME DESTINATION bin)
 install(DIRECTORY include/ DESTINATION include)
 install(FILES SDK.md DESTINATION .)
 install(FILES

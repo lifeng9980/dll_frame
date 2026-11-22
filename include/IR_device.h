@@ -65,6 +65,19 @@ IR_STATION_API int32_t IR_SetPowerOutput(IRHandle handle, int32_t channel,
 IR_STATION_API int32_t IR_ReadPower(IRHandle handle, int32_t channel,
     IRPowerReading *reading, char *err, int32_t err_bytes);
 
+/* 枚举本机可用串口，输出 UTF-8 JSON 数组（例如 [{"port":"COM1","device":"..."}]）。
+ * required_bytes 可为 NULL；缓冲区不足时返回 IR_BUFFER_TOO_SMALL 并写入所需总字节数（含结尾 '\0'）。
+ */
+IR_STATION_API int32_t IR_ListSerialPorts(char *json_out, int32_t capacity,
+    int32_t *required_bytes, char *err, int32_t err_bytes);
+
+/* 枚举指定采集后端的可用设备，输出 UTF-8 JSON 数组（例如 [{"name":"FX3","device_path":"..."}]）。
+ * Windows 支持 IR_DIRECTSHOW，Linux 支持 IR_V4L2；其余已知后端返回 IR_UNSUPPORTED。
+ * required_bytes 可为 NULL；缓冲区不足时返回 IR_BUFFER_TOO_SMALL 并写入所需总字节数（含结尾 '\0'）。
+ */
+IR_STATION_API int32_t IR_ListCaptureDevices(int32_t backend, char *json_out, int32_t capacity,
+    int32_t *required_bytes, char *err, int32_t err_bytes);
+
 #ifdef __cplusplus
 }
 #endif

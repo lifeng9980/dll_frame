@@ -119,6 +119,14 @@ internal static class IRStation
     [DllImport("IR_station", EntryPoint = "IR_CloseFrames", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int CloseFrames(byte[] error, int errorBytes);
 
+    [DllImport("IR_station", EntryPoint = "IR_ListSerialPorts", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ListSerialPorts(byte[]? jsonOut, int capacity,
+        out int requiredBytes, byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_ListCaptureDevices", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ListCaptureDevices(int backend, byte[]? jsonOut, int capacity,
+        out int requiredBytes, byte[] error, int errorBytes);
+
     [DllImport("IR_station", EntryPoint = "IR_CheckRecipeJson", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int CheckRecipeJson(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string stationJson,
@@ -241,10 +249,33 @@ internal static class Program
             if (status != 0 || Math.Abs(amps[1] - 3.0) > 1e-9)
                 throw new InvalidOperationException($"IR_ComputeRfft1D status={status}: {ErrorText(err)}");
 
+            var gaussIn = new[] { 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0 };
+            var gaussLow = new double[9];
+            var gaussHigh = new double[9];
+            status = IRAnalysis.SpatialLowHighPassF64(gaussIn, null, 3, 3, 9,
+                IRAnalysis.SpatialFilterGaussian, 3, 3, gaussLow, gaussHigh, err, err.Length);
+            if (status != 0 || Math.Abs(gaussLow[4] - 50.0) > 1e-12 || Math.Abs(gaussHigh[4]) > 1e-12)
+                throw new InvalidOperationException($"IR_SpatialLowHighPassF64(Gaussian) status={status}: {ErrorText(err)}");
+
+            var flickFrames = new ushort[]
+            {
+                1000, 1000, 1000, 1020,
+                1000, 1000, 1000, 1020,
+                1000, 1000, 1000, 1020,
+                1000, 1000, 1000, 1000
+            };
+            var flickMask = new byte[4];
+            status = IRAnalysis.FlickerDetectU16(flickFrames, 16, 4, 1, 4, null, null, null,
+                1.5, 2, out var flickSum, null, flickMask, 4, null, null, 0, err, err.Length);
+            if (status != 0 || flickSum.FlickerCount != 1 || flickMask[3] != 1)
+                throw new InvalidOperationException($"IR_FlickerDetectU16 status={status}: {ErrorText(err)}");
+
             Console.WriteLine($"analysis_version={version}");
             Console.WriteLine($"gb_grade={gb.BadPixels.ChipGrade}");
             Console.WriteLine($"gjb_bad_count={gjb.BadPixels.TotalBadCount}");
             Console.WriteLine("fft_ok=1");
+            Console.WriteLine("gaussian_ok=1");
+            Console.WriteLine("flicker_ok=1");
             return 0;
         }
         catch (Exception ex)
@@ -284,6 +315,30 @@ internal static class Program
             IRStation.ConfigureNativeLibraries(Path.GetFullPath(libraryDirectory));
             if (string.IsNullOrEmpty(IRStation.StationVersion()))
                 throw new InvalidOperationException("IR_StationVersion returned an empty string.");
+
+            var discErr = new byte[512];
+            var discSt = IRStation.ListSerialPorts(null, 0, out var reqSerialBytes, discErr, discErr.Length);
+            if (discSt != 3 /* IR_BUFFER_TOO_SMALL */ || reqSerialBytes < 3)
+                throw new InvalidOperationException($"IR_ListSerialPorts size query failed status={discSt}: {ErrorText(discErr)}");
+            var serialBuf = new byte[reqSerialBytes];
+            if (IRStation.ListSerialPorts(serialBuf, serialBuf.Length, out _, discErr, discErr.Length) != 0)
+                throw new InvalidOperationException($"IR_ListSerialPorts failed: {ErrorText(discErr)}");
+            var serialEnd = Array.IndexOf(serialBuf, (byte)0);
+            var serialJson = Encoding.UTF8.GetString(serialBuf, 0, serialEnd < 0 ? serialBuf.Length : serialEnd);
+            if (!serialJson.StartsWith("["))
+                throw new InvalidOperationException($"Unexpected serial JSON: {serialJson}");
+
+            var devBackend = OperatingSystem.IsWindows() ? 1 /* IR_DIRECTSHOW */ : 3 /* IR_V4L2 */;
+            discSt = IRStation.ListCaptureDevices(devBackend, null, 0, out var reqDevBytes, discErr, discErr.Length);
+            if (discSt != 3 /* IR_BUFFER_TOO_SMALL */ || reqDevBytes < 3)
+                throw new InvalidOperationException($"IR_ListCaptureDevices size query failed status={discSt}: {ErrorText(discErr)}");
+            var devBuf = new byte[reqDevBytes];
+            if (IRStation.ListCaptureDevices(devBackend, devBuf, devBuf.Length, out _, discErr, discErr.Length) != 0)
+                throw new InvalidOperationException($"IR_ListCaptureDevices failed: {ErrorText(discErr)}");
+            var devEnd = Array.IndexOf(devBuf, (byte)0);
+            var devJson = Encoding.UTF8.GetString(devBuf, 0, devEnd < 0 ? devBuf.Length : devEnd);
+            if (!devJson.StartsWith("["))
+                throw new InvalidOperationException($"Unexpected capture device JSON: {devJson}");
 
             var source = Utf8Z(Path.GetFullPath(args[0]));
             var outputText = args.Length == 2 ? Path.GetFullPath(args[1]) : null;

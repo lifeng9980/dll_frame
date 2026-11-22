@@ -241,11 +241,15 @@ def make_package(source_root, windows_install, linux_install, archive, windows_o
 
     for relative in (
         "bin/IR_station.dll", "bin/IR_analysis.dll", "bin/ir_run_recipe.exe",
+        "bin/ir_capture_accept.exe",
         "lib/IR_station.lib", "lib/IR_analysis.lib",
     ):
         require_file(windows_install / relative)
     if not windows_only:
-        for relative in ("lib/libIR_station.so", "lib/libIR_analysis.so", "bin/ir_run_recipe"):
+        for relative in (
+            "lib/libIR_station.so", "lib/libIR_analysis.so",
+            "bin/ir_run_recipe", "bin/ir_capture_accept",
+        ):
             require_file(linux_install / relative)
 
     archive_name = f"IR-SDK-{version}-Windows" if windows_only else f"IR-SDK-{version}-Windows-Linux"
@@ -257,10 +261,11 @@ def make_package(source_root, windows_install, linux_install, archive, windows_o
             copy_item(windows_install / item, stage / item)
 
         for relative in ("bin/IR_station.dll", "bin/IR_analysis.dll", "bin/ir_run_recipe.exe",
-                         "lib/IR_station.lib", "lib/IR_analysis.lib"):
+                         "bin/ir_capture_accept.exe", "lib/IR_station.lib", "lib/IR_analysis.lib"):
             copy_item(windows_install / relative, stage / "windows-x64" / relative)
         if not windows_only:
-            for relative in ("lib/libIR_station.so", "lib/libIR_analysis.so", "bin/ir_run_recipe"):
+            for relative in ("lib/libIR_station.so", "lib/libIR_analysis.so",
+                             "bin/ir_run_recipe", "bin/ir_capture_accept"):
                 copy_item(linux_install / relative, stage / "linux-x86_64" / relative)
 
         scan_package_hygiene(stage)
@@ -292,7 +297,10 @@ def make_package(source_root, windows_install, linux_install, archive, windows_o
         with zipfile.ZipFile(archive, "x", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as package:
             for path in sorted(item for item in stage.rglob("*") if item.is_file()):
                 relative = str(path.relative_to(stage.parent)).replace("\\", "/")
-                if relative == f"{archive_name}/linux-x86_64/bin/ir_run_recipe":
+                if relative in (
+                    f"{archive_name}/linux-x86_64/bin/ir_run_recipe",
+                    f"{archive_name}/linux-x86_64/bin/ir_capture_accept",
+                ):
                     # Windows 打包时也为 Linux 可执行文件写入 Unix 权限。
                     entry = zipfile.ZipInfo.from_file(path, relative)
                     entry.create_system = 3  # Unix ZIP entry

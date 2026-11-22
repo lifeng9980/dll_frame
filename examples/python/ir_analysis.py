@@ -227,6 +227,7 @@ class IRNoise3DComputeOutputs(c.Structure):
 
 
 IR_SPATIAL_FILTER_BOX_MEAN = 0
+IR_SPATIAL_FILTER_GAUSSIAN = 1
 
 IR_MAP_OP_SUB = 0
 IR_MAP_OP_ADD = 1
@@ -312,6 +313,19 @@ class IRGjbBurstMetrics(c.Structure):
     ]
 
 
+class IRFlickerSummary(c.Structure):
+    _fields_ = [
+        ("std_dev_multiplier", c.c_double),
+        ("flicker_ratio_pct", c.c_double),
+        ("mean_frame_mean_dn", c.c_double),
+        ("mean_frame_sigma_dn", c.c_double),
+        ("exceed_count_threshold", c.c_int32),
+        ("frame_count", c.c_int32),
+        ("valid_pixel_count", c.c_int32),
+        ("flicker_count", c.c_int32),
+    ]
+
+
 def sdk_library_directory() -> Path:
     configured = os.environ.get("IR_SDK_LIB_DIR")
     if configured:
@@ -347,6 +361,7 @@ def verify_abi_sizes() -> None:
         (IRMapSummary, 80),
         (IRGjbDriftContext, 64),
         (IRGjbBurstMetrics, 168),
+        (IRFlickerSummary, 48),
     ]
     if c.sizeof(c.c_void_p) == 8:
         expected.extend([
@@ -469,6 +484,14 @@ def main() -> int:
                 c.POINTER(c.c_double), c.POINTER(c.c_double), c.POINTER(c.c_uint8),
                 c.c_int32, c.c_int32, c.c_int64,
                 c.POINTER(IRGjbDriftContext), c.POINTER(IRGjbBurstMetrics), *err_args,
+            ]),
+            ("IR_FlickerDetectU16", [
+                c.POINTER(c.c_uint16), c.c_int64, c.c_int32, c.c_int32, c.c_int32,
+                c.POINTER(c.c_double), c.POINTER(c.c_double), c.POINTER(c.c_uint8),
+                c.c_double, c.c_int32, c.POINTER(IRFlickerSummary),
+                c.POINTER(c.c_int32), c.POINTER(c.c_uint8), c.c_int64,
+                c.POINTER(c.c_double), c.POINTER(c.c_double), c.c_int32,
+                *err_args,
             ]),
         ]
         for fn_name, argtypes in bindings:
@@ -624,6 +647,31 @@ def main() -> int:
         if st != 0 or burst.valid_pixel_count != 225 or not math.isfinite(burst.lrnu_pct):
             raise RuntimeError(f"IR_GjbEvaluateBurstMetrics failed: st={st} {err.value.decode()}")
 
+        g_low15 = (c.c_double * 225)()
+        g_high15 = (c.c_double * 225)()
+        st = analysis.IR_SpatialLowHighPassF64(
+            mean15, None, 15, 15, 225, IR_SPATIAL_FILTER_GAUSSIAN, 5, 5,
+            g_low15, g_high15, err, len(err)
+        )
+        if st != 0 or not math.isfinite(g_low15[center_idx]) or abs(mean15[center_idx] - (g_low15[center_idx] + g_high15[center_idx])) > 1e-9:
+            raise RuntimeError(f"IR_SpatialLowHighPassF64(GAUSSIAN) failed: st={st} {err.value.decode()}")
+
+        flick_frames = (c.c_uint16 * 16)(
+            1000, 1000, 1000, 1020,
+            1000, 1000, 1000, 1020,
+            1000, 1000, 1000, 1020,
+            1000, 1000, 1000, 1000,
+        )
+        flick_sum = IRFlickerSummary()
+        flick_mask = (c.c_uint8 * 4)()
+        st = analysis.IR_FlickerDetectU16(
+            flick_frames, 16, 4, 1, 4, None, None, None,
+            1.5, 2, c.byref(flick_sum), None, flick_mask, 4,
+            None, None, 0, err, len(err)
+        )
+        if st != 0 or flick_sum.flicker_count != 1 or flick_mask[3] != 1:
+            raise RuntimeError(f"IR_FlickerDetectU16 failed: st={st} {err.value.decode()}")
+
         grade = {1: "A", 2: "B", 3: "C", 4: "D"}.get(gb.bad_pixels.chip_grade, "?")
         print(f"analysis_version={version}")
         print(f"gb_grade={grade}")
@@ -632,6 +680,8 @@ def main() -> int:
         print(f"noise3d_total={scalars[7]:.12g}")
         print("lrnu_ok=1")
         print("fft_ok=1")
+        print("gaussian_ok=1")
+        print("flicker_ok=1")
         return 0
     finally:
         if dll_directory is not None:

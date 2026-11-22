@@ -115,6 +115,119 @@ void spatialBoxLowHighPassInternal(const double *inMap,
     }
 }
 
+std::vector<double> buildGaussianKernel1D(int32_t k)
+{
+    if (k <= 1)
+        return {1.0};
+    const int32_t radius = k / 2;
+    const double sigma = 0.3 * (static_cast<double>(k - 1) * 0.5 - 1.0) + 0.8;
+    const double invTwoSigmaSq = 1.0 / (2.0 * sigma * sigma);
+    std::vector<double> weights(static_cast<size_t>(k), 0.0);
+    double sum = 0.0;
+    for (int32_t d = -radius; d <= radius; ++d)
+    {
+        const double w = std::exp(-static_cast<double>(d) * static_cast<double>(d) * invTwoSigmaSq);
+        weights[static_cast<size_t>(d + radius)] = w;
+        sum += w;
+    }
+    for (double &w : weights)
+        w /= sum;
+    return weights;
+}
+
+void spatialGaussianLowHighPassInternal(const double *inMap,
+                                        const uint8_t *validMask,
+                                        int32_t rows,
+                                        int32_t cols,
+                                        int32_t kernelW,
+                                        int32_t kernelH,
+                                        double *outLowMap,
+                                        double *outHighMap)
+{
+    require(kernelW >= 1 && kernelH >= 1 && (kernelW % 2 == 1) && (kernelH % 2 == 1),
+            IR_BAD_ARGUMENT, "Spatial filter kernel dimensions must be odd integers >= 1");
+
+    const int64_t total = int64_t(rows) * cols;
+    double sumValid = 0.0;
+    int64_t validCount = 0;
+    for (int64_t i = 0; i < total; ++i)
+    {
+        if (validMask && validMask[i] == 0)
+            continue;
+        const double v = inMap[i];
+        if (!std::isfinite(v))
+            continue;
+        sumValid += v;
+        ++validCount;
+    }
+    require(validCount > 0, IR_COMPUTATION_FAILED, "No valid finite pixels for spatial Gaussian filter");
+    const double baseMean = sumValid / static_cast<double>(validCount);
+
+    const auto wx = buildGaussianKernel1D(kernelW);
+    const auto wy = buildGaussianKernel1D(kernelH);
+    const int32_t rx = kernelW / 2;
+    const int32_t ry = kernelH / 2;
+
+    std::vector<double> hNum(static_cast<size_t>(total), 0.0);
+    std::vector<double> hDen(static_cast<size_t>(total), 0.0);
+
+    for (int32_t r = 0; r < rows; ++r)
+    {
+        const int64_t rowBase = int64_t(r) * cols;
+        for (int32_t c = 0; c < cols; ++c)
+        {
+            const int32_t cMin = std::max(0, c - rx);
+            const int32_t cMax = std::min(cols - 1, c + rx);
+            double accNum = 0.0;
+            double accDen = 0.0;
+            for (int32_t nc = cMin; nc <= cMax; ++nc)
+            {
+                const int64_t idx = rowBase + nc;
+                if (validMask && validMask[idx] == 0)
+                    continue;
+                const double val = inMap[idx];
+                if (!std::isfinite(val))
+                    continue;
+                const double w = wx[static_cast<size_t>(nc - c + rx)];
+                accNum += w * (val - baseMean);
+                accDen += w;
+            }
+            const size_t outIdx = static_cast<size_t>(rowBase + c);
+            hNum[outIdx] = accNum;
+            hDen[outIdx] = accDen;
+        }
+    }
+
+    for (int32_t r = 0; r < rows; ++r)
+    {
+        const int32_t rMin = std::max(0, r - ry);
+        const int32_t rMax = std::min(rows - 1, r + ry);
+        const int64_t outBase = int64_t(r) * cols;
+        for (int32_t c = 0; c < cols; ++c)
+        {
+            double accNum = 0.0;
+            double accDen = 0.0;
+            for (int32_t nr = rMin; nr <= rMax; ++nr)
+            {
+                const size_t srcIdx = static_cast<size_t>(int64_t(nr) * cols + c);
+                const double w = wy[static_cast<size_t>(nr - r + ry)];
+                accNum += w * hNum[srcIdx];
+                accDen += w * hDen[srcIdx];
+            }
+            const double low = (accDen > 0.0) ? (baseMean + accNum / accDen) : 0.0;
+            const int64_t idx = outBase + c;
+            if (outLowMap)
+                outLowMap[idx] = low;
+            if (outHighMap)
+            {
+                const double v = inMap[idx];
+                const bool isOk = (!validMask || validMask[idx] != 0) && std::isfinite(v) && accDen > 0.0;
+                outHighMap[idx] = isOk ? (v - low) : 0.0;
+            }
+        }
+    }
+}
+
 struct MaskedStats
 {
     double mean = 0.0;
@@ -462,8 +575,8 @@ extern "C" IR_ANALYSIS_API int32_t IR_SpatialLowHighPassF64(
         needed(in_map, pixel_capacity, n);
         if (valid_mask)
             needed(valid_mask, pixel_capacity, n);
-        require(filter_kind == IR_SPATIAL_FILTER_BOX_MEAN, IR_BAD_ARGUMENT,
-                "Unsupported spatial filter kind");
+        require(filter_kind == IR_SPATIAL_FILTER_BOX_MEAN || filter_kind == IR_SPATIAL_FILTER_GAUSSIAN,
+                IR_BAD_ARGUMENT, "Unsupported spatial filter kind");
         require(out_low_map != nullptr || out_high_map != nullptr, IR_NULL_POINTER,
                 "At least one of out_low_map or out_high_map must be non-null");
         if (out_low_map)
@@ -471,8 +584,16 @@ extern "C" IR_ANALYSIS_API int32_t IR_SpatialLowHighPassF64(
         if (out_high_map)
             needed(out_high_map, pixel_capacity, n);
 
-        spatialBoxLowHighPassInternal(in_map, valid_mask, rows, cols,
-                                      kernel_w, kernel_h, out_low_map, out_high_map);
+        if (filter_kind == IR_SPATIAL_FILTER_GAUSSIAN)
+        {
+            spatialGaussianLowHighPassInternal(in_map, valid_mask, rows, cols,
+                                               kernel_w, kernel_h, out_low_map, out_high_map);
+        }
+        else
+        {
+            spatialBoxLowHighPassInternal(in_map, valid_mask, rows, cols,
+                                          kernel_w, kernel_h, out_low_map, out_high_map);
+        }
     });
 }
 

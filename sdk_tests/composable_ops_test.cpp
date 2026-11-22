@@ -194,6 +194,76 @@ void testSpatialLowHighPass15x15WithDcAndBlindMask()
     CHECK_NEAR(smallHigh[1], 0.0, 1e-12);
 }
 
+void testSpatialGaussianWithDcAndBlindMask()
+{
+    const int32_t rows = 15, cols = 15;
+    const int64_t n = int64_t(rows) * cols;
+    std::vector<double> dcMap(size_t(n), 50000.0);
+    std::vector<uint8_t> mask(size_t(n), 1);
+    dcMap[size_t(7) * cols + 7] = std::numeric_limits<double>::quiet_NaN();
+    mask[size_t(7) * cols + 7] = 0;
+
+    std::vector<double> low(size_t(n), 0.0), high(size_t(n), 0.0);
+    char err[256]{};
+    CHECK(IR_SpatialLowHighPassF64(dcMap.data(), mask.data(), rows, cols, n,
+                                   IR_SPATIAL_FILTER_GAUSSIAN, 5, 5,
+                                   low.data(), high.data(), err, sizeof err) == IR_OK);
+    for (int64_t i = 0; i < n; ++i)
+    {
+        CHECK_NEAR(low[size_t(i)], 50000.0, 1e-12);
+        CHECK_NEAR(high[size_t(i)], 0.0, 1e-12);
+    }
+
+    // Cross-check 5x5 Gaussian against exact 2D masked normalized Gaussian formula with gradient + blind NaN
+    std::vector<double> grad(25);
+    std::vector<uint8_t> gMask(25, 1);
+    for (int r = 0; r < 5; ++r)
+        for (int c = 0; c < 5; ++c)
+            grad[size_t(r) * 5 + c] = 30000.0 + 10.0 * r + 3.0 * c * c;
+    grad[1 * 5 + 2] = std::numeric_limits<double>::quiet_NaN();
+    gMask[1 * 5 + 2] = 0;
+    grad[2 * 5 + 2] = 99999.0;
+    gMask[2 * 5 + 2] = 0;
+
+    double gLow[25]{}, gHigh[25]{};
+    const int32_t k = 5;
+    CHECK(IR_SpatialLowHighPassF64(grad.data(), gMask.data(), 5, 5, 25,
+                                   IR_SPATIAL_FILTER_GAUSSIAN, k, k,
+                                   gLow, gHigh, err, sizeof err) == IR_OK);
+    const double sigma = 0.3 * (double(k - 1) * 0.5 - 1.0) + 0.8;
+    double w1[5]{}, wSum = 0.0;
+    for (int d = -2; d <= 2; ++d)
+    {
+        w1[d + 2] = std::exp(-double(d * d) / (2.0 * sigma * sigma));
+        wSum += w1[d + 2];
+    }
+    for (double &w : w1) w /= wSum;
+    for (int r = 0; r < 5; ++r)
+    {
+        for (int c = 0; c < 5; ++c)
+        {
+            double num = 0.0, den = 0.0;
+            for (int nr = std::max(0, r - 2); nr <= std::min(4, r + 2); ++nr)
+            {
+                for (int nc = std::max(0, c - 2); nc <= std::min(4, c + 2); ++nc)
+                {
+                    const int idx = nr * 5 + nc;
+                    if (!gMask[idx] || !std::isfinite(grad[idx])) continue;
+                    const double w2d = w1[nr - r + 2] * w1[nc - c + 2];
+                    num += w2d * grad[idx];
+                    den += w2d;
+                }
+            }
+            const double expectedLow = (den > 0.0) ? (num / den) : 0.0;
+            const int cur = r * 5 + c;
+            const double expectedHigh = (gMask[cur] && std::isfinite(grad[cur]) && den > 0.0)
+                ? (grad[cur] - expectedLow) : 0.0;
+            CHECK_NEAR(gLow[cur], expectedLow, 1e-10);
+            CHECK_NEAR(gHigh[cur], expectedHigh, 1e-10);
+        }
+    }
+}
+
 void testFftAndChannelSpectrum()
 {
     constexpr double kPi = std::numbers::pi;
@@ -336,6 +406,7 @@ int main()
     testNucBuilderAffineAndFrameStats();
     testMapSummaryAndBinaryAndThresholds();
     testSpatialLowHighPass15x15WithDcAndBlindMask();
+    testSpatialGaussianWithDcAndBlindMask();
     testFftAndChannelSpectrum();
     testGjbBurstMetricsAndErrors();
 

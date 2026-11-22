@@ -8,6 +8,7 @@ file(TO_CMAKE_PATH "${IR_SDK_ROOT}" IR_SDK_ROOT)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+find_package(Threads REQUIRED)
 set(IR_SDK_INCLUDE_DIR "${IR_SDK_ROOT}/include")
 
 if(WIN32)
@@ -73,4 +74,26 @@ else()
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${IR_SDK_BIN_DIR}/libIR_station.so" "${IR_SDK_BIN_DIR}/libIR_analysis.so"
             "$<TARGET_FILE_DIR:ir_run_recipe>")
+endif()
+
+add_executable(ir_capture_accept "${CMAKE_CURRENT_LIST_DIR}/ir_capture_accept.cpp")
+if(MSVC)
+    target_compile_options(ir_capture_accept PRIVATE /utf-8)
+endif()
+target_include_directories(ir_capture_accept PRIVATE
+    "${IR_SDK_INCLUDE_DIR}"
+    "${IR_SDK_ROOT}/third_party/nlohmann_json/include")
+target_link_libraries(ir_capture_accept PRIVATE
+    "${IR_STATION_LIBRARY}" "${IR_ANALYSIS_LIBRARY}" Threads::Threads)
+if(WIN32)
+    add_custom_command(TARGET ir_capture_accept POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${IR_SDK_BIN_DIR}/IR_station.dll" "${IR_SDK_BIN_DIR}/IR_analysis.dll"
+            "$<TARGET_FILE_DIR:ir_capture_accept>")
+else()
+    set_target_properties(ir_capture_accept PROPERTIES BUILD_RPATH "$ORIGIN")
+    add_custom_command(TARGET ir_capture_accept POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${IR_SDK_BIN_DIR}/libIR_station.so" "${IR_SDK_BIN_DIR}/libIR_analysis.so"
+            "$<TARGET_FILE_DIR:ir_capture_accept>")
 endif()

@@ -331,7 +331,8 @@
             "gjb_evaluate",
             "gjb_burst",
             "noise3d_compute",
-            "channel_spectrum"
+            "channel_spectrum",
+            "flicker_detect"
           ]
         },
         "version": {

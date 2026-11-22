@@ -523,6 +523,66 @@ void testPreflightRejections()
     CHECK(IR_CheckRecipeJson(makeStation(fixture, 5000).dump().c_str(), rSimple.dump().c_str(), err, sizeof err) == IR_BAD_ARGUMENT);
 }
 
+void testGaussianFilterAndFlickerDetectV2()
+{
+    TempDirGuard root("gaussian_flicker_v2");
+    const auto fixture = root.path() / "fixture";
+    fs::create_directories(fixture);
+
+    // 4x4, 4 frames: 15 pixels steady at 1000, pixel 15 spikes to 1040 in frames 0,1,2 and returns to 1000 in frame 3
+    std::vector<uint16_t> frames(64, 1000);
+    frames[0 * 16 + 15] = 1040;
+    frames[1 * 16 + 15] = 1040;
+    frames[2 * 16 + 15] = 1040;
+    {
+        std::ofstream raw(fixture / "frames.raw", std::ios::binary);
+        raw.write(reinterpret_cast<const char *>(frames.data()), std::streamsize(frames.size() * sizeof(uint16_t)));
+    }
+    {
+        std::ofstream csv(fixture / "frames.csv", std::ios::binary);
+        csv << "frame_index,width,height,stride_bytes,pixel_format,bit_depth,endianness\n";
+        for (int i = 0; i < 4; ++i)
+            csv << i << ",4,4,8,RAW16_LE,16,little\n";
+    }
+
+    const Json recipe = {
+        {"schema_version", 2},
+        {"recipe_id", "v2-gaussian-flicker"},
+        {"steps", Json::array({
+            {{"id", "cap"}, {"type", "capture"}, {"frames", 4}, {"frame_timeout_ms", 0}, {"output", "b"}},
+            {{"id", "stats"}, {"type", "analyze"}, {"method", "frame_stats"}, {"input", "b"},
+             {"outputs", {{"mean_map", "m"}}}},
+            {{"id", "gauss"}, {"type", "analyze"}, {"method", "spatial_filter"},
+             {"inputs", {{"in_map", "m"}}},
+             {"params", {{"filter_kind", "gaussian"}, {"kernel_w", 3}, {"kernel_h", 3}}},
+             {"outputs", {{"low_map", "g_low"}, {"high_map", "g_high"}}}},
+            {{"id", "flick"}, {"type", "analyze"}, {"method", "flicker_detect"},
+             {"inputs", {{"frames", "b"}}},
+             {"params", {{"std_dev_multiplier", 2.0}, {"exceed_count_threshold", 2}}},
+             {"outputs", {{"flicker_mask", "f_mask"}}}}
+        })},
+        {"limits", Json::array({
+            {{"metric", "flick.flicker_count"}, {"operator", "max"}, {"value", 1.0}, {"unit", "count"}},
+            {{"metric", "flick.flicker_ratio_pct"}, {"operator", "max"}, {"value", 6.5}, {"unit", "%"}}
+        })}
+    };
+
+    const std::string stJson = makeStation(fixture).dump();
+    const std::string rJson = recipe.dump();
+    char err[1024]{};
+    CHECK(IR_CheckRecipeJson(stJson.c_str(), rJson.c_str(), err, sizeof err) == IR_OK);
+
+    const auto outDir = root.path() / "out_gf";
+    IRRecipeResult rr{};
+    CHECK(IR_RunRecipeJson(stJson.c_str(), rJson.c_str(), utf8(outDir).c_str(), &rr, err, sizeof err) == IR_OK);
+    CHECK(countRawFiles(outDir) == 0);
+    const auto res = Json::parse(readText(outDir / "result.json"));
+    CHECK(res.at("run_status") == "PASS");
+    CHECK(res.at("metrics").at("gauss.low_std_dn").at("method") == "spatial_gaussian_low");
+    CHECK(std::abs(res.at("metrics").at("flick.flicker_count").at("value").get<double>() - 1.0) < 1e-12);
+    CHECK(std::abs(res.at("metrics").at("flick.flicker_ratio_pct").at("value").get<double>() - 6.25) < 1e-12);
+}
+
 } // namespace
 
 int main()
@@ -532,6 +592,7 @@ int main()
     testMultiBatchSaveRawSubdirs();
     testRepeatBurstCancelPreservesFlushedCsv();
     testPreflightRejections();
+    testGaussianFilterAndFlickerDetectV2();
     if (gFailures == 0)
         std::cout << "recipe_v2_test: ALL PASSED\n";
     return gFailures == 0 ? 0 : 1;

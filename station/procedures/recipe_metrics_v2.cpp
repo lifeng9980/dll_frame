@@ -431,7 +431,11 @@ PreparedMetricV2 prepSpatialFilter(const std::string &name, const Json &inputs, 
     const auto inSlot = requireInputSlot(inputs, "in_map", SlotKind::double_map, slots, path);
     const auto maskSlot = optionalInputSlot(inputs, "valid_mask", SlotKind::byte_mask, slots, path);
     const auto kind = optionalString(params, "filter_kind", "box_mean", path + ".params");
-    require(kind == "box_mean", IR_BAD_ARGUMENT, path + ".params.filter_kind must be box_mean");
+    require(kind == "box_mean" || kind == "gaussian", IR_BAD_ARGUMENT,
+            path + ".params.filter_kind must be box_mean or gaussian");
+    const int32_t filterKind = (kind == "gaussian") ? IR_SPATIAL_FILTER_GAUSSIAN : IR_SPATIAL_FILTER_BOX_MEAN;
+    const char *lowMethod = (kind == "gaussian") ? "spatial_gaussian_low" : "spatial_box_mean_low";
+    const char *highMethod = (kind == "gaussian") ? "spatial_gaussian_high" : "spatial_box_mean_high";
     const int kw = optionalInteger(params, "kernel_w", 15, 1, 1025, path + ".params");
     const int kh = optionalInteger(params, "kernel_h", 15, 1, 1025, path + ".params");
     require((kw % 2) == 1 && (kh % 2) == 1, IR_BAD_ARGUMENT,
@@ -442,8 +446,8 @@ PreparedMetricV2 prepSpatialFilter(const std::string &name, const Json &inputs, 
             path + ".outputs: provide low_map and/or high_map");
 
     std::vector<MetricOutput> outs{
-        {".low_std_dn", "DN", "spatial_box_mean_low", 1},
-        {".high_std_dn", "DN", "spatial_box_mean_high", 1}
+        {".low_std_dn", "DN", lowMethod, 1},
+        {".high_std_dn", "DN", highMethod, 1}
     };
     return {1, outs, {
         {},
@@ -461,7 +465,7 @@ PreparedMetricV2 prepSpatialFilter(const std::string &name, const Json &inputs, 
             std::vector<double> lowMap(static_cast<size_t>(n)), highMap(static_cast<size_t>(n));
             char err[1024]{};
             checkStatus(IR_SpatialLowHighPassF64(inMap.data.data(), maskPtr, g.height, g.width, n,
-                IR_SPATIAL_FILTER_BOX_MEAN, kw, kh, lowMap.data(), highMap.data(),
+                filterKind, kw, kh, lowMap.data(), highMap.data(),
                 err, sizeof err), err);
             IRMapSummary lowSum{}, highSum{};
             checkStatus(IR_MapSummaryF64(lowMap.data(), maskPtr, g.height, g.width, n,
@@ -1049,6 +1053,80 @@ PreparedMetricV2 prepChannelSpectrum(const std::string &name, const Json &inputs
     }};
 }
 
+PreparedMetricV2 prepFlickerDetect(const std::string &name, const Json &inputs, const Json &params,
+                                   const Json &outputs, std::map<std::string, SlotKind> &slots,
+                                   const std::string &path)
+{
+    allowFields(inputs, {"frames", "k_map", "b_map", "valid_mask"}, path + ".inputs");
+    allowFields(params, {"std_dev_multiplier", "exceed_count_threshold"}, path + ".params");
+    allowFields(outputs, {"flicker_mask"}, path + ".outputs");
+    const auto framesSlot = requireInputSlot(inputs, "frames", SlotKind::batch, slots, path);
+    const auto kSlot = optionalInputSlot(inputs, "k_map", SlotKind::double_map, slots, path);
+    const auto bSlot = optionalInputSlot(inputs, "b_map", SlotKind::double_map, slots, path);
+    require(kSlot.empty() == bSlot.empty(), IR_BAD_ARGUMENT,
+            path + ".inputs: k_map and b_map must both be provided or both omitted");
+    const auto maskSlot = optionalInputSlot(inputs, "valid_mask", SlotKind::byte_mask, slots, path);
+    const double mult = optionalNumber(params, "std_dev_multiplier", 3.0, path + ".params");
+    require(std::isfinite(mult) && mult > 0.0, IR_BAD_ARGUMENT,
+            path + ".params.std_dev_multiplier must be finite and > 0");
+    const int32_t exceedThresh = optionalInteger(params, "exceed_count_threshold", 0, 0, INT32_MAX, path + ".params");
+    const auto flickerOut = bindOutputSlot(outputs, "flicker_mask", SlotKind::byte_mask, false, slots, path);
+
+    std::vector<MetricOutput> outs{
+        {".flicker_count", "count", "flicker_detect", 1},
+        {".valid_pixel_count", "count", "flicker_detect", 1},
+        {".flicker_ratio_pct", "%", "flicker_detect", 1},
+        {".mean_frame_mean_dn", "DN", "flicker_detect", 1},
+        {".mean_frame_sigma_dn", "DN", "flicker_detect", 1}
+    };
+    return {1, outs, {
+        {},
+        [=](ExecutionContext &ctx) {
+            const auto &b = getBatch(ctx, framesSlot);
+            const auto g = b.geometry;
+            const auto n = pixels(g.height, g.width);
+            const double *kPtr = nullptr;
+            const double *bPtr = nullptr;
+            const uint8_t *maskPtr = nullptr;
+            if (!kSlot.empty()) {
+                const auto &km = getMap(ctx, kSlot);
+                const auto &bm = getMap(ctx, bSlot);
+                checkMapSize(km, n, g, "flicker_detect.k_map");
+                checkMapSize(bm, n, g, "flicker_detect.b_map");
+                kPtr = km.data.data();
+                bPtr = bm.data.data();
+            }
+            if (!maskSlot.empty()) {
+                const auto &vm = getMask(ctx, maskSlot);
+                checkMaskSize(vm, n, g, "flicker_detect.valid_mask");
+                maskPtr = vm.data.data();
+            }
+            std::vector<uint8_t> outMask;
+            uint8_t *outMaskPtr = nullptr;
+            if (!flickerOut.empty()) {
+                outMask.resize(static_cast<size_t>(n));
+                outMaskPtr = outMask.data();
+            }
+            IRFlickerSummary summary{};
+            char err[1024]{};
+            checkStatus(IR_FlickerDetectU16(b.pixels.data(), int64_t(b.pixels.size()),
+                int32_t(b.stamps.size()), g.height, g.width,
+                kPtr, bPtr, maskPtr, mult, exceedThresh,
+                &summary, nullptr, outMaskPtr, n, nullptr, nullptr, 0,
+                err, sizeof err), err);
+            if (!flickerOut.empty())
+                ctx.masks[flickerOut] = {g, std::move(outMask)};
+            recordScalarOutputs(ctx, name, outs, {
+                static_cast<double>(summary.flicker_count),
+                static_cast<double>(summary.valid_pixel_count),
+                summary.flicker_ratio_pct,
+                summary.mean_frame_mean_dn,
+                summary.mean_frame_sigma_dn
+            });
+        }
+    }};
+}
+
 constexpr MetricSpecV2 kMethodsV2[]{
     {"temporal_noise", "frames", prepTemporalNoise},
     {"roi_mean", "frames", prepRoiMean},
@@ -1064,6 +1142,7 @@ constexpr MetricSpecV2 kMethodsV2[]{
     {"gjb_burst", nullptr, prepGjbBurst},
     {"noise3d_compute", "frames", prepNoise3dCompute},
     {"channel_spectrum", "frames", prepChannelSpectrum},
+    {"flicker_detect", "frames", prepFlickerDetect},
 };
 
 } // namespace

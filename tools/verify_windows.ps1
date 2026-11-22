@@ -240,11 +240,13 @@ $BuildBinDir = Join-Path $BuildDir "bin"
 $StationDll = Join-Path $BuildBinDir "IR_station.dll"
 $AnalysisDll = Join-Path $BuildBinDir "IR_analysis.dll"
 $CliExe = Join-Path $BuildBinDir "ir_run_recipe.exe"
+$AcceptExe = Join-Path $BuildBinDir "ir_capture_accept.exe"
 
 Write-Step "3b. Checking incremental rebuild does not recompile or relink unchanged sources"
 $beforeStationStamp = (Get-Item $StationDll).LastWriteTimeUtc
 $beforeAnalysisStamp = (Get-Item $AnalysisDll).LastWriteTimeUtc
 $beforeCliStamp = (Get-Item $CliExe).LastWriteTimeUtc
+$beforeAcceptStamp = (Get-Item $AcceptExe).LastWriteTimeUtc
 $incRes = Invoke-External -FilePath $cmakePath -WorkingDirectory $RepoRoot `
     -Arguments @("--build", "--preset", "windows")
 $incOut = ($incRes.StdOut + "`n" + $incRes.StdErr).Trim()
@@ -254,9 +256,10 @@ Assert-True ($incOut -notmatch '(?i)(\.cpp\b|\.rc\b|Creating library|Linking\b)'
 Assert-True ((Get-Item $StationDll).LastWriteTimeUtc -eq $beforeStationStamp) "IR_station.dll timestamp changed on no-op rebuild"
 Assert-True ((Get-Item $AnalysisDll).LastWriteTimeUtc -eq $beforeAnalysisStamp) "IR_analysis.dll timestamp changed on no-op rebuild"
 Assert-True ((Get-Item $CliExe).LastWriteTimeUtc -eq $beforeCliStamp) "ir_run_recipe.exe timestamp changed on no-op rebuild"
+Assert-True ((Get-Item $AcceptExe).LastWriteTimeUtc -eq $beforeAcceptStamp) "ir_capture_accept.exe timestamp changed on no-op rebuild"
 
 Write-Step "4. Checking DLL/EXE dependents and exports via dumpbin"
-foreach ($bin in @($StationDll, $AnalysisDll, $CliExe)) {
+foreach ($bin in @($StationDll, $AnalysisDll, $CliExe, $AcceptExe)) {
     Assert-True (Test-Path $bin) "Missing built binary: $bin"
     $dep = Invoke-External -FilePath $dumpbinPath -Arguments @("/nologo", "/dependents", $bin)
     $dllLines = @($dep.StdOut -split "`r?`n" | Where-Object { $_ -match '^\s+\S+\.dll\s*$' } | ForEach-Object { $_.Trim() })
@@ -276,7 +279,9 @@ foreach ($sym in @(
     "IR_WaitBlackbodyStable",
     "IR_SetFrameQueueCapacity",
     "IR_TryReadLatestFrame",
-    "IR_GetCaptureStats"
+    "IR_GetCaptureStats",
+    "IR_ListSerialPorts",
+    "IR_ListCaptureDevices"
 )) {
     Assert-True ($stationExports -match "\b$sym\b") "IR_station.dll must export $sym"
 }
@@ -301,7 +306,8 @@ foreach ($sym in @(
     "IR_MaskCombine",
     "IR_ComputeRfft1D",
     "IR_ChannelSpectrumU16",
-    "IR_GjbEvaluateBurstMetrics"
+    "IR_GjbEvaluateBurstMetrics",
+    "IR_FlickerDetectU16"
 )) {
     Assert-True ($analysisExports -match "\b$sym\b") "IR_analysis.dll must export $sym"
 }
@@ -410,12 +416,17 @@ Assert-True ($analysisCRes.StdOut -match "(?m)^gjb_bad_count=0\r?$") "ir_analysi
 Assert-True ($analysisCRes.StdOut -match "(?m)^noise3d_total=") "ir_analysis_c_sample missing noise3d_total"
 Assert-True ($analysisCRes.StdOut -match "(?m)^lrnu_ok=1\r?$") "ir_analysis_c_sample missing lrnu_ok=1"
 Assert-True ($analysisCRes.StdOut -match "(?m)^fft_ok=1\r?$") "ir_analysis_c_sample missing fft_ok=1"
+Assert-True ($analysisCRes.StdOut -match "(?m)^gaussian_ok=1\r?$") "ir_analysis_c_sample missing gaussian_ok=1"
+Assert-True ($analysisCRes.StdOut -match "(?m)^flicker_ok=1\r?$") "ir_analysis_c_sample missing flicker_ok=1"
 $standaloneCliCheck = Invoke-External -FilePath (Join-Path $ClientBuildDir "ir_run_recipe.exe") `
     -Arguments @("--check", "--station", (Join-Path $PkgRoot "examples\stations\offline.json"),
                  "--recipe", (Join-Path $PkgRoot "examples\recipes\noise_roi.json"),
                  "--output", (Join-Path $WorkRoot "standalone-check-unused"))
 Assert-True ($standaloneCliCheck.StdOut.Trim() -eq "recipe=VALID") "standalone ir_run_recipe --check failed"
-Write-Host "  Standalone ir_c_client, ir_cpp_client, ir_analysis_c_sample, and ir_run_recipe verified."
+$standaloneAcceptList = Invoke-External -FilePath (Join-Path $ClientBuildDir "ir_capture_accept.exe") -Arguments @("--list")
+$standaloneAcceptObj = $standaloneAcceptList.StdOut | ConvertFrom-Json
+Assert-True ($null -ne $standaloneAcceptObj.capture_devices -and $null -ne $standaloneAcceptObj.serial_ports) "standalone ir_capture_accept --list output invalid"
+Write-Host "  Standalone ir_c_client, ir_cpp_client, ir_analysis_c_sample, ir_run_recipe, and ir_capture_accept verified."
 
 Write-Step "10. Running packaged CLI tests (PASS / ROI 2x2 / NG / ERROR)"
 $PkgCli = Join-Path $PkgRoot "windows-x64\bin\ir_run_recipe.exe"
@@ -489,7 +500,23 @@ Write-Utf8File $BadRecipePath '{"schema_version":1,"recipe_id":"invalid","steps"
 $badCheckRunRes = Invoke-External -FilePath $PkgCli -Arguments @("--run", "--station", $OfflineStation, "--recipe", $BadRecipePath, "--output", (Join-Path $WorkRoot "cli-bad-recipe-out")) -AllowedExitCodes @(2)
 Assert-True ($badCheckRunRes.StdOut -match "(?m)^run_status=ERROR\r?$") "CLI bad-recipe --run missing run_status=ERROR"
 Assert-True ($badCheckRunRes.StdOut -match "(?m)^completed_frames=0\r?$") "CLI bad-recipe --run missing completed_frames=0"
-Write-Host "  CLI PASS, ROI 2x2, NG (exit 20), and ERROR (exit 11 & preflight exit 2 + run_status=ERROR) verified."
+$PkgAccept = Join-Path $PkgRoot "windows-x64\bin\ir_capture_accept.exe"
+$acceptListRes = Invoke-External -FilePath $PkgAccept -Arguments @("--list")
+$acceptListObj = $acceptListRes.StdOut | ConvertFrom-Json
+Assert-True ($acceptListObj.station_version -eq $SdkVersion) "ir_capture_accept --list version mismatch"
+$AcceptReportPath = Join-Path $WorkRoot "capture-accept-report.json"
+$acceptSoakRes = Invoke-External -FilePath $PkgAccept -Arguments @(
+    "--backend", "raw_replay",
+    "--source", (Join-Path $PkgRoot "examples\data\roi_2x2"),
+    "--frames", "2", "--cycles", "3", "--preview-ms", "5",
+    "--report", $AcceptReportPath
+)
+Assert-True ($acceptSoakRes.StdOut -match "(?m)^status=0\r?$") "ir_capture_accept soak failed status=0 (got: $($acceptSoakRes.StdOut))"
+Assert-True ($acceptSoakRes.StdOut -match "cycles_completed=3 total_frames=6") "ir_capture_accept soak frame count mismatch"
+Assert-True ($acceptSoakRes.StdOut -match "preview_errors=0") "ir_capture_accept soak preview errors"
+$acceptReportJson = [System.IO.File]::ReadAllText($AcceptReportPath, $Utf8NoBom) | ConvertFrom-Json
+Assert-True ($acceptReportJson.cycles_completed -eq 3 -and $acceptReportJson.total_frames -eq 6) "ir_capture_accept report JSON mismatch"
+Write-Host "  CLI PASS, ROI 2x2, NG (exit 20), ERROR, and ir_capture_accept verified."
 
 Write-Step "11. Running packaged Python ctypes examples (ir_noise.py and ir_recipe.py)"
 $PyNoiseOut = Join-Path $WorkRoot "py-noise-out"
@@ -518,6 +545,8 @@ Assert-True ($pyAnalysisRes.StdOut -match "(?m)^gjb_bad_count=0\r?$") "ir_analys
 Assert-True ($pyAnalysisRes.StdOut -match "(?m)^noise3d_status=0\r?$") "ir_analysis.py missing noise3d_status=0"
 Assert-True ($pyAnalysisRes.StdOut -match "(?m)^lrnu_ok=1\r?$") "ir_analysis.py missing lrnu_ok=1"
 Assert-True ($pyAnalysisRes.StdOut -match "(?m)^fft_ok=1\r?$") "ir_analysis.py missing fft_ok=1"
+Assert-True ($pyAnalysisRes.StdOut -match "(?m)^gaussian_ok=1\r?$") "ir_analysis.py missing gaussian_ok=1"
+Assert-True ($pyAnalysisRes.StdOut -match "(?m)^flicker_ok=1\r?$") "ir_analysis.py missing flicker_ok=1"
 $PyDriftOut = Join-Path $WorkRoot "py-drift-out"
 $pyDriftRes = Invoke-External -FilePath $pythonPath `
     -Arguments @("-B", (Join-Path $PkgRoot "examples\python\ir_drift_nodisk.py"),
@@ -862,6 +891,8 @@ if (-not $dotnetExe) {
     Assert-True ($csAnalysisRes.StdOut -match "(?m)^gb_grade=1\r?$") "C# analysis sample failed gb_grade (got: $($csAnalysisRes.StdOut))"
     Assert-True ($csAnalysisRes.StdOut -match "(?m)^gjb_bad_count=0\r?$") "C# analysis sample failed gjb_bad_count (got: $($csAnalysisRes.StdOut))"
     Assert-True ($csAnalysisRes.StdOut -match "(?m)^fft_ok=1\r?$") "C# analysis sample failed fft_ok (got: $($csAnalysisRes.StdOut))"
+    Assert-True ($csAnalysisRes.StdOut -match "(?m)^gaussian_ok=1\r?$") "C# analysis sample failed gaussian_ok (got: $($csAnalysisRes.StdOut))"
+    Assert-True ($csAnalysisRes.StdOut -match "(?m)^flicker_ok=1\r?$") "C# analysis sample failed flicker_ok (got: $($csAnalysisRes.StdOut))"
     Write-Host "  C# sample verified (dotnet ${dotnetVer}: raw16, v1 recipe, v2 no-disk recipe, analysis)."
 }
 
