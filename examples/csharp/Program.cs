@@ -56,6 +56,33 @@ internal static class IRStation
         public int Stable;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct FrameStamp
+    {
+        public ulong Sequence;
+        public ulong DriverSequence;
+        public long TimestampNs;
+        public uint LostFrames;
+        public uint Fields;
+        public int TimeOrigin;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct CaptureStats
+    {
+        public ulong FramesReceived;
+        public ulong FramesDelivered;
+        public ulong FramesDropped;
+        public ulong PreviewFrames;
+        public int QueueCapacity;
+        public int QueueDepth;
+        public int Width;
+        public int Height;
+        public int Running;
+        public int Reserved;
+        public double EstimatedFps;
+    }
+
     [DllImport("IR_station", EntryPoint = "IR_StationVersion", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr StationVersionPtr();
 
@@ -68,6 +95,17 @@ internal static class IRStation
     [DllImport("IR_station", EntryPoint = "IR_FlushFrames", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int FlushFrames(int discardFrames, int timeoutMs,
         out int discarded, byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_SetFrameQueueCapacity", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int SetFrameQueueCapacity(int capacity, byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_TryReadLatestFrame", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int TryReadLatestFrame(
+        ushort[]? pixels, long pixelCapacity, out Geometry geometry, out FrameStamp stamp,
+        out int hasFrame, byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_GetCaptureStats", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int GetCaptureStats(out CaptureStats stats, byte[] error, int errorBytes);
 
     [DllImport("IR_station", EntryPoint = "IR_WaitBlackbodyStable", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int WaitBlackbodyStable(ulong handle, double targetC, double toleranceC,
@@ -239,7 +277,9 @@ internal static class Program
             }
             if (Marshal.SizeOf<IRStation.NoiseRecipe>() != 80 ||
                 Marshal.SizeOf<IRStation.NoiseResult>() != 32 ||
-                Marshal.SizeOf<IRStation.BlackbodyReading>() != 24)
+                Marshal.SizeOf<IRStation.BlackbodyReading>() != 24 ||
+                Marshal.SizeOf<IRStation.FrameStamp>() != 40 ||
+                Marshal.SizeOf<IRStation.CaptureStats>() != 64)
                 throw new InvalidOperationException("The C# structures do not match the IR SDK x64 C ABI.");
             IRStation.ConfigureNativeLibraries(Path.GetFullPath(libraryDirectory));
             if (string.IsNullOrEmpty(IRStation.StationVersion()))

@@ -92,6 +92,22 @@ class IRBlackbodyReading(c.Structure):
     ]
 
 
+class IRCaptureStats(c.Structure):
+    _fields_ = [
+        ("frames_received", c.c_uint64),
+        ("frames_delivered", c.c_uint64),
+        ("frames_dropped", c.c_uint64),
+        ("preview_frames", c.c_uint64),
+        ("queue_capacity", c.c_int32),
+        ("queue_depth", c.c_int32),
+        ("width", c.c_int32),
+        ("height", c.c_int32),
+        ("running", c.c_int32),
+        ("reserved", c.c_int32),
+        ("estimated_fps", c.c_double),
+    ]
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
@@ -110,7 +126,8 @@ def load_station(directory: Path):
 
 def bind_sdk(station, analysis) -> None:
     verify_abi_sizes()
-    if c.sizeof(IRGeometry) != 12 or c.sizeof(IRFrameStamp) != 40 or c.sizeof(IRBlackbodyReading) != 24:
+    if (c.sizeof(IRGeometry) != 12 or c.sizeof(IRFrameStamp) != 40 or
+            c.sizeof(IRBlackbodyReading) != 24 or c.sizeof(IRCaptureStats) != 64):
         raise RuntimeError("Station ctypes structure size mismatch against C ABI")
 
     err_args = [c.c_char_p, c.c_int32]
@@ -130,6 +147,12 @@ def bind_sdk(station, analysis) -> None:
         ("IR_FlushFrames", [c.c_int32, c.c_int32, c.POINTER(c.c_int32), *err_args]),
         ("IR_StopFrames", [*err_args]),
         ("IR_CloseFrames", [*err_args]),
+        ("IR_SetFrameQueueCapacity", [c.c_int32, *err_args]),
+        ("IR_TryReadLatestFrame", [
+            c.POINTER(c.c_uint16), c.c_int64, c.POINTER(IRGeometry), c.POINTER(IRFrameStamp),
+            c.POINTER(c.c_int32), *err_args,
+        ]),
+        ("IR_GetCaptureStats", [c.POINTER(IRCaptureStats), *err_args]),
         ("IR_OpenDevice", [c.c_int32, c.c_char_p, c.POINTER(c.c_uint64), *err_args]),
         ("IR_CloseDevice", [c.c_uint64, *err_args]),
         ("IR_SetBlackbody", [c.c_uint64, c.c_double, c.POINTER(c.c_double), *err_args]),
@@ -307,6 +330,7 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
     rows_written: list[dict] = []
     calib_info: dict = {}
     drift_fft_summary: dict = {}
+    capture_stats_summary: dict = {}
     geom = IRGeometry()
 
     try:
@@ -795,6 +819,17 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
             }
     finally:
         signal.signal(signal.SIGINT, prev_sigint)
+        stats_c = IRCaptureStats()
+        if station.IR_GetCaptureStats(c.byref(stats_c), err, len(err)) == IR_OK:
+            capture_stats_summary = {
+                "frames_received": stats_c.frames_received,
+                "frames_delivered": stats_c.frames_delivered,
+                "frames_dropped": stats_c.frames_dropped,
+                "preview_frames": stats_c.preview_frames,
+                "queue_capacity": stats_c.queue_capacity,
+                "queue_depth": stats_c.queue_depth,
+                "estimated_fps": stats_c.estimated_fps,
+            }
         if frames_started:
             station.IR_StopFrames(err, len(err))
         if frames_opened:
@@ -827,6 +862,7 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
         },
         "calibration": calib_info,
         "burst_count": len(rows_written),
+        "capture_stats": capture_stats_summary,
         "drift_series_fft": drift_fft_summary,
     }
     meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

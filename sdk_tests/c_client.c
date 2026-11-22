@@ -33,6 +33,28 @@ int main(int argc, char **argv)
         fprintf(stderr, "Device: %s\n", error);
         return 1;
     }
+    if (sizeof(IRCaptureStats) != 64) {
+        fprintf(stderr, "Unexpected IRCaptureStats ABI size: %zu\n", sizeof(IRCaptureStats));
+        return 1;
+    }
+    IRCaptureStats stats = {0};
+    int32_t has_frame = -1;
+    uint16_t dummy_px = 0;
+    status = IR_SetFrameQueueCapacity(64, error, sizeof error);
+    if (status != IR_OK) {
+        fprintf(stderr, "SetFrameQueueCapacity: %s\n", error);
+        return 1;
+    }
+    status = IR_GetCaptureStats(&stats, error, sizeof error);
+    if (status != IR_OK || stats.queue_capacity != 64) {
+        fprintf(stderr, "GetCaptureStats: status=%d cap=%d err=%s\n", status, stats.queue_capacity, error);
+        return 1;
+    }
+    status = IR_TryReadLatestFrame(&dummy_px, 1, &g, NULL, &has_frame, error, sizeof error);
+    if (status != IR_OK || has_frame != 0) {
+        fprintf(stderr, "TryReadLatestFrame: status=%d has_frame=%d err=%s\n", status, has_frame, error);
+        return 1;
+    }
     const char *analysis_version = IR_AnalysisVersion();
     const char *station_version = IR_StationVersion();
     if (!analysis_version || !station_version || strcmp(analysis_version, station_version) != 0) {

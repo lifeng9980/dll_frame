@@ -14,13 +14,13 @@ IR SDK 面向 Windows x64 与 Ubuntu 24.04 x86-64 使用同一份源码和公共
 | 层 | 改动入口 | 输入和输出 |
 |---|---|---|
 | 仪器控制 | `station/instruments/` 按设备型号接入，`transport/asio_link.cpp` 共用 Asio TCP 与串口 | `IR_OpenDevice` 接收型号和连接 JSON，黑体示例提供设温回读和状态读取。新设备需说明哪些命令可以安全重试 |
-| 原始采集 | `station/acquisition/frame_source.h`，具体来源在 `raw_replay/`、`directshow/`、`v4l2/` | `IR_OpenFrames` 返回几何，`IR_ReadFrames` 输出紧密排列的 RAW16 像素、帧信息和连续完成数；`IR_FlushFrames` 清空队列并重置序列连续性以支撑不停流多 Burst 采集 |
+| 原始采集 | `station/acquisition/frame_source.h`，具体来源在 `raw_replay/`、`directshow/`、`v4l2/` | `IR_OpenFrames` 返回几何，`IR_ReadFrames` 输出紧密排列的 RAW16 像素；`IR_FlushFrames` 支撑不停流多 Burst 采集；`IR_TryReadLatestFrame` / `IR_GetCaptureStats` 提供无阻塞预览与有界 `FrameQueue` 诊断 |
 | 指标计算 | `analysis/`，可独立使用 `IR_analysis` | `IR_FrameStatisticsU16`、`IR_ROIMeanU16`、`IR_Noise3D*`、`IR_Gb*` / `IR_Gjb*`（含可配置短路/断路阈值），以及两点 NUC、无损 NUC 统计、`15×15` 空间高低频（LRNU/HRNU）、算术扣噪/阈值掩码、任意长 1D FFT 与 `IR_GjbEvaluateBurstMetrics` |
 | 流程编排 | `station/procedures/` | `IR_RunRecipeJson` 按测试 JSON 执行设备、采集、多个分析和归档步骤；`IR_WaitBlackbodyStable` 提供独立等稳接口 |
 
 ## 线程和设备占用
 
-一个进程同时打开一个采集源。打开、启动、读取、停止、关闭和同步流程由打开源的同一工作线程调用。预览与配方不能同时操作该采集源，冲突时返回 `IR_BUSY`。离线计算可以放在其他线程，每次调用使用自己的输入和输出缓冲区。
+一个进程同时打开一个采集源。打开、启动、读取（`IR_ReadFrames`）、冲刷（`IR_FlushFrames`）、停止、关闭和同步流程由打开源的同一工作线程调用，并发操作采集流会返回 `IR_BUSY`；同时实时源由有界 `FrameQueue`（默认 64 帧，可通过 `IR_SetFrameQueueCapacity` 在非运行期调整）在后台泵线程持续拉帧，UI 或监控线程可随时调用 `IR_TryReadLatestFrame`（丢旧保新快照）与 `IR_GetCaptureStats` 无阻塞获取最新帧与实时帧率/队列状态，不会触发 `IR_BUSY`。离线计算可以放在其他线程，每次调用使用自己的输入和输出缓冲区。
 
 `IR_RunNoise` 在第一次设备命令前预约配方指定的仪器。预约期间，其他线程对这些句柄执行读、写或关闭都会得到 `IR_BUSY`。配方释放资源后即可再次操作。未被配方使用的仪器不需要打开。预约只约束当前 SDK 进程内的调用；其他进程的占用由设备或驱动决定。`IR_RequestStop` 可从其他线程调用，设备命令仍由工作线程收尾。实时取帧按最多 50 ms 的等待段检查取消，每帧仍遵守调用方指定的总超时。
 

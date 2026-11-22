@@ -58,12 +58,13 @@ dotnet run --project examples/csharp/IRSdkSample.csproj -- --analysis
 
 ## Python ctypes
 
-示例只使用 Python 标准库（`ir_noise.py`、`ir_recipe.py` 与调用 Noise3D/GB/GJB 的 `ir_analysis.py`）：
+示例只使用 Python 标准库（`ir_noise.py`、`ir_recipe.py`、调用 Noise3D/GB/GJB/可组合算子的 `ir_analysis.py` 与 5h 无存盘多 Burst 温漂示例 `ir_drift_nodisk.py`）：
 
 ```powershell
 python .\examples\python\ir_recipe.py --check .\examples\stations\offline.json .\examples\recipes\noise_roi.json ..\output\python-run
 python .\examples\python\ir_recipe.py --run .\examples\stations\offline.json .\examples\recipes\noise_roi.json ..\output\python-run
 python .\examples\python\ir_analysis.py
+python .\examples\python\ir_drift_nodisk.py --mode self-test
 ```
 
 ```bash

@@ -270,7 +270,14 @@ foreach ($bin in @($StationDll, $AnalysisDll, $CliExe)) {
     }
 }
 $stationExports = (Invoke-External -FilePath $dumpbinPath -Arguments @("/nologo", "/exports", $StationDll)).StdOut
-foreach ($sym in @("IR_StationVersion", "IR_FlushFrames", "IR_WaitBlackbodyStable")) {
+foreach ($sym in @(
+    "IR_StationVersion",
+    "IR_FlushFrames",
+    "IR_WaitBlackbodyStable",
+    "IR_SetFrameQueueCapacity",
+    "IR_TryReadLatestFrame",
+    "IR_GetCaptureStats"
+)) {
     Assert-True ($stationExports -match "\b$sym\b") "IR_station.dll must export $sym"
 }
 $analysisExports = (Invoke-External -FilePath $dumpbinPath -Arguments @("/nologo", "/exports", $AnalysisDll)).StdOut
@@ -495,7 +502,13 @@ Assert-True ($pyAnalysisRes.StdOut -match "(?m)^gjb_bad_count=0\r?$") "ir_analys
 Assert-True ($pyAnalysisRes.StdOut -match "(?m)^noise3d_status=0\r?$") "ir_analysis.py missing noise3d_status=0"
 Assert-True ($pyAnalysisRes.StdOut -match "(?m)^lrnu_ok=1\r?$") "ir_analysis.py missing lrnu_ok=1"
 Assert-True ($pyAnalysisRes.StdOut -match "(?m)^fft_ok=1\r?$") "ir_analysis.py missing fft_ok=1"
-Write-Host "  Python ir_noise.py, ir_recipe.py, and ir_analysis.py verified."
+$PyDriftOut = Join-Path $WorkRoot "py-drift-out"
+$pyDriftRes = Invoke-External -FilePath $pythonPath `
+    -Arguments @("-B", (Join-Path $PkgRoot "examples\python\ir_drift_nodisk.py"),
+                 "--mode", "self-test", "--output-dir", $PyDriftOut)
+Assert-True ($pyDriftRes.StdOut -match "(?m)^raw_saved=false\r?$") "ir_drift_nodisk.py missing raw_saved=false"
+Assert-True ($pyDriftRes.StdOut -match "(?m)^burst_count=3\r?$") "ir_drift_nodisk.py missing burst_count=3"
+Write-Host "  Python ir_noise.py, ir_recipe.py, ir_analysis.py, and ir_drift_nodisk.py verified."
 
 Write-Step "12. Running TCP simulator fault-injection smoke tests (--drop-command --fragment --log-io + --unstable)"
 $SimScript = Join-Path $PkgRoot "simulators\ir_sim_devices.py"

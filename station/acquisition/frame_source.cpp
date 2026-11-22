@@ -2,8 +2,10 @@
 #include "api_common.h"
 #include <algorithm>
 #include <chrono>
+#include <exception>
 using namespace ir::api;
 namespace ir::acquisition {
+static_assert(sizeof(IRCaptureStats) == 64, "IRCaptureStats ABI size must be 64 bytes");
 Capture &capture() { static Capture value; return value; }
 std::unique_lock<std::mutex> lockCapture()
 {
@@ -32,6 +34,7 @@ IRGeometry Capture::open(int kind, const char *name, int bits)
 #endif
     else throw Error(IR_UNSUPPORTED, "Frame backend is not available on this platform");
     const auto geometry = opened->geometry();
+    frameQueue_.configure(geometry, queueCapacity_);
     sourceName = name;
     source = std::move(opened);
     owner = std::this_thread::get_id();
@@ -42,6 +45,7 @@ void Capture::close()
 {
     if (!source) return;
     checkOwner();
+    stopPump();
     // 即使后端报告停流失败，离开作用域时也要释放采集源。
     auto closing = std::move(source);
     const bool wasRunning = running;
@@ -49,7 +53,13 @@ void Capture::close()
     sourceName.clear();
     owner = {};
     backend = 0;
-    if (wasRunning) closing->stop();
+    try {
+        if (wasRunning) closing->stop();
+    } catch (...) {
+        frameQueue_.resetClosed();
+        throw;
+    }
+    frameQueue_.resetClosed();
 }
 void Capture::checkOwner() const
 {
@@ -71,20 +81,95 @@ void Capture::requestStop() noexcept
 {
     auto expected = StopState::active;
     stopState_.compare_exchange_strong(expected, StopState::requested);
+    frameQueue_.wakeWaiters();
 }
 void Capture::checkStop() const
 {
     require(stopState_.load() != StopState::requested, IR_CANCELLED, "Measurement or acquisition cancelled");
 }
+void Capture::setQueueCapacity(int32_t capacity)
+{
+    FrameQueue::validateCapacity(capacity);
+    require(!running, IR_BUSY, "Cannot change frame queue capacity while capture is running");
+    queueCapacity_ = capacity;
+    if (source)
+        frameQueue_.configure(source->geometry(), queueCapacity_);
+    else
+        frameQueue_.setIdleCapacity(queueCapacity_);
+}
+void Capture::startPump()
+{
+    pumpStop_.store(false, std::memory_order_release);
+    pumpActive_ = true;
+    pumpThread_ = std::thread([this] { pumpLoop(); });
+}
+void Capture::stopPump()
+{
+    pumpStop_.store(true, std::memory_order_release);
+    frameQueue_.markStopped();
+    if (pumpThread_.joinable())
+        pumpThread_.join();
+    pumpActive_ = false;
+    frameQueue_.setRunning(false);
+}
+void Capture::pumpLoop()
+{
+    const auto g = source->geometry();
+    const auto n = pixels(g.height, g.width);
+    std::vector<uint16_t> scratch(static_cast<size_t>(n), 0);
+    while (!pumpStop_.load(std::memory_order_acquire)) {
+        IRFrameStamp stamp{};
+        try {
+            source->read(scratch.data(), stamp, 50);
+            if (pumpStop_.load(std::memory_order_acquire))
+                break;
+            frameQueue_.push(scratch.data(), stamp);
+        } catch (const Error &err) {
+            if (pumpStop_.load(std::memory_order_acquire))
+                break;
+            if (err.code == IR_TIMEOUT)
+                continue;
+            if (err.code == IR_END_OF_STREAM) {
+                frameQueue_.markStopped();
+                break;
+            }
+            frameQueue_.setTerminalError(err.code, err.what());
+            break;
+        } catch (const std::exception &ex) {
+            if (pumpStop_.load(std::memory_order_acquire))
+                break;
+            frameQueue_.setTerminalError(IR_IO_ERROR, ex.what());
+            break;
+        } catch (...) {
+            if (pumpStop_.load(std::memory_order_acquire))
+                break;
+            frameQueue_.setTerminalError(IR_IO_ERROR, "Unknown capture pump error");
+            break;
+        }
+    }
+}
 void Capture::start()
 {
     checkStop();
     require(!running, IR_BUSY, "Source is already running");
+    frameQueue_.beginStartSession(source->geometry(), queueCapacity_);
     source->start();
     running = true;
+    if (source->isLive()) {
+        try {
+            startPump();
+        } catch (...) {
+            running = false;
+            try { source->stop(); } catch (...) {}
+            frameQueue_.markStopped();
+            frameQueue_.setRunning(false);
+            throw;
+        }
+    }
 }
 void Capture::stop()
 {
+    stopPump();
     if (running) source->stop();
     running = false;
 }
@@ -98,6 +183,41 @@ void Capture::read(int count, int timeoutMs, uint16_t *out, int64_t capacity,
     needed(stamps, stampCapacity, count);
     while (completed < count) {
         checkStop();
+        if (pumpActive_) {
+            IRFrameStamp stamp{};
+            int32_t termCode = IR_OK;
+            std::string termMsg;
+            const auto popStatus = frameQueue_.pop(
+                out + completed * n, stamp, timeoutMs,
+                [this] { return stopState_.load() == StopState::requested; },
+                termCode, termMsg);
+            switch (popStatus) {
+            case FrameQueue::PopStatus::ok:
+                break;
+            case FrameQueue::PopStatus::cancelled:
+                throw Error(IR_CANCELLED, "Measurement or acquisition cancelled");
+            case FrameQueue::PopStatus::timeout:
+                throw Error(IR_TIMEOUT, "Frame wait timed out");
+            case FrameQueue::PopStatus::gap:
+                throw Error(IR_FRAME_GAP, "Frame queue overflow or sequence discontinuity");
+            case FrameQueue::PopStatus::terminal_error:
+                throw Error(termCode, termMsg);
+            case FrameQueue::PopStatus::stopped:
+                throw Error(IR_END_OF_STREAM, "End of RAW capture");
+            }
+            bool gap = stamp.lost_frames != 0;
+            if (completed) {
+                const auto &last = stamps[completed - 1];
+                const auto both = last.fields & stamp.fields;
+                gap |= (both & IR_HAS_SEQUENCE) && stamp.sequence != last.sequence + 1;
+                gap |= (both & IR_HAS_DRIVER_SEQUENCE) && stamp.driver_sequence != last.driver_sequence + 1;
+            }
+            require(!gap, IR_FRAME_GAP, "Frame sequence discontinuity");
+            frameQueue_.recordDelivered();
+            stamps[completed++] = stamp;
+            checkStop();
+            continue;
+        }
         const auto deadline = std::chrono::steady_clock::now() +
                               std::chrono::milliseconds(timeoutMs);
         IRFrameStamp stamp{};
@@ -125,6 +245,7 @@ void Capture::read(int count, int timeoutMs, uint16_t *out, int64_t capacity,
             gap |= (both & IR_HAS_DRIVER_SEQUENCE) && stamp.driver_sequence != last.driver_sequence + 1;
         }
         require(!gap, IR_FRAME_GAP, "Frame sequence discontinuity");
+        frameQueue_.publishPulledFrame(out + completed * n, stamp, true);
         stamps[completed++] = stamp;
         checkStop();
     }
@@ -135,6 +256,49 @@ void Capture::flush(int32_t discardFrames, int32_t timeoutMs, int32_t &discarded
     require(running && discardFrames >= 0 && timeoutMs >= 0, IR_BAD_ARGUMENT,
             "Start source and specify nonnegative discard count and timeout");
     checkStop();
+    if (pumpActive_) {
+        stopPump();
+        source->flush();
+        frameQueue_.resumeSession();
+        startPump();
+        if (discardFrames == 0)
+            return;
+
+        const auto g = source->geometry();
+        const auto n = pixels(g.height, g.width);
+        std::vector<uint16_t> scratch(static_cast<size_t>(n), 0);
+        int32_t i = 0;
+        while (i < discardFrames) {
+            checkStop();
+            IRFrameStamp stamp{};
+            int32_t termCode = IR_OK;
+            std::string termMsg;
+            const auto popStatus = frameQueue_.pop(
+                scratch.data(), stamp, timeoutMs,
+                [this] { return stopState_.load() == StopState::requested; },
+                termCode, termMsg);
+            if (popStatus == FrameQueue::PopStatus::gap)
+                continue;
+            switch (popStatus) {
+            case FrameQueue::PopStatus::ok:
+                ++i;
+                ++discarded;
+                break;
+            case FrameQueue::PopStatus::cancelled:
+                throw Error(IR_CANCELLED, "Measurement or acquisition cancelled");
+            case FrameQueue::PopStatus::timeout:
+                throw Error(IR_TIMEOUT, "Frame flush wait timed out");
+            case FrameQueue::PopStatus::terminal_error:
+                throw Error(termCode, termMsg);
+            case FrameQueue::PopStatus::stopped:
+                throw Error(IR_END_OF_STREAM, "End of RAW capture");
+            case FrameQueue::PopStatus::gap:
+                break;
+            }
+            checkStop();
+        }
+        return;
+    }
     source->flush();
     if (discardFrames == 0)
         return;
@@ -163,6 +327,7 @@ void Capture::flush(int32_t discardFrames, int32_t timeoutMs, int32_t &discarded
             }
             attempted = true;
         }
+        frameQueue_.publishPulledFrame(scratch.data(), stamp, false);
         ++discarded;
         checkStop();
     }
@@ -234,5 +399,29 @@ extern "C" int32_t IR_CloseFrames(char *err, int32_t size)
         c.checkOwner();
         c.endOperation();
         c.close();
+    });
+}
+extern "C" int32_t IR_SetFrameQueueCapacity(int32_t capacity, char *err, int32_t size)
+{
+    return guarded(err, size, [&] {
+        auto lock = lockCapture();
+        capture().setQueueCapacity(capacity);
+    });
+}
+extern "C" int32_t IR_TryReadLatestFrame(uint16_t *pixels, int64_t pixel_capacity,
+    IRGeometry *geometry, IRFrameStamp *stamp, int32_t *has_frame, char *err, int32_t size)
+{
+    if (has_frame) *has_frame = 0;
+    return guarded(err, size, [&] {
+        needed(has_frame, 1, 1);
+        capture().frameQueue().tryReadLatest(pixels, pixel_capacity, geometry, stamp, *has_frame);
+    });
+}
+extern "C" int32_t IR_GetCaptureStats(IRCaptureStats *stats, char *err, int32_t size)
+{
+    if (stats) *stats = {};
+    return guarded(err, size, [&] {
+        needed(stats, 1, 1);
+        *stats = capture().frameQueue().stats();
     });
 }

@@ -1,5 +1,6 @@
 #pragma once
 #include "IR_station.h"
+#include "frame_queue.h"
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -11,6 +12,7 @@ class FrameSource {
 public:
     virtual ~FrameSource() = default;
     virtual IRGeometry geometry() const = 0;
+    virtual bool isLive() const noexcept { return true; }
     virtual void start() = 0;
     virtual void read(uint16_t *pixels, IRFrameStamp &stamp, int timeoutMs) = 0;
     virtual void flush() {}
@@ -47,10 +49,21 @@ public:
     void read(int count, int timeoutMs, uint16_t *pixels, int64_t capacity,
               IRFrameStamp *stamps, int stampCapacity, int &completed);
     void flush(int32_t discardFrames, int32_t timeoutMs, int32_t &discarded);
+    void setQueueCapacity(int32_t capacity);
+    FrameQueue &frameQueue() noexcept { return frameQueue_; }
 
 private:
+    void startPump();
+    void stopPump();
+    void pumpLoop();
+
     enum class StopState { idle, active, requested };
     std::atomic<StopState> stopState_{StopState::idle};
+    int32_t queueCapacity_{FrameQueue::kDefaultCapacity};
+    FrameQueue frameQueue_;
+    std::thread pumpThread_;
+    std::atomic<bool> pumpStop_{false};
+    bool pumpActive_{false};
 };
 Capture &capture();
 std::unique_lock<std::mutex> lockCapture();

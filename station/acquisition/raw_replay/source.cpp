@@ -30,6 +30,7 @@ public:
         const auto &g = file_.geometry;
         return {g.width, g.height, g.bitDepth};
     }
+    bool isLive() const noexcept override { return false; }
     void start() override {
         try { raw::checkUnchanged(file_); }
         catch (const raw::AppError &e) { throw Error(IR_IO_ERROR, e.what()); }

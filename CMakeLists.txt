@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(IRSDK VERSION 1.2.0 LANGUAGES C CXX)
+project(IRSDK VERSION 1.3.0 LANGUAGES C CXX)
 include(CTest)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -81,6 +81,7 @@ target_sources(IR_station PRIVATE
 # 采集：公共入口按来源创建 FrameSource，实时后端随目标平台编译。
 target_sources(IR_station PRIVATE
     station/acquisition/frame_source.cpp
+    station/acquisition/frame_queue.cpp
     station/acquisition/raw_replay/source.cpp
     station/acquisition/raw_replay/RawConversionCore.cpp)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -162,6 +163,15 @@ if(BUILD_TESTING)
     add_executable(drift_nodisk_test sdk_tests/drift_nodisk_test.cpp)
     target_link_libraries(drift_nodisk_test PRIVATE IR_station IR_analysis)
     add_test(NAME drift_nodisk COMMAND drift_nodisk_test)
+    add_executable(frame_queue_test
+        sdk_tests/frame_queue_test.cpp
+        station/acquisition/frame_queue.cpp)
+    target_include_directories(frame_queue_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/station/acquisition"
+        "${PROJECT_SOURCE_DIR}/station"
+        "${PROJECT_SOURCE_DIR}/shared")
+    target_link_libraries(frame_queue_test PRIVATE IR_station)
+    add_test(NAME frame_queue COMMAND frame_queue_test)
     add_executable(replay_roundtrip sdk_tests/replay_roundtrip.cpp)
     target_link_libraries(replay_roundtrip PRIVATE IR_station)
     add_test(NAME replay_roundtrip COMMAND replay_roundtrip)

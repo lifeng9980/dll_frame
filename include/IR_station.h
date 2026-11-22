@@ -45,6 +45,20 @@ typedef struct IRFrameStamp {
     int32_t time_origin;
 } IRFrameStamp;
 
+typedef struct IRCaptureStats {
+    uint64_t frames_received;     /* 后端累计交付到 SDK 队列/采集层的帧数 */
+    uint64_t frames_delivered;    /* 累计成功交付给测量调用方的帧数 */
+    uint64_t frames_dropped;      /* 队列溢出或后端报告的丢帧累计 */
+    uint64_t preview_frames;      /* 预览快照槽累计更新帧数 */
+    int32_t queue_capacity;       /* 测量有界队列容量（默认 64） */
+    int32_t queue_depth;          /* 当前测量队列中待取帧数 */
+    int32_t width;                /* 当前打开采集源宽度，未打开为 0 */
+    int32_t height;               /* 当前打开采集源高度，未打开为 0 */
+    int32_t running;              /* 采集源是否运行中（0 或 1） */
+    int32_t reserved;             /* 对齐保留字段，置 0 */
+    double estimated_fps;         /* 主机单调时钟估算实测帧率（Hz） */
+} IRCaptureStats;
+
 /* 一个进程使用一个采集源。除 RequestStop 外，采集和流程调用使用打开源的线程。
    打开、启动、读取、停止和关闭必须由同一个工作线程执行；并发操作返回 IR_BUSY。
    RAW 目录的 valid_bits 传 0 时读取索引。实时源的 valid_bits 由调用方按探测器配置提供，
@@ -75,6 +89,19 @@ IR_STATION_API void IR_RequestStop(void);
 IR_STATION_API int32_t IR_StopFrames(char *err, int32_t err_bytes);
 /* 释放采集源，之后可打开另一来源。 */
 IR_STATION_API int32_t IR_CloseFrames(char *err, int32_t err_bytes);
+
+/* 配置测量有界 FrameQueue 容量（2~4096，默认 64）。须在未启动采集时调用，运行中返回 IR_BUSY。 */
+IR_STATION_API int32_t IR_SetFrameQueueCapacity(int32_t capacity, char *err, int32_t err_bytes);
+
+/* 无阻塞读取最新一帧预览快照（丢旧保新，不消耗测量有界队列，也不因配方/测量取帧返回 IR_BUSY）。
+ * 暂无帧时返回 IR_OK 且 *has_frame = 0；有帧但 pixel_capacity 不足时返回 IR_BUFFER_TOO_SMALL（geometry 仍写入）。
+ * geometry 与 stamp 可为 NULL。
+ */
+IR_STATION_API int32_t IR_TryReadLatestFrame(uint16_t *pixels, int64_t pixel_capacity,
+    IRGeometry *geometry, IRFrameStamp *stamp, int32_t *has_frame, char *err, int32_t err_bytes);
+
+/* 获取当前采集会话统计与 FrameQueue 诊断快照（线程安全、非阻塞）。 */
+IR_STATION_API int32_t IR_GetCaptureStats(IRCaptureStats *stats, char *err, int32_t err_bytes);
 
 typedef struct IRNoiseRecipe {
     const char *recipe_id;                 /* 产品配方标识或版本，UTF-8 */
