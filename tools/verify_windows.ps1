@@ -442,6 +442,22 @@ $roiJson = [System.IO.File]::ReadAllText((Join-Path $RoiOut "result.json"), $Utf
 Assert-True ([math]::Abs([double]$roiJson.metrics.'left.mean_dn'.value - 41.0) -lt 1e-12) "ROI 2x2 left.mean_dn != 41"
 Assert-True ([math]::Abs([double]$roiJson.metrics.'noise.mean_dn'.value - 51.0) -lt 1e-12) "ROI 2x2 noise.mean_dn != 51"
 
+$V2NoDiskOut = Join-Path $WorkRoot "cli-v2-nodisk-out"
+$v2NoDiskRes = Invoke-External -FilePath $PkgCli -Arguments @(
+    "--run",
+    "--station", (Join-Path $PkgRoot "examples\stations\roi_2x2.json"),
+    "--recipe", (Join-Path $PkgRoot "examples\recipes\nodisk_roi_v2.json"),
+    "--output", $V2NoDiskOut
+)
+Assert-True ($v2NoDiskRes.StdOut -match "(?m)^run_status=PASS\r?$") "CLI Schema v2 no-disk failed (got: $($v2NoDiskRes.StdOut))"
+$v2NoDiskJson = [System.IO.File]::ReadAllText((Join-Path $V2NoDiskOut "result.json"), $Utf8NoBom) | ConvertFrom-Json
+Assert-True ($v2NoDiskJson.schema_version -eq 2) "CLI Schema v2 result schema_version != 2"
+Assert-True ($v2NoDiskJson.raw_saved -eq $false) "CLI Schema v2 raw_saved should be false"
+Assert-True ([math]::Abs([double]$v2NoDiskJson.metrics.'summary.mean'.value - 51.0) -lt 1e-12) "Schema v2 summary.mean != 51"
+Assert-True ([math]::Abs([double]$v2NoDiskJson.metrics.'left.mean_dn'.value - 41.0) -lt 1e-12) "Schema v2 left.mean_dn != 41"
+$v2RawFiles = @(Get-ChildItem -Path $V2NoDiskOut -Recurse -Filter "*.raw")
+Assert-True ($v2RawFiles.Count -eq 0) "CLI Schema v2 no-disk must not save .raw files"
+
 $TempRecipesDir = Join-Path $WorkRoot "temp-recipes"
 New-Item -ItemType Directory -Path $TempRecipesDir -Force | Out-Null
 
@@ -689,9 +705,10 @@ import json, pathlib, sys
 pkg = pathlib.Path(sys.argv[1]).resolve()
 station_schema = json.loads((pkg / "examples/schemas/station.schema.json").read_text(encoding="utf-8"))
 recipe_schema = json.loads((pkg / "examples/schemas/recipe.schema.json").read_text(encoding="utf-8"))
+recipe_v2_schema = json.loads((pkg / "examples/schemas/recipe.v2.schema.json").read_text(encoding="utf-8"))
 stations = sorted((pkg / "examples/stations").glob("*.json"))
 recipes = sorted((pkg / "examples/recipes").glob("*.json"))
-assert len(stations) == 4 and len(recipes) == 5, (len(stations), len(recipes))
+assert len(stations) == 4 and len(recipes) == 6, (len(stations), len(recipes))
 for p in [*stations, *recipes]:
     data = json.loads(p.read_text(encoding="utf-8"))
     ref = (p.parent / data["$schema"]).resolve()
@@ -703,12 +720,15 @@ except ImportError:
     sys.exit(0)
 Draft202012Validator.check_schema(station_schema)
 Draft202012Validator.check_schema(recipe_schema)
+Draft202012Validator.check_schema(recipe_v2_schema)
 sv = Draft202012Validator(station_schema)
 rv = Draft202012Validator(recipe_schema)
+rv2 = Draft202012Validator(recipe_v2_schema)
 for p in stations:
     sv.validate(json.loads(p.read_text(encoding="utf-8")))
 for p in recipes:
-    rv.validate(json.loads(p.read_text(encoding="utf-8")))
+    data = json.loads(p.read_text(encoding="utf-8"))
+    (rv2 if data["schema_version"] == 2 else rv).validate(data)
 
 # Negative boundary checks
 bad_stations = [
@@ -717,11 +737,13 @@ bad_stations = [
     {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
      "devices": {"bb": {"kind": "pcn7-lt", "connection": {"host": "127.0.0.1", "head": -1, "expected_head_serial": "H"}}}},
     {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16, "max_batch_bytes": 2**63}},
+    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16, "queue_capacity": 1}},
+    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16, "queue_capacity": 5000}},
 ]
 for idx, s in enumerate(bad_stations):
     assert not sv.is_valid(s), f"bad station #{idx} unexpectedly validated"
 
-bad_recipes = [
+bad_recipes_v1 = [
     {"schema_version": 1, "recipe_id": "bad", "steps": [
         {"id": "s1", "type": "save_raw", "input": "b"},
         {"id": "s2", "type": "save_raw", "input": "b"},
@@ -739,9 +761,30 @@ bad_recipes = [
         {"id": "s", "type": "save_raw", "input": "b"},
     ]},
 ]
-for idx, r in enumerate(bad_recipes):
-    assert not rv.is_valid(r), f"bad recipe #{idx} unexpectedly validated"
-print(f"mode=Draft202012Validator stations={len(stations)} recipes={len(recipes)} negatives={len(bad_stations)+len(bad_recipes)}")
+for idx, r in enumerate(bad_recipes_v1):
+    assert not rv.is_valid(r), f"bad recipe v1 #{idx} unexpectedly validated"
+
+bad_recipes_v2 = [
+    {"schema_version": 2, "recipe_id": "bad-nested", "steps": [
+        {"id": "lp", "type": "repeat_burst", "max_iterations": 2, "steps": [
+            {"id": "lp2", "type": "repeat_burst", "max_iterations": 1, "steps": [
+                {"id": "c", "type": "capture", "frames": 2, "frame_timeout_ms": 0}
+            ]}
+        ]}
+    ]},
+    {"schema_version": 2, "recipe_id": "bad-subdir", "steps": [
+        {"id": "c", "type": "capture", "frames": 2, "frame_timeout_ms": 0},
+        {"id": "s", "type": "save_raw", "input": "c", "subdir": "a/b"}
+    ]},
+    {"schema_version": 2, "recipe_id": "bad-power", "steps": [
+        {"id": "p", "type": "power_output", "device": "supply", "channel": 1, "enabled": True},
+        {"id": "c", "type": "capture", "frames": 2, "frame_timeout_ms": 0}
+    ]},
+]
+for idx, r in enumerate(bad_recipes_v2):
+    assert not rv2.is_valid(r), f"bad recipe v2 #{idx} unexpectedly validated"
+
+print(f"mode=Draft202012Validator stations={len(stations)} recipes={len(recipes)} negatives={len(bad_stations)+len(bad_recipes_v1)+len(bad_recipes_v2)}")
 '@
 $schemaPyPath = Join-Path $TempRecipesDir "check_schemas.py"
 Write-Utf8File $schemaPyPath $schemaCheckPy
@@ -749,22 +792,77 @@ $schemaRes = Invoke-External -FilePath $pythonPath -Arguments @("-B", $schemaPyP
 Write-Host ("  JSON Schema check passed ({0})." -f $schemaRes.StdOut.Trim())
 
 Write-Step "13. Checking optional C# sample (dotnet)"
-$dotnetCmd = Get-Command dotnet -ErrorAction SilentlyContinue
-if (-not $dotnetCmd) {
-    Write-Host "  [SKIP] dotnet is not installed on this machine; skipping C# sample." -ForegroundColor Yellow
+$dotnetCandidates = New-Object System.Collections.Generic.List[string]
+$dotnetInPath = Get-Command dotnet -ErrorAction SilentlyContinue
+if ($dotnetInPath -and ($dotnetInPath.Source -notmatch "(?i)\\Program Files \(x86\)\\")) {
+    [void]$dotnetCandidates.Add($dotnetInPath.Source)
+}
+foreach ($cand in @(
+    "C:\Program Files\dotnet\dotnet.exe",
+    (Join-Path $env:LOCALAPPDATA "Microsoft\dotnet\dotnet.exe"),
+    (Join-Path $env:USERPROFILE ".dotnet\dotnet.exe")
+)) {
+    if ($cand -and -not ($dotnetCandidates -contains $cand)) {
+        [void]$dotnetCandidates.Add($cand)
+    }
+}
+$dotnetExe = $null
+foreach ($cand in $dotnetCandidates) {
+    if (Test-Path $cand) {
+        try {
+            $sdkList = (& $cand --list-sdks 2>$null | Out-String)
+            if ($sdkList -match "(?m)^10\.") {
+                $dotnetExe = $cand
+                break
+            }
+        } catch {}
+    }
+}
+if (-not $dotnetExe) {
+    Write-Host "  [SKIP] .NET 10 SDK (x64 dotnet) is not installed on this machine; skipping C# sample." -ForegroundColor Yellow
 } else {
+    $dotnetVer = (& $dotnetExe --version).Trim()
+    $csEnv = @{
+        IR_SDK_LIB_DIR                    = (Join-Path $PkgRoot "windows-x64\bin")
+        DOTNET_ROOT                       = (Split-Path -Parent $dotnetExe)
+        DOTNET_NOLOGO                     = "1"
+        DOTNET_CLI_TELEMETRY_OPTOUT       = "1"
+        DOTNET_SKIP_FIRST_TIME_EXPERIENCE = "1"
+    }
+    $CsProj = Join-Path $PkgRoot "examples\csharp\IRSdkSample.csproj"
+    $null = Invoke-External -FilePath $dotnetExe -WorkingDirectory $PkgRoot `
+        -Environment $csEnv -Arguments @("build", $CsProj, "--nologo")
+
+    $csRawRes = Invoke-External -FilePath $dotnetExe -WorkingDirectory $PkgRoot `
+        -Environment $csEnv -Arguments @("run", "--no-build", "--project", $CsProj, "--", (Join-Path $PkgRoot "examples\data\raw16"))
+    Assert-True ($csRawRes.StdOut -match "status=0 completed=2") "C# raw16 sample failed status/completed (got: $($csRawRes.StdOut))"
+    Assert-True ($csRawRes.StdOut -match "(?m)^mean_dn=21\r?$") "C# raw16 sample missing mean_dn=21 (got: $($csRawRes.StdOut))"
+    Assert-True ($csRawRes.StdOut -match "frames_delivered=2") "C# raw16 sample missing frames_delivered=2 (got: $($csRawRes.StdOut))"
+
     $CsOut = Join-Path $WorkRoot "csharp-recipe-out"
-    $csRes = Invoke-External -FilePath $dotnetCmd.Source -WorkingDirectory $PkgRoot `
-        -Environment @{ IR_SDK_LIB_DIR = (Join-Path $PkgRoot "windows-x64\bin") } `
-        -Arguments @("run", "--project", (Join-Path $PkgRoot "examples\csharp\IRSdkSample.csproj"),
-                     "--", "--recipe", $OfflineStation, $OfflineRecipe, $CsOut)
-    Assert-True ($csRes.StdOut -match "(?m)^run_status=PASS\r?$") "C# sample failed (got: $($csRes.StdOut))"
-    $csAnalysisRes = Invoke-External -FilePath $dotnetCmd.Source -WorkingDirectory $PkgRoot `
-        -Environment @{ IR_SDK_LIB_DIR = (Join-Path $PkgRoot "windows-x64\bin") } `
-        -Arguments @("run", "--project", (Join-Path $PkgRoot "examples\csharp\IRSdkSample.csproj"),
-                     "--", "--analysis")
-    Assert-True ($csAnalysisRes.StdOut -match "(?m)^analysis_version=$([regex]::Escape($SdkVersion))\r?$") "C# analysis sample failed"
-    Write-Host "  C# sample verified."
+    $csRes = Invoke-External -FilePath $dotnetExe -WorkingDirectory $PkgRoot `
+        -Environment $csEnv -Arguments @("run", "--no-build", "--project", $CsProj,
+            "--", "--recipe", $OfflineStation, $OfflineRecipe, $CsOut)
+    Assert-True ($csRes.StdOut -match "(?m)^run_status=PASS\r?$") "C# v1 recipe sample failed (got: $($csRes.StdOut))"
+    Assert-True ($csRes.StdOut -match "(?m)^completed_frames=2\r?$") "C# v1 recipe sample completed_frames!=2 (got: $($csRes.StdOut))"
+
+    $CsV2Out = Join-Path $WorkRoot "csharp-v2-nodisk-out"
+    $csV2Res = Invoke-External -FilePath $dotnetExe -WorkingDirectory $PkgRoot `
+        -Environment $csEnv -Arguments @("run", "--no-build", "--project", $CsProj,
+            "--", "--recipe", (Join-Path $PkgRoot "examples\stations\roi_2x2.json"),
+            (Join-Path $PkgRoot "examples\recipes\nodisk_roi_v2.json"), $CsV2Out)
+    Assert-True ($csV2Res.StdOut -match "(?m)^run_status=PASS\r?$") "C# v2 no-disk recipe sample failed (got: $($csV2Res.StdOut))"
+    Assert-True ($csV2Res.StdOut -match "(?m)^completed_frames=2\r?$") "C# v2 no-disk recipe completed_frames!=2 (got: $($csV2Res.StdOut))"
+    $csV2RawFiles = @(Get-ChildItem -Path $CsV2Out -Recurse -Filter "*.raw")
+    Assert-True ($csV2RawFiles.Count -eq 0) "C# v2 no-disk sample must not save .raw files"
+
+    $csAnalysisRes = Invoke-External -FilePath $dotnetExe -WorkingDirectory $PkgRoot `
+        -Environment $csEnv -Arguments @("run", "--no-build", "--project", $CsProj, "--", "--analysis")
+    Assert-True ($csAnalysisRes.StdOut -match "(?m)^analysis_version=$([regex]::Escape($SdkVersion))\r?$") "C# analysis sample failed version (got: $($csAnalysisRes.StdOut))"
+    Assert-True ($csAnalysisRes.StdOut -match "(?m)^gb_grade=1\r?$") "C# analysis sample failed gb_grade (got: $($csAnalysisRes.StdOut))"
+    Assert-True ($csAnalysisRes.StdOut -match "(?m)^gjb_bad_count=0\r?$") "C# analysis sample failed gjb_bad_count (got: $($csAnalysisRes.StdOut))"
+    Assert-True ($csAnalysisRes.StdOut -match "(?m)^fft_ok=1\r?$") "C# analysis sample failed fft_ok (got: $($csAnalysisRes.StdOut))"
+    Write-Host "  C# sample verified (dotnet ${dotnetVer}: raw16, v1 recipe, v2 no-disk recipe, analysis)."
 }
 
 Write-Step "ALL WINDOWS VERIFICATION CHECKS PASSED"

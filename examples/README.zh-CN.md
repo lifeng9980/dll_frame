@@ -20,6 +20,7 @@ SDK 提供两个库：`IR_station` 负责设备、RAW16 采集和流程，`IR_an
 
 - `stations/offline.json` + `recipes/noise_roi.json`：离线 RAW、时域噪声、ROI 均值和产品限值。
 - `stations/roi_2x2.json` + `recipes/noise_roi_2x2.json`：两帧 `2×2` 数据，整图均值 `51 DN`，左列 ROI 均值 `41 DN`。
+- `stations/roi_2x2.json` + `recipes/nodisk_roi_v2.json`：Schema v2 无存盘多指标配方示例（`capture -> frame_stats -> map_summary -> roi_mean`，`raw_saved=false`）。
 - `stations/sim_tcp.json` + `recipes/noise_blackbody.json`：TCP 黑体设温等稳后采集。
 - `stations/sim_power_serial.json` + `recipes/power_serial_smoke.json`：IT6332A 串口设定/回读后采集，不打开输出。
 - `stations/sim_power_serial.json` + `recipes/power_serial_output_cycle.json`：在模拟工位练习打开输出，取帧后关闭并回读确认。
@@ -77,5 +78,5 @@ python3 examples/python/ir_analysis.py
 
 ## Schema 校验与算法扩展
 
-- `examples/schemas/station.schema.json` 与 `examples/schemas/recipe.schema.json` 提供 JSON Schema（Draft 2020-12）定义，随包工位与配方模板已通过 `"$schema"` 引用，可在编辑器中直接校验字段。
-- 源码级二次开发时，新增指标放在 `analysis/`，公共 C 函数放在 `include/IR_analysis.h`，小数据预期结果放在 `sdk_tests/`；供测试配方调用的方法统一登记在 `station/procedures/recipe_metrics.cpp`（详细开发与算法接入规范位于 SDK Git 源码仓库的 `docs/` 目录）。
+- `examples/schemas/station.schema.json`、`examples/schemas/recipe.schema.json` 与 `examples/schemas/recipe.v2.schema.json` 提供 JSON Schema（Draft 2020-12）定义，随包工位与配方模板已通过 `"$schema"` 引用，可在编辑器中直接校验字段。
+- 源码级二次开发时，新增指标放在 `analysis/`，公共 C 函数放在 `include/IR_analysis.h`，小数据预期结果放在 `sdk_tests/`；Schema v1 方法登记在 `station/procedures/recipe_metrics.cpp`，Schema v2 开放算子登记在 `station/procedures/recipe_metrics_v2.cpp`（详细开发与算法接入规范位于 SDK Git 源码仓库的 `docs/` 目录）。

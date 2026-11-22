@@ -109,6 +109,7 @@ void checkBundledTemplates(const fs::path &examplesDir)
     const std::vector<std::pair<std::string, std::string>> pairs{
         {"offline.json", "noise_roi.json"},
         {"roi_2x2.json", "noise_roi_2x2.json"},
+        {"roi_2x2.json", "nodisk_roi_v2.json"},
         {"sim_tcp.json", "noise_blackbody.json"},
         {"sim_power_serial.json", "power_serial_smoke.json"},
         {"sim_power_serial.json", "power_serial_output_cycle.json"},

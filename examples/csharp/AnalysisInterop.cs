@@ -1,4 +1,3 @@
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 internal static class IRAnalysis
@@ -75,10 +74,22 @@ internal static class IRAnalysis
         public int Reserved;
     }
 
-    [InlineArray(15)]
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct GbRegionClusterCounts
+    {
+        public int TypeO;
+        public int TypeI;
+        public int TypeII;
+        public int TypeIII;
+        public int TypeIV;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     internal struct GbClusterCountGrid
     {
-        private int _element0;
+        public GbRegionClusterCounts RegionA;
+        public GbRegionClusterCounts RegionB;
+        public GbRegionClusterCounts RegionC;
     }
 
     [StructLayout(LayoutKind.Sequential)]

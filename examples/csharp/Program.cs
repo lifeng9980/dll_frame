@@ -312,9 +312,17 @@ internal static class Program
                 Console.WriteLine($"width={geometry.Width} height={geometry.Height} valid_bits={geometry.ValidBits}");
                 Console.WriteLine($"status={status} completed={result.Completed} failed_step={result.FailedStep} cleanup_status={result.CleanupStatus}");
                 if (status == 0)
+                {
                     Console.WriteLine($"mean_dn={result.MeanDn:R}\ntemporal_noise_dn={result.TemporalNoiseDn:R}");
+                    var statsStatus = IRStation.GetCaptureStats(out var stats, error, error.Length);
+                    if (statsStatus != 0 || stats.FramesDelivered < 2 || stats.QueueCapacity <= 0)
+                        throw new InvalidOperationException($"IR_GetCaptureStats failed status={statsStatus}: {ErrorText(error)}");
+                    Console.WriteLine($"frames_delivered={stats.FramesDelivered} queue_capacity={stats.QueueCapacity}");
+                }
                 else
+                {
                     Console.Error.WriteLine($"IR_RunNoise: {ErrorText(error)}");
+                }
             }
             finally
             {

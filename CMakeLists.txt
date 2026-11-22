@@ -100,6 +100,8 @@ target_sources(IR_station PRIVATE
     station/procedures/recipe_config.cpp
     station/procedures/recipe_json.cpp
     station/procedures/recipe_metrics.cpp
+    station/procedures/recipe_metrics_v2.cpp
+    station/procedures/recipe_v2.cpp
     station/procedures/save_raw.cpp)
 target_compile_definitions(IR_station PRIVATE
     IR_STATION_BUILD
@@ -180,6 +182,11 @@ if(BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/third_party/nlohmann_json/include")
     target_link_libraries(recipe_json_test PRIVATE IR_station IR_analysis)
     add_test(NAME recipe_json COMMAND recipe_json_test "${PROJECT_SOURCE_DIR}/examples")
+    add_executable(recipe_v2_test sdk_tests/recipe_v2_test.cpp)
+    target_include_directories(recipe_v2_test SYSTEM PRIVATE
+        "${PROJECT_SOURCE_DIR}/third_party/nlohmann_json/include")
+    target_link_libraries(recipe_v2_test PRIVATE IR_station IR_analysis)
+    add_test(NAME recipe_v2 COMMAND recipe_v2_test)
     add_test(NAME ir_run_recipe_offline_check COMMAND ir_run_recipe --check
         --station "${PROJECT_SOURCE_DIR}/examples/stations/offline.json"
         --recipe "${PROJECT_SOURCE_DIR}/examples/recipes/noise_roi.json"

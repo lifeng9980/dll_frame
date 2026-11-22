@@ -408,6 +408,47 @@ def exercise_json_recipe(sdk, controller, config, fixture):
     assert not timeout_output.exists()
     controller.stable = True
 
+    # Schema v2: multi-temperature capture (20 -> 30 °C), zero save_raw, and safety blackbody standby (24.5 °C)
+    recipe_v2 = {
+        "schema_version": 2,
+        "recipe_id": "mock-v2-multitemp-standby",
+        "steps": [
+            {"id": "bb_cold", "type": "blackbody_stabilize", "device": "bb",
+             "target_c": 20.0, "tolerance_c": 0.05, "stable_window_ms": 0,
+             "timeout_ms": 1500, "require_device_stable": True},
+            {"id": "cap_cold", "type": "capture", "frames": 1, "frame_timeout_ms": 0, "output": "b0"},
+            {"id": "bb_hot", "type": "blackbody_stabilize", "device": "bb",
+             "target_c": 30.0, "tolerance_c": 0.05, "stable_window_ms": 0,
+             "timeout_ms": 1500, "require_device_stable": True},
+            {"id": "cap_hot", "type": "capture", "frames": 1, "frame_timeout_ms": 0, "output": "b1"},
+            {"id": "stats_hot", "type": "analyze", "method": "frame_stats", "name": "hot",
+             "input": "b1", "params": {"sample_std": 0}}
+        ],
+        "safety": {
+            "blackbody_standby": [{"device": "bb", "target_c": 24.5}]
+        },
+        "limits": [
+            {"metric": "hot.mean_dn", "operator": "max", "value": 30.0, "unit": "DN"}
+        ],
+    }
+    v2_json = json.dumps(recipe_v2).encode()
+    status = sdk.IR_CheckRecipeJson(station_json, v2_json, error, len(error))
+    assert status == 0, error.value
+
+    v2_out = fixture / "json-v2-run"
+    v2_result = RecipeResult()
+    status = sdk.IR_RunRecipeJson(station_json, v2_json, str(v2_out).encode(),
+                                  c.byref(v2_result), error, len(error))
+    assert status == 0, error.value
+    assert (v2_result.completed_frames, v2_result.failed_stage,
+            v2_result.failed_step_index, v2_result.cleanup_status) == (2, 0, -1, 0)
+    assert controller.target == 24.5, controller.target
+    assert not list(v2_out.rglob("*.raw"))
+    v2_rec = json.loads((v2_out / "result.json").read_text(encoding="utf8"))
+    assert v2_rec["schema_version"] == 2 and v2_rec["run_status"] == "PASS" and v2_rec["raw_saved"] is False
+    assert [c_row["target_c"] for c_row in v2_rec["conditions"]] == [20.0, 30.0]
+    assert v2_rec["metrics"]["hot.mean_dn"]["value"] == 22.0
+
 
 def exercise_recipe_ownership(args, sdk, controller, config):
     error_args = [c.c_char_p, c.c_int32]

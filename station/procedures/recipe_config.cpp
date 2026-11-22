@@ -47,13 +47,11 @@ double numberField(const Json &object, const char *key, const std::string &path)
     return value;
 }
 
-void optionalInteger(const Json &object, const char *key, int low, int high, const std::string &path)
+double optionalNumber(const Json &object, const char *key, double fallback, const std::string &path)
 {
     const auto found = object.find(key);
-    if (found == object.end()) return;
-    const auto value = numberField(object, key, path);
-    require(value >= low && value <= high && std::trunc(value) == value,
-            IR_BAD_ARGUMENT, path + "." + key + " is outside its integer range");
+    if (found == object.end()) return fallback;
+    return numberField(object, key, path);
 }
 
 int integerField(const Json &object, const char *key, int low, int high, const std::string &path)
@@ -62,6 +60,14 @@ int integerField(const Json &object, const char *key, int low, int high, const s
     require(value >= low && value <= high && std::trunc(value) == value,
             IR_BAD_ARGUMENT, path + "." + key + " is outside its integer range");
     return static_cast<int>(value);
+}
+
+int optionalInteger(const Json &object, const char *key, int fallback, int low, int high,
+                    const std::string &path)
+{
+    const auto found = object.find(key);
+    if (found == object.end()) return fallback;
+    return integerField(object, key, low, high, path);
 }
 
 int64_t optionalBytes(const Json &object, const char *key, int64_t fallback, const std::string &path)
@@ -87,6 +93,13 @@ bool booleanField(const Json &object, const char *key, const std::string &path)
     require(found != object.end() && found->is_boolean(), IR_BAD_ARGUMENT,
             path + "." + key + " must be true or false");
     return found->get<bool>();
+}
+
+bool optionalBoolean(const Json &object, const char *key, bool fallback, const std::string &path)
+{
+    const auto found = object.find(key);
+    if (found == object.end()) return fallback;
+    return booleanField(object, key, path);
 }
 
 void allowFields(const Json &object, std::initializer_list<const char *> allowed, const std::string &path)
@@ -119,7 +132,8 @@ StationConfig parseStation(const char *text)
             IR_BAD_ARGUMENT, "station.schema_version is unsupported");
 
     const auto &acquisition = objectField(root, "acquisition", "station");
-    allowFields(acquisition, {"backend", "source", "valid_bits", "max_batch_bytes"}, "station.acquisition");
+    allowFields(acquisition, {"backend", "source", "valid_bits", "max_batch_bytes", "queue_capacity"},
+                "station.acquisition");
     const auto backend = stringField(acquisition, "backend", "station.acquisition");
     StationConfig station;
     if (backend == "raw_replay") station.backend = IR_RAW_REPLAY;
@@ -140,6 +154,8 @@ StationConfig parseStation(const char *text)
     station.validBits = integerField(acquisition, "valid_bits", 0, 16, "station.acquisition");
     station.maxBatchBytes = optionalBytes(acquisition, "max_batch_bytes", station.maxBatchBytes,
                                           "station.acquisition");
+    station.queueCapacity = optionalInteger(acquisition, "queue_capacity", station.queueCapacity,
+                                            2, 4096, "station.acquisition");
 
     const auto devicesField = root.find("devices");
     if (devicesField == root.end()) return station;
@@ -160,9 +176,9 @@ StationConfig parseStation(const char *text)
             allowFields(connection, {"host", "tcp_port", "head", "expected_head_serial", "timeout_ms"},
                         path + ".connection");
             (void)stringField(connection, "host", path + ".connection");
-            optionalInteger(connection, "tcp_port", 1, 65535, path + ".connection");
-            optionalInteger(connection, "head", -1, 1, path + ".connection");
-            optionalInteger(connection, "timeout_ms", 1, 60000, path + ".connection");
+            (void)optionalInteger(connection, "tcp_port", 2101, 1, 65535, path + ".connection");
+            (void)optionalInteger(connection, "head", -1, -1, 1, path + ".connection");
+            (void)optionalInteger(connection, "timeout_ms", 3000, 1, 60000, path + ".connection");
             const auto expected = optionalString(connection, "expected_head_serial", "",
                                                  path + ".connection");
             const auto head = connection.contains("head")
@@ -172,21 +188,20 @@ StationConfig parseStation(const char *text)
         } else if (config.kind == IR_IT6332A) {
             allowFields(connection, {"port", "baud_rate", "timeout_ms"}, path + ".connection");
             (void)stringField(connection, "port", path + ".connection");
-            optionalInteger(connection, "baud_rate", 1200, 921600, path + ".connection");
-            optionalInteger(connection, "timeout_ms", 1, 60000, path + ".connection");
+            (void)optionalInteger(connection, "baud_rate", 115200, 1200, 921600, path + ".connection");
+            (void)optionalInteger(connection, "timeout_ms", 1200, 1, 60000, path + ".connection");
         } else {
             allowFields(connection, {"port", "timeout_ms"}, path + ".connection");
             (void)stringField(connection, "port", path + ".connection");
-            optionalInteger(connection, "timeout_ms", 1, 60000, path + ".connection");
+            (void)optionalInteger(connection, "timeout_ms", 3000, 1, 60000, path + ".connection");
         }
         station.devices.emplace(device.key(), std::move(config));
     }
     return station;
 }
 
-namespace {
-BlackbodyStep parseBlackbody(StepRef ref, const Json &fields, const std::string &path,
-                            const StationConfig &station)
+BlackbodyStep parseBlackbodyStep(StepRef ref, const Json &fields, const std::string &path,
+                                 const StationConfig &station)
 {
     allowFields(fields, {"id", "type", "device", "target_c", "tolerance_c",
         "stable_window_ms", "timeout_ms", "require_device_stable"}, path);
@@ -208,8 +223,8 @@ BlackbodyStep parseBlackbody(StepRef ref, const Json &fields, const std::string 
     return {std::move(ref), std::move(alias), target};
 }
 
-PowerStep parsePower(StepRef ref, const std::string &type, const Json &fields,
-                    const std::string &path, const StationConfig &station)
+PowerStep parsePowerStep(StepRef ref, const std::string &type, const Json &fields,
+                         const std::string &path, const StationConfig &station)
 {
     PowerStep step;
     step.ref = std::move(ref);
@@ -238,6 +253,12 @@ PowerStep parsePower(StepRef ref, const std::string &type, const Json &fields,
     }
     return step;
 }
+
+int detectRecipeSchemaVersion(const char *text)
+{
+    const auto root = parseJson(text, "recipe JSON");
+    require(root.is_object(), IR_BAD_ARGUMENT, "recipe JSON must contain an object");
+    return integerField(root, "schema_version", 1, 2, "recipe");
 }
 
 RecipeConfig parseRecipe(const char *text, const StationConfig &station)
@@ -270,12 +291,12 @@ RecipeConfig parseRecipe(const char *text, const StationConfig &station)
 
         if (type == "blackbody_stabilize") {
             require(!captureSeen, IR_BAD_ARGUMENT, path + " must precede capture");
-            auto step = parseBlackbody(std::move(ref), fields, path, station);
+            auto step = parseBlackbodyStep(std::move(ref), fields, path, station);
             usedDevices.insert(step.device);
             recipe.controls.emplace_back(std::move(step));
         } else if (type == "power_set" || type == "power_output" || type == "power_read") {
             require(!captureSeen, IR_BAD_ARGUMENT, path + " must precede capture");
-            auto step = parsePower(std::move(ref), type, fields, path, station);
+            auto step = parsePowerStep(std::move(ref), type, fields, path, station);
             usedDevices.insert(step.device);
             recipe.controls.emplace_back(std::move(step));
         } else if (type == "capture") {

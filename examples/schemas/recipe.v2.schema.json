@@ -1,0 +1,525 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ir-sdk.local/schemas/recipe.v2.schema.json",
+  "title": "IR SDK Measurement Recipe Configuration (schema_version 2)",
+  "description": "Flexible multi-condition, optional-archive, open-operator, and periodic repeat_burst measurement recipe.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "recipe_id",
+    "steps"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional JSON Schema reference for editor validation and autocompletion."
+    },
+    "schema_version": {
+      "const": 2,
+      "description": "Recipe schema version 2."
+    },
+    "recipe_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Product or test procedure identifier written into result.json."
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/topLevelStep"
+      },
+      "description": "Ordered sequence of controls, flush, capture, analyze, optional save_raw, and repeat_burst blocks."
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "blackbody_standby": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/blackbodyStandbyEntry"
+          }
+        }
+      }
+    },
+    "limits": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/limit"
+      }
+    }
+  },
+  "$defs": {
+    "nonEmptyIdentifier": {
+      "type": "string",
+      "minLength": 1
+    },
+    "relativeSingleName": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[^/\\\\:]+$"
+    },
+    "blackbodyStandbyEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "device",
+        "target_c"
+      ],
+      "properties": {
+        "device": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        },
+        "target_c": {
+          "type": "number",
+          "minimum": -60.0,
+          "maximum": 100.0
+        }
+      }
+    },
+    "blackbodyStabilizeStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "device",
+        "target_c",
+        "tolerance_c",
+        "stable_window_ms",
+        "timeout_ms",
+        "require_device_stable"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        },
+        "type": {
+          "const": "blackbody_stabilize"
+        },
+        "device": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        },
+        "target_c": {
+          "type": "number",
+          "minimum": -60.0,
+          "maximum": 100.0
+        },
+        "tolerance_c": {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        },
+        "stable_window_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600000
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        },
+        "require_device_stable": {
+          "type": "boolean"
+        }
+      }
+    },
+    "powerSetStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "device",
+        "channel",
+        "voltage_v",
+        "current_limit_a"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        },
+        "type": {
+          "const": "power_set"
+        },
+        "device": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        },
+        "channel": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "voltage_v": {
+          "type": "number",
+          "minimum": 0.0
+        },
+        "current_limit_a": {
+          "type": "number",
+          "exclusiveMinimum": 0.0
+        }
+      }
+    },
+    "powerOutputStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "device",
+        "channel",
+        "enabled"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        },
+        "type": {
+          "const": "power_output"
+        },
+        "device": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        },
+        "channel": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "off_after_run": {
+          "type": "boolean"
+        }
+      },
+      "if": {
+        "properties": {
+          "enabled": {
+            "const": true
+          }
+        },
+        "required": [
+          "enabled"
+        ]
+      },
+      "then": {
+        "required": [
+          "off_after_run"
+        ],
+        "properties": {
+          "off_after_run": {
+            "const": true
+          }
+        }
+      }
+    },
+    "powerReadStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "device",
+        "channel"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        },
+        "type": {
+          "const": "power_read"
+        },
+        "device": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        },
+        "channel": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        }
+      }
+    },
+    "flushFramesStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        },
+        "type": {
+          "const": "flush_frames"
+        },
+        "discard_frames": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000,
+          "default": 1
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000,
+          "default": 2000
+        }
+      }
+    },
+    "captureStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "frames",
+        "frame_timeout_ms"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        },
+        "type": {
+          "const": "capture"
+        },
+        "frames": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "frame_timeout_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "output": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        }
+      }
+    },
+    "analyzeStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "method"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        },
+        "type": {
+          "const": "analyze"
+        },
+        "method": {
+          "type": "string",
+          "enum": [
+            "temporal_noise",
+            "roi_mean",
+            "frame_stats",
+            "map_summary",
+            "two_point_nuc",
+            "spatial_filter",
+            "map_binary_op",
+            "threshold_mask",
+            "mask_combine",
+            "gb_evaluate",
+            "gjb_evaluate",
+            "gjb_burst",
+            "noise3d_compute",
+            "channel_spectrum"
+          ]
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 1
+        },
+        "name": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        },
+        "input": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        },
+        "inputs": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/nonEmptyIdentifier"
+          }
+        },
+        "params": {
+          "type": "object"
+        },
+        "outputs": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/nonEmptyIdentifier"
+          }
+        }
+      }
+    },
+    "saveRawStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "input"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        },
+        "type": {
+          "const": "save_raw"
+        },
+        "input": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        },
+        "subdir": {
+          "$ref": "#/$defs/relativeSingleName"
+        }
+      }
+    },
+    "innerStep": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/blackbodyStabilizeStep"
+        },
+        {
+          "$ref": "#/$defs/powerSetStep"
+        },
+        {
+          "$ref": "#/$defs/powerOutputStep"
+        },
+        {
+          "$ref": "#/$defs/powerReadStep"
+        },
+        {
+          "$ref": "#/$defs/flushFramesStep"
+        },
+        {
+          "$ref": "#/$defs/captureStep"
+        },
+        {
+          "$ref": "#/$defs/analyzeStep"
+        }
+      ]
+    },
+    "repeatBurstStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "steps"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        },
+        "type": {
+          "const": "repeat_burst"
+        },
+        "max_iterations": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647,
+          "default": 0
+        },
+        "duration_sec": {
+          "type": "number",
+          "minimum": 0.0,
+          "default": 0.0
+        },
+        "interval_sec": {
+          "type": "number",
+          "minimum": 0.0,
+          "default": 0.0
+        },
+        "csv_file": {
+          "$ref": "#/$defs/relativeSingleName",
+          "default": "burst_summary.csv"
+        },
+        "record_metrics": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/nonEmptyIdentifier"
+          }
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/innerStep"
+          }
+        }
+      }
+    },
+    "topLevelStep": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/blackbodyStabilizeStep"
+        },
+        {
+          "$ref": "#/$defs/powerSetStep"
+        },
+        {
+          "$ref": "#/$defs/powerOutputStep"
+        },
+        {
+          "$ref": "#/$defs/powerReadStep"
+        },
+        {
+          "$ref": "#/$defs/flushFramesStep"
+        },
+        {
+          "$ref": "#/$defs/captureStep"
+        },
+        {
+          "$ref": "#/$defs/analyzeStep"
+        },
+        {
+          "$ref": "#/$defs/saveRawStep"
+        },
+        {
+          "$ref": "#/$defs/repeatBurstStep"
+        }
+      ]
+    },
+    "limit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "metric",
+        "operator",
+        "value",
+        "unit"
+      ],
+      "properties": {
+        "metric": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        },
+        "operator": {
+          "type": "string",
+          "enum": [
+            "max",
+            "min"
+          ]
+        },
+        "value": {
+          "type": "number"
+        },
+        "unit": {
+          "$ref": "#/$defs/nonEmptyIdentifier"
+        }
+      }
+    }
+  }
+}

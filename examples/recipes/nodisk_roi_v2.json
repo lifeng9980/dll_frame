@@ -1,0 +1,68 @@
+{
+  "$schema": "../schemas/recipe.v2.schema.json",
+  "schema_version": 2,
+  "recipe_id": "example-nodisk-roi-v2",
+  "steps": [
+    {
+      "id": "b0",
+      "type": "capture",
+      "frames": 2,
+      "frame_timeout_ms": 0,
+      "output": "raw_batch"
+    },
+    {
+      "id": "s_stats",
+      "type": "analyze",
+      "method": "frame_stats",
+      "name": "stats",
+      "input": "raw_batch",
+      "params": {
+        "sample_std": 0
+      },
+      "outputs": {
+        "mean_map": "mean_map",
+        "std_map": "vn_map"
+      }
+    },
+    {
+      "id": "s_sum",
+      "type": "analyze",
+      "method": "map_summary",
+      "name": "summary",
+      "inputs": {
+        "map": "mean_map"
+      },
+      "params": {
+        "p_low": 5.0,
+        "p_high": 95.0
+      }
+    },
+    {
+      "id": "s_roi",
+      "type": "analyze",
+      "method": "roi_mean",
+      "name": "left",
+      "input": "raw_batch",
+      "params": {
+        "x": 0,
+        "y": 0,
+        "width": 1,
+        "height": 2
+      }
+    }
+  ],
+  "limits": [
+    {
+      "metric": "summary.mean",
+      "operator": "max",
+      "value": 60.0,
+      "unit": "DN"
+    },
+    {
+      "metric": "left.mean_dn",
+      "operator": "max",
+      "value": 45.0,
+      "unit": "DN"
+    }
+  ]
+}

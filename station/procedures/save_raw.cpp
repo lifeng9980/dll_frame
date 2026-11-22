@@ -157,15 +157,12 @@ void checkDestination(const fs::path &path)
             "Specify a new capture directory under an existing parent");
 }
 
-void saveFrameBatch(const fs::path &path, IRGeometry geometry,
-    const std::vector<uint16_t> &frames, const std::vector<IRFrameStamp> &stamps,
-    const std::string &resultJson)
+void writeFrameBatchFiles(const fs::path &directory, IRGeometry geometry,
+    const std::vector<uint16_t> &frames, const std::vector<IRFrameStamp> &stamps)
 {
     static_assert(std::endian::native == std::endian::little);
-    checkDestination(path);
-    StagingDirectory stage(path.parent_path().empty() ? fs::current_path() : path.parent_path());
-
-    writeFile(stage.path() / "frames.raw", reinterpret_cast<const char *>(frames.data()),
+    fs::create_directories(directory);
+    writeFile(directory / "frames.raw", reinterpret_cast<const char *>(frames.data()),
               frames.size() * sizeof(uint16_t));
 
     std::ostringstream csv;
@@ -191,9 +188,58 @@ void saveFrameBatch(const fs::path &path, IRGeometry geometry,
             << ((stamp.fields & IR_PIXELS_INVERTED) ? 1 : 0) << '\n';
     }
     const auto csvText = csv.str();
-    writeFile(stage.path() / "frames.csv", csvText.data(), csvText.size());
+    writeFile(directory / "frames.csv", csvText.data(), csvText.size());
+}
+
+void saveRecipeArtifacts(const fs::path &destination, const std::vector<SavedBatchRef> &batches,
+    const std::string &resultJson)
+{
+    static_assert(std::endian::native == std::endian::little);
+    checkDestination(destination);
+    StagingDirectory stage(destination.parent_path().empty() ? fs::current_path() : destination.parent_path());
+
+    for (const auto &batch : batches) {
+        require(batch.frames != nullptr && batch.stamps != nullptr, IR_NULL_POINTER, "Missing batch buffer");
+        const auto targetDir = batch.subdir.empty()
+            ? stage.path()
+            : (stage.path() / fs::path(reinterpret_cast<const char8_t *>(batch.subdir.c_str())));
+        writeFrameBatchFiles(targetDir, batch.geometry, *batch.frames, *batch.stamps);
+    }
     writeFile(stage.path() / "result.json", resultJson.data(), resultJson.size());
-    stage.publish(path);
+    stage.publish(destination);
+}
+
+void writeTextFileAtomicOrDirect(const fs::path &filePath, const std::string &content)
+{
+    const auto parent = filePath.parent_path();
+    if (!parent.empty())
+        fs::create_directories(parent);
+    fs::path tmpPath = filePath;
+    tmpPath += ".tmp";
+    writeFile(tmpPath, content.data(), content.size());
+#ifdef _WIN32
+    if (!MoveFileExW(tmpPath.c_str(), filePath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        std::error_code ec;
+        fs::remove(tmpPath, ec);
+        throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
+                                "Cannot finalize output text file");
+    }
+#else
+    std::error_code ec;
+    fs::rename(tmpPath, filePath, ec);
+    if (ec) {
+        std::error_code rmEc;
+        fs::remove(tmpPath, rmEc);
+        throw fs::filesystem_error("Cannot finalize output text file", filePath, ec);
+    }
+#endif
+}
+
+void saveFrameBatch(const fs::path &path, IRGeometry geometry,
+    const std::vector<uint16_t> &frames, const std::vector<IRFrameStamp> &stamps,
+    const std::string &resultJson)
+{
+    saveRecipeArtifacts(path, {{"", geometry, &frames, &stamps}}, resultJson);
 }
 
 void saveNoiseRun(const fs::path &path, const IRNoiseRecipe &recipe, int backend,

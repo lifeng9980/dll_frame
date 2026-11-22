@@ -134,6 +134,7 @@ void acquireBatch(ir::acquisition::Capture &capture, const StationConfig &statio
 
     try {
         progress.enter(IR_RECIPE_STAGE_PREPARE, &recipe.capture.ref);
+        capture.setQueueCapacity(station.queueCapacity);
         batch.geometry = capture.open(station.backend, station.source.c_str(), station.validBits);
         sourceOpen = true;
         capture.checkStop();
@@ -298,7 +299,11 @@ extern "C" int32_t IR_CheckRecipeJson(const char *stationJson, const char *recip
 {
     return guarded(err, errBytes, [&] {
         const auto station = parseStation(stationJson);
-        (void)parseRecipe(recipeJson, station);
+        const int schemaVer = detectRecipeSchemaVersion(recipeJson);
+        if (schemaVer == 2)
+            (void)parseRecipeV2(recipeJson, station);
+        else
+            (void)parseRecipe(recipeJson, station);
     });
 }
 
@@ -312,9 +317,17 @@ extern "C" int32_t IR_RunRecipeJson(const char *stationJson, const char *recipeJ
         progress.enter(IR_RECIPE_STAGE_VALIDATE);
         const auto station = parseStation(stationJson);
         measurement.frames().checkStop();
-        const auto recipe = parseRecipe(recipeJson, station);
+        const int schemaVer = detectRecipeSchemaVersion(recipeJson);
         measurement.frames().checkStop();
-        runRecipe(measurement.frames(), station, recipe, directory, progress);
+        if (schemaVer == 2) {
+            const auto recipe = parseRecipeV2(recipeJson, station);
+            measurement.frames().checkStop();
+            runRecipeV2(measurement.frames(), station, recipe, directory, report);
+        } else {
+            const auto recipe = parseRecipe(recipeJson, station);
+            measurement.frames().checkStop();
+            runRecipe(measurement.frames(), station, recipe, directory, progress);
+        }
     });
     if (result) *result = report;
     return status;
