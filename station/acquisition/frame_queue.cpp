@@ -33,7 +33,7 @@ void FrameQueue::setIdleCapacity(int32_t capacity)
     }
     {
         std::lock_guard<std::mutex> lock(previewMutex_);
-        configuredCapacity_ = capacity;
+        configuredCapacity_.store(capacity, std::memory_order_relaxed);
     }
 }
 
@@ -65,12 +65,12 @@ void FrameQueue::configure(IRGeometry geometry, int32_t capacity)
         hasLatest_ = false;
         latestPixels_.assign(static_cast<size_t>(pxCount), 0);
         latestStamp_ = {};
-        framesReceived_ = 0;
-        framesDelivered_ = 0;
-        framesDropped_ = 0;
-        previewFrames_ = 0;
-        configuredCapacity_ = capacity;
-        queueDepth_ = 0;
+        framesReceived_.store(0, std::memory_order_relaxed);
+        framesDelivered_.store(0, std::memory_order_relaxed);
+        framesDropped_.store(0, std::memory_order_relaxed);
+        previewFrames_.store(0, std::memory_order_relaxed);
+        configuredCapacity_.store(capacity, std::memory_order_relaxed);
+        queueDepth_.store(0, std::memory_order_relaxed);
         running_ = 0;
         fpsTimestampsNs_.fill(0);
         fpsHead_ = 0;
@@ -112,7 +112,7 @@ void FrameQueue::beginStartSession(IRGeometry geometry, int32_t capacity)
         latestPixels_.assign(static_cast<size_t>(pxCount), 0);
         latestStamp_ = {};
         configuredCapacity_ = capacity;
-        queueDepth_ = 0;
+        queueDepth_.store(0, std::memory_order_relaxed);
         running_ = 1;
         fpsTimestampsNs_.fill(0);
         fpsHead_ = 0;
@@ -133,7 +133,7 @@ void FrameQueue::resumeSession()
     }
     {
         std::lock_guard<std::mutex> lock(previewMutex_);
-        queueDepth_ = 0;
+        queueDepth_.store(0, std::memory_order_relaxed);
         running_ = 1;
     }
 }
@@ -177,7 +177,7 @@ void FrameQueue::setRunning(bool running)
 }
 
 void FrameQueue::recordPreviewLocked(const uint16_t *pixelData, const IRFrameStamp &stamp,
-                                     int64_t pxCount, bool countDelivered)
+                                     int64_t pxCount)
 {
     if (!pixelData || pxCount <= 0 || static_cast<int64_t>(latestPixels_.size()) < pxCount)
         return;
@@ -185,11 +185,7 @@ void FrameQueue::recordPreviewLocked(const uint16_t *pixelData, const IRFrameSta
     std::copy_n(pixelData, static_cast<size_t>(pxCount), latestPixels_.data());
     latestStamp_ = stamp;
     hasLatest_ = true;
-    ++framesReceived_;
-    ++previewFrames_;
-    framesDropped_ += stamp.lost_frames;
-    if (countDelivered)
-        ++framesDelivered_;
+    previewFrames_.fetch_add(1, std::memory_order_relaxed);
 
     const int64_t nowNs = steadyNowNs();
     const size_t n = fpsTimestampsNs_.size();
@@ -206,11 +202,8 @@ void FrameQueue::push(const uint16_t *pixelData, const IRFrameStamp &stamp)
 {
     if (!pixelData)
         return;
-
-    {
-        std::lock_guard<std::mutex> lock(previewMutex_);
-        recordPreviewLocked(pixelData, stamp, previewPixelCount_, false);
-    }
+    framesReceived_.fetch_add(1, std::memory_order_relaxed);
+    framesDropped_.fetch_add(stamp.lost_frames, std::memory_order_relaxed);
 
     bool overflowed = false;
     int32_t newDepth = 0;
@@ -243,25 +236,29 @@ void FrameQueue::push(const uint16_t *pixelData, const IRFrameStamp &stamp)
         }
     }
 
-    {
-        std::lock_guard<std::mutex> lock(previewMutex_);
-        queueDepth_ = newDepth;
-        if (overflowed)
-            ++framesDropped_;
-    }
+    queueDepth_.store(newDepth, std::memory_order_relaxed);
+    if (overflowed)
+        framesDropped_.fetch_add(1, std::memory_order_relaxed);
+    std::unique_lock previewLock(previewMutex_, std::try_to_lock);
+    if (previewLock.owns_lock())
+        recordPreviewLocked(pixelData, stamp, previewPixelCount_);
     queueCv_.notify_one();
 }
 
 void FrameQueue::publishPulledFrame(const uint16_t *pixelData, const IRFrameStamp &stamp, bool delivered)
 {
-    std::lock_guard<std::mutex> lock(previewMutex_);
-    recordPreviewLocked(pixelData, stamp, previewPixelCount_, delivered);
+    framesReceived_.fetch_add(1, std::memory_order_relaxed);
+    framesDropped_.fetch_add(stamp.lost_frames, std::memory_order_relaxed);
+    if (delivered)
+        framesDelivered_.fetch_add(1, std::memory_order_relaxed);
+    std::unique_lock lock(previewMutex_, std::try_to_lock);
+    if (lock.owns_lock())
+        recordPreviewLocked(pixelData, stamp, previewPixelCount_);
 }
 
 void FrameQueue::recordDelivered()
 {
-    std::lock_guard<std::mutex> lock(previewMutex_);
-    ++framesDelivered_;
+    framesDelivered_.fetch_add(1, std::memory_order_relaxed);
 }
 
 FrameQueue::PopStatus FrameQueue::pop(uint16_t *outPixels, IRFrameStamp &outStamp, int32_t timeoutMs,
@@ -308,8 +305,7 @@ FrameQueue::PopStatus FrameQueue::pop(uint16_t *outPixels, IRFrameStamp &outStam
             }
         }
         if (popped) {
-            std::lock_guard<std::mutex> pLock(previewMutex_);
-            queueDepth_ = newDepth;
+            queueDepth_.store(newDepth, std::memory_order_relaxed);
             return PopStatus::ok;
         }
     }
@@ -325,10 +321,7 @@ void FrameQueue::clearMeasurementQueue()
         terminalStatus_ = IR_OK;
         terminalMessage_.clear();
     }
-    {
-        std::lock_guard<std::mutex> lock(previewMutex_);
-        queueDepth_ = 0;
-    }
+    queueDepth_.store(0, std::memory_order_relaxed);
 }
 
 void FrameQueue::setTerminalError(int32_t code, std::string message)
@@ -365,7 +358,9 @@ void FrameQueue::tryReadLatest(uint16_t *outPixels, int64_t pixelCapacity, IRGeo
                                IRFrameStamp *stamp, int32_t &hasFrame)
 {
     hasFrame = 0;
-    std::lock_guard<std::mutex> lock(previewMutex_);
+    std::unique_lock<std::mutex> lock(previewMutex_, std::try_to_lock);
+    if (!lock.owns_lock())
+        return;
     if (geometry)
         *geometry = previewGeometry_;
     if (!hasLatest_)
@@ -382,12 +377,12 @@ IRCaptureStats FrameQueue::stats()
 {
     std::lock_guard<std::mutex> lock(previewMutex_);
     IRCaptureStats out{};
-    out.frames_received = framesReceived_;
-    out.frames_delivered = framesDelivered_;
-    out.frames_dropped = framesDropped_;
-    out.preview_frames = previewFrames_;
-    out.queue_capacity = configuredCapacity_;
-    out.queue_depth = queueDepth_;
+    out.frames_received = framesReceived_.load(std::memory_order_relaxed);
+    out.frames_delivered = framesDelivered_.load(std::memory_order_relaxed);
+    out.frames_dropped = framesDropped_.load(std::memory_order_relaxed);
+    out.preview_frames = previewFrames_.load(std::memory_order_relaxed);
+    out.queue_capacity = configuredCapacity_.load(std::memory_order_relaxed);
+    out.queue_depth = queueDepth_.load(std::memory_order_relaxed);
     out.width = previewGeometry_.width;
     out.height = previewGeometry_.height;
     out.running = running_;

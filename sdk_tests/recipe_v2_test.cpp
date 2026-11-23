@@ -513,6 +513,131 @@ void testPreflightRejections()
     };
     CHECK(IR_CheckRecipeJson(stOk.c_str(), rBadCsv.dump().c_str(), err, sizeof err) == IR_BAD_ARGUMENT);
 
+    auto repeatWithCsv = [](const std::string &id, const std::string &csvFile) {
+        return Json{
+            {"id", id}, {"type", "repeat_burst"}, {"max_iterations", 1},
+            {"csv_file", csvFile},
+            {"steps", Json::array({
+                {{"id", id + "_capture"}, {"type", "capture"},
+                 {"frames", 1}, {"frame_timeout_ms", 0}}
+            })}
+        };
+    };
+    const auto checkInvalidOutputNames = [&](Json steps, const char *recipeId) {
+        const Json recipe{{"schema_version", 2}, {"recipe_id", recipeId}, {"steps", std::move(steps)}};
+        return IR_CheckRecipeJson(stOk.c_str(), recipe.dump().c_str(), err, sizeof err);
+    };
+    CHECK(checkInvalidOutputNames(Json::array({repeatWithCsv("reserved", "result.json")}),
+                                  "reserved-output") == IR_BAD_ARGUMENT);
+    CHECK(checkInvalidOutputNames(Json::array({repeatWithCsv("device", "CON.csv")}),
+                                  "reserved-device") == IR_BAD_ARGUMENT);
+    CHECK(checkInvalidOutputNames(Json::array({
+        repeatWithCsv("upper", "Burst.csv"), repeatWithCsv("lower", "burst.CSV")}),
+        "case-fold-csv") == IR_BAD_ARGUMENT);
+    CHECK(checkInvalidOutputNames(Json::array({
+        {{"id", "source"}, {"type", "capture"}, {"frames", 1}, {"frame_timeout_ms", 0}},
+        {{"id", "archive"}, {"type", "save_raw"}, {"input", "source"}, {"subdir", "burst.csv"}},
+        repeatWithCsv("loop", "Burst.CSV")}), "csv-directory-collision") == IR_BAD_ARGUMENT);
+
+    const Json budgetRecipe{
+        {"schema_version", 2}, {"recipe_id", "storage-budget"},
+        {"steps", Json::array({
+            {{"id", "capture"}, {"type", "capture"}, {"frames", 100},
+             {"frame_timeout_ms", 0}}
+        })}
+    };
+    Json limitedStation = makeStation(fixture);
+    limitedStation["acquisition"]["queue_capacity"] = 2;
+    limitedStation["acquisition"]["max_inflight_bytes"] = 1500;
+    const auto outDir = root.path() / "storage_budget_out";
+    IRRecipeResult result{};
+    CHECK(IR_RunRecipeJson(limitedStation.dump().c_str(), budgetRecipe.dump().c_str(),
+                           utf8(outDir).c_str(), &result, err, sizeof err) == IR_BAD_ARGUMENT);
+    CHECK(std::string(err).find("max_inflight_bytes") != std::string::npos);
+    CHECK(!fs::exists(outDir));
+
+    const auto repeatedFixture = root.path() / "repeated_capture_fixture";
+    fs::create_directories(repeatedFixture);
+    {
+        std::ofstream raw(repeatedFixture / "frames.raw", std::ios::binary);
+        for (uint16_t value = 0; value < 320; ++value)
+            raw.write(reinterpret_cast<const char *>(&value), sizeof value);
+        std::ofstream csv(repeatedFixture / "frames.csv", std::ios::binary);
+        csv << "frame_index,width,height,stride_bytes,pixel_format,bit_depth,endianness\n";
+        for (int frame = 0; frame < 20; ++frame)
+            csv << frame << ",4,4,8,RAW16_LE,16,little\n";
+    }
+    Json reusedSlotRecipe{
+        {"schema_version", 2}, {"recipe_id", "reused-capture-slot"},
+        {"steps", Json::array()}
+    };
+    for (int index = 0; index < 10; ++index) {
+        reusedSlotRecipe["steps"].push_back({
+            {"id", "capture_" + std::to_string(index)}, {"type", "capture"},
+            {"frames", 2}, {"frame_timeout_ms", 0}, {"output", "same_batch"}
+        });
+    }
+    reusedSlotRecipe["steps"].push_back({
+        {"id", "archive"}, {"type", "save_raw"}, {"input", "same_batch"}
+    });
+    Json reuseStation = makeStation(repeatedFixture);
+    reuseStation["acquisition"]["max_inflight_bytes"] = 5500;
+    const auto reuseOut = root.path() / "reused_slot_output";
+    CHECK(IR_RunRecipeJson(reuseStation.dump().c_str(), reusedSlotRecipe.dump().c_str(),
+                           utf8(reuseOut).c_str(), &result, err, sizeof err) == IR_OK);
+    CHECK(result.completed_frames == 20);
+    CHECK(fs::is_regular_file(reuseOut / "frames.raw"));
+
+    const Json archiveThenReuseRecipe{
+        {"schema_version", 2}, {"recipe_id", "archive-before-reuse"},
+        {"steps", Json::array({
+            {{"id", "capture_first"}, {"type", "capture"}, {"frames", 2},
+             {"frame_timeout_ms", 0}, {"output", "same_batch"}},
+            {{"id", "archive_first"}, {"type", "save_raw"},
+             {"input", "same_batch"}, {"subdir", "first"}},
+            {{"id", "capture_second"}, {"type", "capture"}, {"frames", 18},
+             {"frame_timeout_ms", 0}, {"output", "same_batch"}},
+            {{"id", "archive_second"}, {"type", "save_raw"},
+             {"input", "same_batch"}, {"subdir", "second"}}
+        })}
+    };
+    const auto archiveReuseOut = root.path() / "archive_before_reuse_output";
+    auto archiveStation = makeStation(repeatedFixture, 2);
+    // 2 帧队列加上 18 帧的槽位及 2 + 18 帧的快照可以保留在预算内。
+    archiveStation["acquisition"]["max_inflight_bytes"] = 3000;
+    CHECK(IR_RunRecipeJson(archiveStation.dump().c_str(), archiveThenReuseRecipe.dump().c_str(),
+                           utf8(archiveReuseOut).c_str(), &result, err, sizeof err) == IR_OK);
+    CHECK(result.completed_frames == 20);
+    const auto rawMatches = [](const fs::path &path, uint16_t firstValue, size_t pixelCount) {
+        const std::string bytes = readText(path);
+        if (bytes.size() != pixelCount * sizeof(uint16_t))
+            return false;
+        for (size_t index = 0; index < pixelCount; ++index) {
+            const uint16_t expected = static_cast<uint16_t>(firstValue + index);
+            if (static_cast<uint8_t>(bytes[index * 2]) != static_cast<uint8_t>(expected & 0xff) ||
+                static_cast<uint8_t>(bytes[index * 2 + 1]) != static_cast<uint8_t>(expected >> 8))
+                return false;
+        }
+        return true;
+    };
+    CHECK(rawMatches(archiveReuseOut / "first" / "frames.raw", 0, 2 * 16));
+    CHECK(rawMatches(archiveReuseOut / "second" / "frames.raw", 32, 18 * 16));
+
+    const auto existingOut = root.path() / "existing_output";
+    fs::create_directory(existingOut);
+    {
+        std::ofstream marker(existingOut / "keep.txt", std::ios::binary);
+        marker << "preserve";
+    }
+    const Json oneFrameRecipe{
+        {"schema_version", 2}, {"recipe_id", "existing-output-check"},
+        {"steps", Json::array({{{"id", "capture"}, {"type", "capture"},
+                                 {"frames", 1}, {"frame_timeout_ms", 0}}})}
+    };
+    CHECK(IR_RunRecipeJson(stOk.c_str(), oneFrameRecipe.dump().c_str(),
+                           utf8(existingOut).c_str(), &result, err, sizeof err) == IR_IO_ERROR);
+    CHECK(readText(existingOut / "keep.txt") == "preserve");
+
     // 6. Invalid station queue_capacity
     const Json rSimple = {
         {"schema_version", 2},
@@ -521,6 +646,45 @@ void testPreflightRejections()
     };
     CHECK(IR_CheckRecipeJson(makeStation(fixture, 1).dump().c_str(), rSimple.dump().c_str(), err, sizeof err) == IR_BAD_ARGUMENT);
     CHECK(IR_CheckRecipeJson(makeStation(fixture, 5000).dump().c_str(), rSimple.dump().c_str(), err, sizeof err) == IR_BAD_ARGUMENT);
+
+    IRGeometry existingGeometry{};
+    CHECK(IR_OpenFrames(IR_RAW_REPLAY, utf8(fixture).c_str(), 16,
+                        &existingGeometry, err, sizeof err) == IR_OK);
+    IRCaptureStats existingStats{};
+    CHECK(IR_GetCaptureStats(&existingStats, err, sizeof err) == IR_OK);
+    const int32_t existingCapacity = existingStats.queue_capacity;
+    const Json smallerQueueStation = makeStation(fixture, existingCapacity == 2 ? 3 : 2);
+    const auto existingSourceRecipeOutput = root.path() / "existing_source_recipe_output";
+    IRRecipeResult existingSourceResult{};
+    CHECK(IR_RunRecipeJson(smallerQueueStation.dump().c_str(), rSimple.dump().c_str(),
+                           utf8(existingSourceRecipeOutput).c_str(), &existingSourceResult,
+                           err, sizeof err) == IR_BUSY);
+    CHECK(!fs::exists(existingSourceRecipeOutput));
+    CHECK(IR_GetCaptureStats(&existingStats, err, sizeof err) == IR_OK);
+    CHECK(existingStats.queue_capacity == existingCapacity);
+    CHECK(IR_StartFrames(err, sizeof err) == IR_OK);
+    CHECK(IR_StopFrames(err, sizeof err) == IR_OK);
+    CHECK(IR_CloseFrames(err, sizeof err) == IR_OK);
+
+    const Json nestedCaptureFailure{
+        {"schema_version", 2}, {"recipe_id", "nested-failure-index"},
+        {"steps", Json::array({
+            {{"id", "before"}, {"type", "capture"}, {"frames", 1},
+             {"frame_timeout_ms", 0}},
+            {{"id", "burst"}, {"type", "repeat_burst"}, {"max_iterations", 1},
+             {"steps", Json::array({
+                 {{"id", "exhaust_source"}, {"type", "capture"}, {"frames", 20},
+                  {"frame_timeout_ms", 0}}
+             })}}
+        })}
+    };
+    const auto nestedFailureOutput = root.path() / "nested_failure_output";
+    IRRecipeResult nestedFailureResult{};
+    CHECK(IR_RunRecipeJson(stOk.c_str(), nestedCaptureFailure.dump().c_str(),
+                           utf8(nestedFailureOutput).c_str(), &nestedFailureResult,
+                           err, sizeof err) == IR_END_OF_STREAM);
+    CHECK(nestedFailureResult.failed_stage == IR_RECIPE_STAGE_CAPTURE);
+    CHECK(nestedFailureResult.failed_step_index == 1);
 }
 
 void testGaussianFilterAndFlickerDetectV2()

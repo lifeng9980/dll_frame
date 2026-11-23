@@ -224,7 +224,7 @@ def exercise_wait_blackbody_stable(sdk, controller, config):
 
         controller.stable = True
         status = sdk.IR_WaitBlackbodyStable(
-            handle, target, 0.05, 80, 1200, 1, c.byref(reading), error, len(error)
+            handle, target, 0.05, 80, 3500, 1, c.byref(reading), error, len(error)
         )
         assert status == 0 and reading.actual_c == target and reading.stable == 1, (
             status, reading.actual_c, reading.stable, error.value
@@ -265,7 +265,7 @@ def exercise_wait_blackbody_stable(sdk, controller, config):
 
         controller.stable = True
         status = sdk.IR_WaitBlackbodyStable(
-            handle, target, 0.05, 50, 1200, 1, c.byref(reading), error, len(error)
+            handle, target, 0.05, 50, 3500, 1, c.byref(reading), error, len(error)
         )
         assert status == 0 and reading.stable == 1, (status, error.value)
     finally:

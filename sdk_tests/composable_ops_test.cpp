@@ -512,7 +512,7 @@ void testFft2dMagnitude()
     for (double m : magMasked)
         CHECK(std::isfinite(m));
 
-    // 5. 1x1 boundary & Hann window normalization
+    // 5. Short axes & Hann window normalization
     const double one = 42.5;
     IRFft2dSummary sOne{};
     CHECK(IR_Fft2dMagnitudeF64(&one, nullptr, 1, 1, 1,
@@ -520,6 +520,15 @@ void testFft2dMagnitude()
                                &sOne, nullptr, nullptr, err, sizeof err) == IR_OK);
     CHECK_NEAR(sOne.dc_magnitude, 42.5, 1e-12);
     CHECK_NEAR(sOne.peak_ac_magnitude, 0.0, 1e-12);
+
+    const double shortImage[]{1.0, 3.0, 1.0, 3.0};
+    IRFft2dSummary sShort{};
+    CHECK(IR_Fft2dMagnitudeF64(shortImage, nullptr, 2, 2, 4,
+                               IR_WINDOW_HANN, 0, 0,
+                               &sShort, nullptr, nullptr, err, sizeof err) == IR_OK);
+    CHECK_NEAR(sShort.dc_magnitude, 2.0, 1e-12);
+    CHECK_NEAR(sShort.peak_ac_magnitude, 1.0, 1e-12);
+    CHECK_NEAR(sShort.total_ac_power, 1.0, 1e-12);
 
     std::vector<double> const8(64, 10.0);
     IRFft2dSummary sHann{};

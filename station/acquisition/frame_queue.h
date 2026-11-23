@@ -2,6 +2,7 @@
 
 #include "IR_station.h"
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -47,8 +48,8 @@ public:
     IRCaptureStats stats();
 
 private:
-    void recordPreviewLocked(const uint16_t *pixels, const IRFrameStamp &stamp,
-                             int64_t pxCount, bool countDelivered);
+    friend struct FrameQueueTestAccess;
+    void recordPreviewLocked(const uint16_t *pixels, const IRFrameStamp &stamp, int64_t pxCount);
 
     // Strictly separate leaf locks: never acquire queueMutex_ and previewMutex_ simultaneously.
     std::mutex queueMutex_;
@@ -71,12 +72,12 @@ private:
     bool hasLatest_{false};
     std::vector<uint16_t> latestPixels_;
     IRFrameStamp latestStamp_{};
-    uint64_t framesReceived_{0};
-    uint64_t framesDelivered_{0};
-    uint64_t framesDropped_{0};
-    uint64_t previewFrames_{0};
-    int32_t configuredCapacity_{kDefaultCapacity};
-    int32_t queueDepth_{0};
+    std::atomic<uint64_t> framesReceived_{0};
+    std::atomic<uint64_t> framesDelivered_{0};
+    std::atomic<uint64_t> framesDropped_{0};
+    std::atomic<uint64_t> previewFrames_{0};
+    std::atomic<int32_t> configuredCapacity_{kDefaultCapacity};
+    std::atomic<int32_t> queueDepth_{0};
     int32_t running_{0};
     std::array<int64_t, 16> fpsTimestampsNs_{};
     size_t fpsHead_{0};

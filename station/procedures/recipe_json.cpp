@@ -134,13 +134,14 @@ void acquireBatch(ir::acquisition::Capture &capture, const StationConfig &statio
 
     try {
         progress.enter(IR_RECIPE_STAGE_PREPARE, &recipe.capture.ref);
-        capture.setQueueCapacity(station.queueCapacity);
-        batch.geometry = capture.open(station.backend, station.source.c_str(), station.validBits);
+        batch.geometry = capture.open(station.backend, station.source.c_str(), station.validBits,
+                                      station.queueCapacity, station.maxInflightBytes);
         sourceOpen = true;
         capture.checkStop();
+        const uint64_t batchBytes = batchStorageBytes(
+            batch.geometry, recipe.capture.frames, station.maxBatchBytes);
+        requireWithinMemoryLimit(addBytes(capture.bufferedBytes(), batchBytes), station.maxInflightBytes);
         const auto elements = stackSize(pixels(batch.geometry.height, batch.geometry.width), recipe.capture.frames);
-        require(elements <= station.maxBatchBytes / int64_t(sizeof(uint16_t)), IR_BAD_ARGUMENT,
-                "Frame batch exceeds station.acquisition.max_batch_bytes");
 
         for (const auto &step : recipe.analysis) {
             if (step.operations.checkGeometry) {

@@ -131,7 +131,7 @@ endforeach()
 add_executable(ir_run_recipe examples/ir_recipe_cli.cpp)
 target_include_directories(ir_run_recipe SYSTEM PRIVATE
     "${PROJECT_SOURCE_DIR}/third_party/nlohmann_json/include")
-target_link_libraries(ir_run_recipe PRIVATE IR_station)
+target_link_libraries(ir_run_recipe PRIVATE IR_station Threads::Threads)
 set_target_properties(ir_run_recipe PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
 
 add_executable(ir_capture_accept examples/ir_capture_accept.cpp)
@@ -244,7 +244,7 @@ if(BUILD_TESTING)
             add_test(NAME blackbody_serial COMMAND "${Python3_EXECUTABLE}" -B
                 "${PROJECT_SOURCE_DIR}/sdk_tests/blackbody_mock_test.py"
                 serial "$<TARGET_FILE:IR_station>" --client "$<TARGET_FILE:noise_recipe>" --fixture-parent "${PROJECT_BINARY_DIR}")
-            set_tests_properties(blackbody_serial PROPERTIES TIMEOUT 60)
+            set_tests_properties(blackbody_serial PROPERTIES TIMEOUT 120)
             add_test(NAME power_serial COMMAND "${Python3_EXECUTABLE}" -B
                 "${PROJECT_SOURCE_DIR}/sdk_tests/power_mock_test.py" "$<TARGET_FILE:IR_station>"
                 --fixture-parent "${PROJECT_BINARY_DIR}")

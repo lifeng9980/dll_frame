@@ -28,6 +28,7 @@
 
 namespace ir::acquisition {
 namespace {
+constexpr size_t DirectShowQueueCapacity = 64;
 using Microsoft::WRL::ComPtr;
 using ir::api::Error;
 using ir::api::require;
@@ -199,6 +200,12 @@ public:
     {
         if (!buffer || length <= 0) return S_OK;
         try {
+            uint64_t generation = 0;
+            {
+                std::lock_guard lock(mutex_);
+                if (interrupted_) return S_OK;
+                generation = generation_;
+            }
             QueuedFrame frame;
             frame.bytes.assign(buffer, buffer + length);
             if (std::isfinite(sampleTime) && sampleTime >= 0) {
@@ -207,9 +214,9 @@ public:
             }
             {
                 std::lock_guard lock(mutex_);
-                if (interrupted_) return S_OK;
+                if (interrupted_ || generation != generation_) return S_OK;
                 frame.sequence = ++sequence_;
-                if (frames_.size() == QueueCapacity) frames_.pop_front();
+                if (frames_.size() == DirectShowQueueCapacity) frames_.pop_front();
                 frames_.push_back(std::move(frame));
             }
             ready_.notify_one();
@@ -222,6 +229,7 @@ public:
     void reset()
     {
         std::lock_guard lock(mutex_);
+        ++generation_;
         frames_.clear();
         sequence_ = 0;
         interrupted_ = false;
@@ -230,6 +238,7 @@ public:
     void clearQueue()
     {
         std::lock_guard lock(mutex_);
+        ++generation_;
         frames_.clear();
     }
 
@@ -254,12 +263,12 @@ public:
     }
 
 private:
-    static constexpr size_t QueueCapacity = 64;
     std::atomic<ULONG> references_{1};
     std::mutex mutex_;
     std::condition_variable ready_;
     std::deque<QueuedFrame> frames_;
     uint64_t sequence_{};
+    uint64_t generation_{};
     bool interrupted_{};
 };
 }
@@ -279,6 +288,11 @@ public:
     ~DirectShowSource() override { close(); }
 
     IRGeometry geometry() const override { return geometry_; }
+    uint64_t bufferedBytes() const noexcept override
+    {
+        return static_cast<uint64_t>(rowStride_) * static_cast<uint64_t>(geometry_.height) *
+               DirectShowQueueCapacity;
+    }
 
     void start() override
     {

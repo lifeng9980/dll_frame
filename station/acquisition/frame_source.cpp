@@ -3,10 +3,41 @@
 #include <algorithm>
 #include <chrono>
 #include <exception>
+#include <limits>
 using namespace ir::api;
 namespace ir::acquisition {
 static_assert(sizeof(IRCaptureStats) == 64, "IRCaptureStats ABI size must be 64 bytes");
 Capture &capture() { static Capture value; return value; }
+
+namespace {
+uint64_t checkedMultiply(uint64_t left, uint64_t right)
+{
+    require(right == 0 || left <= std::numeric_limits<uint64_t>::max() / right,
+            IR_BAD_ARGUMENT, "Capture memory estimate overflows");
+    return left * right;
+}
+
+uint64_t checkedAdd(uint64_t left, uint64_t right)
+{
+    require(right <= std::numeric_limits<uint64_t>::max() - left,
+            IR_BAD_ARGUMENT, "Capture memory estimate overflows");
+    return left + right;
+}
+
+uint64_t estimateBufferedBytes(IRGeometry geometry, int32_t queueCapacity,
+                               uint64_t backendBytes)
+{
+    const uint64_t frameBytes = checkedMultiply(
+        static_cast<uint64_t>(pixels(geometry.height, geometry.width)), sizeof(uint16_t));
+    uint64_t queueBytes = checkedMultiply(
+        frameBytes, static_cast<uint64_t>(queueCapacity) + 2);
+    queueBytes = checkedAdd(queueBytes, checkedMultiply(
+        static_cast<uint64_t>(queueCapacity), sizeof(IRFrameStamp)));
+    return checkedAdd(queueBytes, backendBytes);
+}
+
+}
+
 std::unique_lock<std::mutex> lockCapture()
 {
     std::unique_lock lock(capture().mutex, std::try_to_lock);
@@ -15,6 +46,13 @@ std::unique_lock<std::mutex> lockCapture()
 }
 IRGeometry Capture::open(int kind, const char *name, int bits)
 {
+    return open(kind, name, bits, queueCapacity_, kDefaultMemoryLimitBytes);
+}
+
+IRGeometry Capture::open(int kind, const char *name, int bits, int32_t queueCapacity,
+                         uint64_t memoryLimitBytes)
+{
+    checkOperationAccess();
     require(!source, IR_BUSY, "A frame source is open");
     require(name && *name && bits >= 0 && bits <= 16, IR_BAD_ARGUMENT, "Invalid source name or valid bits");
     std::unique_ptr<FrameSource> opened;
@@ -34,8 +72,15 @@ IRGeometry Capture::open(int kind, const char *name, int bits)
 #endif
     else throw Error(IR_UNSUPPORTED, "Frame backend is not available on this platform");
     const auto geometry = opened->geometry();
-    frameQueue_.configure(geometry, queueCapacity_);
-    sourceName = name;
+    const uint64_t bufferedBytes = estimateBufferedBytes(
+        geometry, queueCapacity, opened->bufferedBytes());
+    require(bufferedBytes <= memoryLimitBytes,
+            IR_BAD_ARGUMENT, "Capture buffers exceed station.acquisition.max_inflight_bytes");
+    std::string openedName{name};
+    frameQueue_.configure(geometry, queueCapacity);
+    queueCapacity_ = queueCapacity;
+    memoryLimitBytes_ = memoryLimitBytes;
+    sourceName = std::move(openedName);
     source = std::move(opened);
     owner = std::this_thread::get_id();
     backend = kind;
@@ -43,6 +88,7 @@ IRGeometry Capture::open(int kind, const char *name, int bits)
 }
 void Capture::close()
 {
+    checkOperationAccess();
     if (!source) return;
     checkOwner();
     stopPump();
@@ -53,6 +99,7 @@ void Capture::close()
     sourceName.clear();
     owner = {};
     backend = 0;
+    memoryLimitBytes_ = kDefaultMemoryLimitBytes;
     try {
         if (wasRunning) closing->stop();
     } catch (...) {
@@ -63,24 +110,58 @@ void Capture::close()
 }
 void Capture::checkOwner() const
 {
+    checkOperationAccess();
     require(bool(source), IR_BAD_ARGUMENT, "Open a frame source first");
     require(owner == std::this_thread::get_id(), IR_BAD_ARGUMENT, "Use the opening thread");
 }
-void Capture::beginOperation() noexcept { stopState_.store(StopState::active); }
-void Capture::endOperation() noexcept { stopState_.store(StopState::idle); }
-bool Capture::tryEnterStandaloneStopScope() noexcept
+void Capture::checkOperationAccess() const
 {
-    auto expected = StopState::idle;
-    return stopState_.compare_exchange_strong(expected, StopState::active);
+    std::lock_guard lock(operationMutex_);
+    const auto state = stopState_.load(std::memory_order_acquire);
+    require(state == StopState::idle || operationOwner_ == std::this_thread::get_id(),
+            IR_BUSY, "Another thread owns the active SDK operation");
 }
-void Capture::leaveStandaloneStopScope(bool entered) noexcept
+bool Capture::beginOperation() noexcept
 {
-    if (entered) stopState_.store(StopState::idle);
+    std::lock_guard lock(operationMutex_);
+    if (stopState_.load(std::memory_order_acquire) != StopState::idle)
+        return false;
+    operationOwner_ = std::this_thread::get_id();
+    stopState_.store(StopState::active, std::memory_order_release);
+    return true;
+}
+void Capture::endOperation() noexcept
+{
+    std::lock_guard lock(operationMutex_);
+    if (operationOwner_ != std::this_thread::get_id())
+        return;
+    operationOwner_ = {};
+    stopState_.store(StopState::idle, std::memory_order_release);
+}
+Capture::OperationScope Capture::enterOperationScope() noexcept
+{
+    std::lock_guard lock(operationMutex_);
+    const auto state = stopState_.load(std::memory_order_acquire);
+    if (state == StopState::idle) {
+        operationOwner_ = std::this_thread::get_id();
+        stopState_.store(StopState::active, std::memory_order_release);
+        return OperationScope::owned;
+    }
+    if (operationOwner_ == std::this_thread::get_id())
+        return OperationScope::joined;
+    return OperationScope::unavailable;
+}
+void Capture::leaveOperationScope(OperationScope scope) noexcept
+{
+    if (scope == OperationScope::owned)
+        endOperation();
 }
 void Capture::requestStop() noexcept
 {
     auto expected = StopState::active;
-    stopState_.compare_exchange_strong(expected, StopState::requested);
+    if (!stopState_.compare_exchange_strong(expected, StopState::requested,
+                                            std::memory_order_acq_rel))
+        return;
     frameQueue_.wakeWaiters();
 }
 void Capture::checkStop() const
@@ -89,13 +170,25 @@ void Capture::checkStop() const
 }
 void Capture::setQueueCapacity(int32_t capacity)
 {
+    checkOperationAccess();
     FrameQueue::validateCapacity(capacity);
     require(!running, IR_BUSY, "Cannot change frame queue capacity while capture is running");
+    if (source) {
+        const uint64_t bufferedBytes = estimateBufferedBytes(
+            source->geometry(), capacity, source->bufferedBytes());
+        require(bufferedBytes <= memoryLimitBytes_, IR_BAD_ARGUMENT,
+                "Capture buffers exceed station.acquisition.max_inflight_bytes");
+        frameQueue_.configure(source->geometry(), capacity);
+    } else {
+        frameQueue_.setIdleCapacity(capacity);
+    }
     queueCapacity_ = capacity;
-    if (source)
-        frameQueue_.configure(source->geometry(), queueCapacity_);
-    else
-        frameQueue_.setIdleCapacity(queueCapacity_);
+}
+uint64_t Capture::bufferedBytes() const
+{
+    if (!source)
+        return 0;
+    return estimateBufferedBytes(source->geometry(), queueCapacity_, source->bufferedBytes());
 }
 void Capture::startPump()
 {
@@ -150,6 +243,7 @@ void Capture::pumpLoop()
 }
 void Capture::start()
 {
+    checkOperationAccess();
     checkStop();
     require(!running, IR_BUSY, "Source is already running");
     frameQueue_.beginStartSession(source->geometry(), queueCapacity_);
@@ -349,7 +443,7 @@ extern "C" int32_t IR_StartFrames(char *err, int32_t size)
         auto lock = lockCapture(); auto &c = capture();
         c.checkOwner();
         require(!c.running, IR_BUSY, "Source is already running");
-        c.beginOperation();
+        require(c.beginOperation(), IR_BUSY, "Another cancellable SDK operation is active");
         try {
             c.start();
         } catch (...) {

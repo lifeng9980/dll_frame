@@ -16,6 +16,7 @@
 #include <fstream>
 #include <iomanip>
 #include <locale>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -34,6 +35,22 @@ fs::path pathFromUtf8(const std::string &utf8)
     return fs::path(reinterpret_cast<const char8_t *>(utf8.c_str()));
 }
 
+std::string portableNameKey(std::string value)
+{
+    for (auto &character : value) {
+        if (character >= 'A' && character <= 'Z')
+            character = static_cast<char>(character - 'A' + 'a');
+    }
+    return value;
+}
+
+bool reservedOutputName(const std::string &value)
+{
+    const auto key = portableNameKey(value);
+    return key == "frames.csv" || key == "frames.raw" || key == "result.json" ||
+           key == "result.json.tmp";
+}
+
 void validateRelativeSingleName(const std::string &value, const std::string &path)
 {
     require(!value.empty() && value != "." && value != "..", IR_BAD_ARGUMENT,
@@ -44,6 +61,15 @@ void validateRelativeSingleName(const std::string &value, const std::string &pat
     }
     require(value.find("..") == std::string::npos, IR_BAD_ARGUMENT,
             path + " cannot contain '..'");
+    require(value.back() != ' ' && value.back() != '.', IR_BAD_ARGUMENT,
+            path + " cannot end with a space or period");
+    std::string base = portableNameKey(value.substr(0, value.find('.')));
+    static const std::set<std::string> reservedDevices{
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5",
+        "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
+        "lpt5", "lpt6", "lpt7", "lpt8", "lpt9"};
+    require(!reservedDevices.contains(base), IR_BAD_ARGUMENT,
+            path + " cannot use a reserved Windows device name");
 }
 
 const char *backendName(int backend)
@@ -374,6 +400,48 @@ struct SavedBatchSnapshot {
     FrameBatch batch;
 };
 
+uint64_t retainedRecipeStorage(const RecipeConfigV2 &recipe, IRGeometry geometry,
+                               int64_t maxBatchBytes)
+{
+    struct BatchSlot {
+        int32_t currentFrames{};
+        int32_t maxFrames{};
+    };
+
+    uint64_t total = 0;
+    std::map<std::string, BatchSlot> batchSlots;
+    const auto recordCapture = [&](const CaptureStepV2 &step) {
+        auto &slot = batchSlots[step.outputSlot];
+        slot.currentFrames = step.frames;
+        slot.maxFrames = std::max(slot.maxFrames, step.frames);
+    };
+
+    for (const auto &step : recipe.steps) {
+        if (const auto *capture = std::get_if<CaptureStepV2>(&step)) {
+            recordCapture(*capture);
+        } else if (const auto *burst = std::get_if<RepeatBurstStep>(&step)) {
+            for (const auto &inner : burst->steps)
+                if (const auto *capture = std::get_if<CaptureStepV2>(&inner))
+                    recordCapture(*capture);
+        } else if (const auto *save = std::get_if<SaveRawStepV2>(&step)) {
+            const auto frames = batchSlots.at(save->inputSlot).currentFrames;
+            total = addBytes(total, batchStorageBytes(geometry, frames, maxBatchBytes));
+        }
+    }
+
+    for (const auto &[name, slot] : batchSlots) {
+        (void)name;
+        total = addBytes(total, batchStorageBytes(geometry, slot.maxFrames, maxBatchBytes));
+    }
+
+    const uint64_t pixelCount = static_cast<uint64_t>(pixels(geometry.height, geometry.width));
+    total = addBytes(total, multiplyBytes(
+        multiplyBytes(pixelCount, sizeof(double)), recipe.doubleMapSlotCount));
+    total = addBytes(total, multiplyBytes(pixelCount, recipe.byteMaskSlotCount));
+    total = addBytes(total, multiplyBytes(sizeof(IRGjbDriftContext), recipe.driftContextSlotCount));
+    return total;
+}
+
 void runControlBlackbody(const ir::acquisition::Capture &capture, IRHandle handle,
                          const BlackbodyStep &step, V2Readbacks &readbacks)
 {
@@ -666,6 +734,7 @@ RecipeConfigV2 parseRecipeV2(const char *text, const StationConfig &station)
     std::set<std::string> usedDevices;
     std::set<std::string> savedSubdirs;
     std::set<std::string> csvFiles;
+    std::set<std::string> csvPaths;
     std::map<std::string, SlotKind> knownSlots;
     std::map<std::string, std::string> metricUnits;
 
@@ -684,9 +753,12 @@ RecipeConfigV2 parseRecipeV2(const char *text, const StationConfig &station)
             require(foundSlot != knownSlots.end() && foundSlot->second == SlotKind::batch,
                     IR_BAD_ARGUMENT, path + ".input must reference a captured batch slot");
             const auto subdir = optionalString(fields, "subdir", "", path);
-            if (!subdir.empty())
+            if (!subdir.empty()) {
                 validateRelativeSingleName(subdir, path + ".subdir");
-            require(savedSubdirs.insert(subdir).second, IR_BAD_ARGUMENT,
+                require(!reservedOutputName(subdir), IR_BAD_ARGUMENT,
+                        path + ".subdir conflicts with a reserved output name");
+            }
+            require(savedSubdirs.insert(portableNameKey(subdir)).second, IR_BAD_ARGUMENT,
                     path + ": duplicate save_raw target directory '" + subdir + "'");
             recipe.steps.emplace_back(SaveRawStepV2{std::move(ref), inputSlot, subdir});
         } else if (type == "repeat_burst") {
@@ -703,8 +775,14 @@ RecipeConfigV2 parseRecipeV2(const char *text, const StationConfig &station)
                     path + ": specify positive max_iterations or duration_sec");
             burst.csvFile = optionalString(fields, "csv_file", "burst_summary.csv", path);
             validateRelativeSingleName(burst.csvFile, path + ".csv_file");
-            require(csvFiles.insert(burst.csvFile).second, IR_BAD_ARGUMENT,
+            const auto csvKey = portableNameKey(burst.csvFile);
+            require(csvKey.size() > 4 && csvKey.ends_with(".csv"), IR_BAD_ARGUMENT,
+                    path + ".csv_file must use the .csv extension");
+            require(!reservedOutputName(burst.csvFile), IR_BAD_ARGUMENT,
+                    path + ".csv_file conflicts with a reserved output name");
+            require(csvFiles.insert(csvKey).second, IR_BAD_ARGUMENT,
                     path + ": duplicated csv_file '" + burst.csvFile + "'");
+            csvPaths.insert(csvKey);
 
             const auto innerIt = fields.find("steps");
             require(innerIt != fields.end() && innerIt->is_array() && !innerIt->empty() &&
@@ -716,7 +794,8 @@ RecipeConfigV2 parseRecipeV2(const char *text, const StationConfig &station)
                 const auto &innerFields = (*innerIt)[innerIdx];
                 const auto innerPath = path + ".steps[" + std::to_string(innerIdx) + "]";
                 require(innerFields.is_object(), IR_BAD_ARGUMENT, innerPath + " must be an object");
-                StepRef innerRef{static_cast<int32_t>(innerIdx), stringField(innerFields, "id", innerPath)};
+                StepRef innerRef{static_cast<int32_t>(recipe.steps.size()),
+                                 stringField(innerFields, "id", innerPath)};
                 require(ids.insert(innerRef.id).second, IR_BAD_ARGUMENT,
                         innerPath + ".id is duplicated: " + innerRef.id);
                 const auto innerType = stringField(innerFields, "type", innerPath);
@@ -814,6 +893,15 @@ RecipeConfigV2 parseRecipeV2(const char *text, const StationConfig &station)
     }
 
     recipe.deviceAliases.assign(usedDevices.begin(), usedDevices.end());
+    for (const auto &subdir : savedSubdirs)
+        require(!csvPaths.contains(subdir), IR_BAD_ARGUMENT,
+                "A save_raw subdir conflicts with a repeat_burst csv_file");
+    for (const auto &[slot, kind] : knownSlots) {
+        (void)slot;
+        if (kind == SlotKind::double_map) ++recipe.doubleMapSlotCount;
+        else if (kind == SlotKind::byte_mask) ++recipe.byteMaskSlotCount;
+        else if (kind == SlotKind::drift_context) ++recipe.driftContextSlotCount;
+    }
     recipe.definition = std::move(root);
     return recipe;
 }
@@ -828,7 +916,7 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
     const auto startedUtc = utcTimestampNow();
 
     V2Progress progress{result};
-    bool sourceOpen = false;
+    bool sourceOpened = false;
     bool sourceStarted = false;
     std::map<std::string, IRHandle> devices;
     std::optional<ir::instruments::DeviceLease> lease;
@@ -839,8 +927,10 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
     ExecutionContext ctx;
     V2Readbacks readbacks;
     std::vector<SavedBatchSnapshot> savedSnapshots;
+    uint64_t savedSnapshotBytes = 0;
     std::vector<Json> burstRunsSummary;
     bool destinationCreated = false;
+    bool freshFramesRequired = false;
 
     auto ensureCaptureStarted = [&] {
         if (!sourceStarted) {
@@ -849,12 +939,20 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
         }
     };
 
+    auto clearPendingFrames = [&] {
+        if (!freshFramesRequired || !capture.source || !capture.source->isLive())
+            return;
+        int32_t discarded = 0;
+        capture.flush(0, 0, discarded);
+        freshFramesRequired = false;
+    };
+
     try {
         try {
             progress.enter(IR_RECIPE_STAGE_PREPARE);
-            capture.setQueueCapacity(station.queueCapacity);
-            ctx.geometry = capture.open(station.backend, station.source.c_str(), station.validBits);
-            sourceOpen = true;
+            ctx.geometry = capture.open(station.backend, station.source.c_str(), station.validBits,
+                                        station.queueCapacity, station.maxInflightBytes);
+            sourceOpened = true;
             capture.checkStop();
 
             const int64_t maxBatchElements = station.maxBatchBytes / int64_t(sizeof(uint16_t));
@@ -879,6 +977,10 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
                     }
                 }, step);
             }
+            uint64_t requiredStorage = capture.bufferedBytes();
+            requiredStorage = addBytes(requiredStorage,
+                                       retainedRecipeStorage(recipe, ctx.geometry, station.maxBatchBytes));
+            requireWithinMemoryLimit(requiredStorage, station.maxInflightBytes);
             capture.checkStop();
 
             progress.enter(IR_RECIPE_STAGE_RESERVE);
@@ -903,26 +1005,32 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
                     progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
                     capture.checkStop();
                     runControlBlackbody(capture, devices.at(s.device), s, readbacks);
+                    freshFramesRequired = true;
                     capture.checkStop();
                 } else if constexpr (std::is_same_v<T, PowerStep>) {
                     progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
                     capture.checkStop();
                     runControlPower(devices.at(s.device), s, readbacks, powerToSwitchOff);
+                    if (s.operation != PowerStep::Operation::read)
+                        freshFramesRequired = true;
                     capture.checkStop();
                 } else if constexpr (std::is_same_v<T, PowerWaitStableStep>) {
                     progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
                     capture.checkStop();
                     runControlPowerWaitStable(capture, devices.at(s.device), s, readbacks);
+                    freshFramesRequired = true;
                     capture.checkStop();
                 } else if constexpr (std::is_same_v<T, OvenStabilizeStep>) {
                     progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
                     capture.checkStop();
                     runControlOvenStabilize(capture, devices.at(s.device), s, readbacks, ovensToStandby);
+                    freshFramesRequired = true;
                     capture.checkStop();
                 } else if constexpr (std::is_same_v<T, OvenStandbyStep>) {
                     progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
                     capture.checkStop();
                     runControlOvenStandby(devices.at(s.device), s, readbacks);
+                    freshFramesRequired = true;
                     capture.checkStop();
                 } else if constexpr (std::is_same_v<T, DmmReadStep>) {
                     progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
@@ -933,16 +1041,19 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
                     progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
                     capture.checkStop();
                     runControlDetectorTiming(devices.at(s.device), s, readbacks);
+                    freshFramesRequired = true;
                     capture.checkStop();
                 } else if constexpr (std::is_same_v<T, DetectorGpolStep>) {
                     progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
                     capture.checkStop();
                     runControlDetectorGpol(devices.at(s.device), s, readbacks);
+                    freshFramesRequired = true;
                     capture.checkStop();
                 } else if constexpr (std::is_same_v<T, DetectorRegisterStep>) {
                     progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
                     capture.checkStop();
                     runControlDetectorRegister(devices.at(s.device), s, readbacks);
+                    freshFramesRequired = true;
                     capture.checkStop();
                 } else if constexpr (std::is_same_v<T, DetectorCurrentStep>) {
                     progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &s.ref);
@@ -960,11 +1071,13 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
                     ensureCaptureStarted();
                     int32_t discarded = 0;
                     capture.flush(s.discardFrames, s.timeoutMs, discarded);
+                    freshFramesRequired = false;
                     capture.checkStop();
                 } else if constexpr (std::is_same_v<T, CaptureStepV2>) {
                     progress.enter(IR_RECIPE_STAGE_CAPTURE, &s.ref);
                     capture.checkStop();
                     ensureCaptureStarted();
+                    clearPendingFrames();
                     const int64_t elements = stackSize(pixels(ctx.geometry.height, ctx.geometry.width), s.frames);
                     auto &batch = ctx.batches[s.outputSlot];
                     batch.geometry = ctx.geometry;
@@ -980,11 +1093,17 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
                     }
                     result.completed_frames += stepCompleted;
                     capture.checkStop();
+                    requireWithinMemoryLimit(addBytes(
+                        addBytes(capture.bufferedBytes(), ctx.retainedBytes()), savedSnapshotBytes),
+                        station.maxInflightBytes);
                 } else if constexpr (std::is_same_v<T, AnalysisStepV2>) {
                     progress.enter(IR_RECIPE_STAGE_ANALYZE, &s.ref);
                     capture.checkStop();
                     s.operations.execute(ctx);
                     capture.checkStop();
+                    requireWithinMemoryLimit(addBytes(
+                        addBytes(capture.bufferedBytes(), ctx.retainedBytes()), savedSnapshotBytes),
+                        station.maxInflightBytes);
                 }
             };
 
@@ -993,7 +1112,17 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
                     progress.enter(IR_RECIPE_STAGE_ARCHIVE, &sr->ref);
                     capture.checkStop();
                     const auto &batch = ctx.batches.at(sr->inputSlot);
+                    const uint64_t snapshotBytes = batchStorageBytes(
+                        batch.geometry, static_cast<int32_t>(batch.stamps.size()),
+                        station.maxBatchBytes);
+                    const uint64_t nextSavedSnapshotBytes = addBytes(
+                        savedSnapshotBytes, snapshotBytes);
+                    const uint64_t requiredStorage = addBytes(
+                        addBytes(capture.bufferedBytes(), ctx.retainedBytes()),
+                        nextSavedSnapshotBytes);
+                    requireWithinMemoryLimit(requiredStorage, station.maxInflightBytes);
                     savedSnapshots.push_back({sr->inputSlot, sr->subdir, batch});
+                    savedSnapshotBytes = nextSavedSnapshotBytes;
                 } else if (const auto *rb = std::get_if<RepeatBurstStep>(&step)) {
                     const auto loopStart = std::chrono::steady_clock::now();
                     std::ofstream csvStream;
@@ -1015,7 +1144,10 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
 
                         if (!csvStream.is_open()) {
                             if (!destinationCreated) {
-                                fs::create_directories(destination);
+                                std::error_code createError;
+                                const bool created = fs::create_directory(destination, createError);
+                                require(created && !createError, IR_IO_ERROR,
+                                        "Cannot exclusively create the recipe output directory");
                                 destinationCreated = true;
                             }
                             const fs::path csvPath = destination / pathFromUtf8(rb->csvFile);
@@ -1042,6 +1174,8 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
                         require(csvStream.good(), IR_IO_ERROR,
                                 "Failed flushing burst summary CSV: " + rb->csvFile);
                         ++iterationsDone;
+                        if (capture.source && capture.source->isLive())
+                            freshFramesRequired = true;
 
                         const bool moreByCount = (rb->maxIterations == 0) || (iterationsDone < rb->maxIterations);
                         const double elapsedAfter = std::chrono::duration<double>(
@@ -1079,7 +1213,7 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
 
         // Deterministic safety cleanup on success, failure, and cancellation.
         V2CleanupFailure cleanup;
-        if (sourceOpen)
+        if (sourceOpened)
             cleanup.attempt(nullptr, [&] { capture.close(); });
         for (auto it = powerToSwitchOff.rbegin(); it != powerToSwitchOff.rend(); ++it) {
             const auto &step = **it;
@@ -1166,7 +1300,8 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
         std::vector<SavedBatchRef> batchRefs;
         batchRefs.reserve(savedSnapshots.size());
         for (const auto &snap : savedSnapshots) {
-            batchRefs.push_back({snap.subdir, snap.batch.geometry, &snap.batch.pixels, &snap.batch.stamps});
+            batchRefs.push_back({snap.subdir, snap.batch.geometry,
+                                 &snap.batch.pixels, &snap.batch.stamps});
             savedBatchesMeta.push_back({
                 {"input", snap.inputSlot},
                 {"subdir", snap.subdir},

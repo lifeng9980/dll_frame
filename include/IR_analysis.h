@@ -819,9 +819,9 @@ IR_ANALYSIS_API int32_t IR_FlickerDetectU16(
 
 typedef struct IRFft2dSummary
 {
-    double dc_magnitude;            /* 零频幅度 |X[0,0]| / (rows * cols) */
-    double peak_ac_magnitude;       /* 非零频最大归一化幅度 */
-    double total_ac_power;          /* 所有非零频归一化功率和 sum(|X[u,v]|^2) / (rows * cols)^2 */
+    double dc_magnitude;            /* 零频幅度 |X[0,0]| / W */
+    double peak_ac_magnitude;       /* 非零频最大归一化幅度 max(|X[u,v]| / W) */
+    double total_ac_power;          /* 所有非零频归一化功率和 sum((|X[u,v]| / W)^2) */
     double low_freq_power_ratio;    /* 归一化径向频率 <= 0.25 的 AC 功率占比 [0, 1] */
     double high_freq_power_ratio;   /* 归一化径向频率 > 0.25 的 AC 功率占比 [0, 1] */
     int32_t peak_ac_row;            /* 非零频峰值行索引（按输出坐标系） */
@@ -833,8 +833,11 @@ typedef struct IRFft2dSummary
 } IRFft2dSummary;
 
 /* 纯 C++ 任意尺寸二维离散傅里叶幅度/功率谱（支持任意 rows >= 1、cols >= 1）：
+ * W 是所选可分离二维窗函数的总权重 sum(w_row) * sum(w_col)；矩形窗时 W=rows*cols，Hann 窗时按 Hann 权重和归一化；
+ * 输出幅度图和功率图分别使用 |X|/W 和 (|X|/W)^2，与 summary 字段使用同一归一化约定；
  * 若提供 valid_mask，则无效或非有限像元按有效像元均值填充（配合 detrend_mean=1 等价填零）；
- * window_kind 支持 IR_WINDOW_RECTANGULAR（可分离二维矩形）与 IR_WINDOW_HANN（可分离二维 Hann，长度=1 时权重=1）；
+ * window_kind 支持 IR_WINDOW_RECTANGULAR（可分离二维矩形）与 IR_WINDOW_HANN（可分离二维对称 Hann）。
+ * Hann 窗在长度为 1 或 2 的轴上各权重取 1，以保留该轴上的全部像元。
  * shift_dc_center != 0 时按 (rows/2, cols/2) 中心平移输出谱图及峰值索引；
  * summary 必填，out_magnitude_map 与 out_power_map 均可为 NULL。
  */

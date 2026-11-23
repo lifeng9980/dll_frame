@@ -1,6 +1,7 @@
 #pragma once
 #include "IR_station.h"
 #include "frame_queue.h"
+#include <cstdint>
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -13,6 +14,7 @@ public:
     virtual ~FrameSource() = default;
     virtual IRGeometry geometry() const = 0;
     virtual bool isLive() const noexcept { return true; }
+    virtual uint64_t bufferedBytes() const noexcept { return 0; }
     virtual void start() = 0;
     virtual void read(uint16_t *pixels, IRFrameStamp &stamp, int timeoutMs) = 0;
     virtual void flush() {}
@@ -28,6 +30,8 @@ std::unique_ptr<FrameSource> openDirectShow(const char *cameraName, int validBit
 
 class Capture {
 public:
+    enum class OperationScope { owned, joined, unavailable };
+
     std::mutex mutex;
     std::unique_ptr<FrameSource> source;
     std::string sourceName;
@@ -35,13 +39,16 @@ public:
     int backend{};
     bool running{};
     IRGeometry open(int backend, const char *name, int validBits);
+    IRGeometry open(int backend, const char *name, int validBits,
+                    int32_t queueCapacity, uint64_t memoryLimitBytes);
     void close();
+    void checkOperationAccess() const;
     void checkOwner() const;
     // 采集启动和流程开始各建立一次停止范围。取帧阶段不重置流程的停止请求。
-    void beginOperation() noexcept;
+    bool beginOperation() noexcept;
     void endOperation() noexcept;
-    bool tryEnterStandaloneStopScope() noexcept;
-    void leaveStandaloneStopScope(bool entered) noexcept;
+    OperationScope enterOperationScope() noexcept;
+    void leaveOperationScope(OperationScope scope) noexcept;
     void requestStop() noexcept;
     void checkStop() const;
     void start();
@@ -50,16 +57,22 @@ public:
               IRFrameStamp *stamps, int stampCapacity, int &completed);
     void flush(int32_t discardFrames, int32_t timeoutMs, int32_t &discarded);
     void setQueueCapacity(int32_t capacity);
+    uint64_t bufferedBytes() const;
     FrameQueue &frameQueue() noexcept { return frameQueue_; }
 
 private:
+    static constexpr uint64_t kDefaultMemoryLimitBytes = 1024ULL * 1024ULL * 1024ULL;
+
     void startPump();
     void stopPump();
     void pumpLoop();
 
     enum class StopState { idle, active, requested };
+    mutable std::mutex operationMutex_;
     std::atomic<StopState> stopState_{StopState::idle};
+    std::thread::id operationOwner_{};
     int32_t queueCapacity_{FrameQueue::kDefaultCapacity};
+    uint64_t memoryLimitBytes_{kDefaultMemoryLimitBytes};
     FrameQueue frameQueue_;
     std::thread pumpThread_;
     std::atomic<bool> pumpStop_{false};

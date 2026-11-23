@@ -6,6 +6,40 @@
 namespace ir::procedures::recipe {
 using namespace ir::api;
 
+uint64_t addBytes(uint64_t total, uint64_t additional)
+{
+    require(additional <= std::numeric_limits<uint64_t>::max() - total,
+            IR_BAD_ARGUMENT, "Estimated capture memory overflows");
+    return total + additional;
+}
+
+uint64_t multiplyBytes(uint64_t count, uint64_t itemBytes)
+{
+    require(itemBytes == 0 || count <= std::numeric_limits<uint64_t>::max() / itemBytes,
+            IR_BAD_ARGUMENT, "Estimated capture memory overflows");
+    return count * itemBytes;
+}
+
+uint64_t batchStorageBytes(IRGeometry geometry, int32_t frames, int64_t maxBatchBytes)
+{
+    const uint64_t pixelsPerFrame = static_cast<uint64_t>(pixels(geometry.height, geometry.width));
+    const uint64_t pixelElements = multiplyBytes(pixelsPerFrame, static_cast<uint64_t>(frames));
+    const uint64_t pixelBytes = multiplyBytes(pixelElements, sizeof(uint16_t));
+    require(pixelBytes <= static_cast<uint64_t>(maxBatchBytes), IR_BAD_ARGUMENT,
+            "Frame batch exceeds station.acquisition.max_batch_bytes");
+    const uint64_t stampBytes = multiplyBytes(static_cast<uint64_t>(frames), sizeof(IRFrameStamp));
+    return addBytes(pixelBytes, stampBytes);
+}
+
+void requireWithinMemoryLimit(uint64_t required, uint64_t limit)
+{
+    if (required <= limit)
+        return;
+    throw Error(IR_BAD_ARGUMENT, "Estimated SDK frame storage " + std::to_string(required) +
+                " bytes exceeds station.acquisition.max_inflight_bytes " +
+                std::to_string(limit) + " bytes");
+}
+
 const Json &objectField(const Json &object, const char *key, const std::string &path)
 {
     const auto found = object.find(key);
@@ -132,7 +166,7 @@ StationConfig parseStation(const char *text)
             IR_BAD_ARGUMENT, "station.schema_version is unsupported");
 
     const auto &acquisition = objectField(root, "acquisition", "station");
-    allowFields(acquisition, {"backend", "source", "valid_bits", "max_batch_bytes", "queue_capacity"},
+    allowFields(acquisition, {"backend", "source", "valid_bits", "max_batch_bytes", "max_inflight_bytes", "queue_capacity"},
                 "station.acquisition");
     const auto backend = stringField(acquisition, "backend", "station.acquisition");
     StationConfig station;
@@ -154,6 +188,9 @@ StationConfig parseStation(const char *text)
     station.validBits = integerField(acquisition, "valid_bits", 0, 16, "station.acquisition");
     station.maxBatchBytes = optionalBytes(acquisition, "max_batch_bytes", station.maxBatchBytes,
                                           "station.acquisition");
+    station.maxInflightBytes = static_cast<uint64_t>(optionalBytes(
+        acquisition, "max_inflight_bytes", static_cast<int64_t>(station.maxInflightBytes),
+        "station.acquisition"));
     station.queueCapacity = optionalInteger(acquisition, "queue_capacity", station.queueCapacity,
                                             2, 4096, "station.acquisition");
 

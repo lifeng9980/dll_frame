@@ -54,6 +54,13 @@
           "default": 268435456,
           "description": "Maximum RAW16 frame batch pixel buffer size in bytes (default 256 MiB)."
         },
+        "max_inflight_bytes": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 9223372036854775807,
+          "default": 1073741824,
+          "description": "Maximum SDK-managed capture, frame batch, image map, and mask storage (default 1 GiB)."
+        },
         "queue_capacity": {
           "type": "integer",
           "minimum": 2,

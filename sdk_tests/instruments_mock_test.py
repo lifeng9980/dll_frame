@@ -48,6 +48,7 @@ IR_OVEN_MODE_STANDBY = 1
 IR_OVEN_MODE_CONSTANT = 2
 IR_DMM_MODE_ANY = 0
 IR_DMM_MODE_DCV = 1
+IR_DMM_MODE_DCI = 2
 IR_DMM_MODE_DIODE = 4
 
 
@@ -341,9 +342,17 @@ def exercise_dmm6500(sdk, dmm: Dmm6500, dmm_port: int):
     assert handle.value != 0
     try:
         check(sdk.IR_SetDmmMode, handle, IR_DMM_MODE_DCV)
-        check(sdk.IR_SetDmmMode, handle, IR_DMM_MODE_DIODE)
-
         reading = DmmReading()
+        for function, expected in (("VOLTAGE:DC", IR_DMM_MODE_DCV), ("CURR", IR_DMM_MODE_DCI)):
+            dmm.mode = function
+            check(sdk.IR_ReadDmm, handle, expected, c.byref(reading))
+            assert reading.valid == 1 and reading.mode == expected
+        for function, expected in (("VOLT:AC", IR_DMM_MODE_DCV), ("CURRENT:AC", IR_DMM_MODE_DCI)):
+            dmm.mode = function
+            check(sdk.IR_ReadDmm, handle, expected, c.byref(reading), expected=IR_COMPUTATION_FAILED)
+            assert reading.valid == 0
+
+        check(sdk.IR_SetDmmMode, handle, IR_DMM_MODE_DIODE)
         check(sdk.IR_ReadDmm, handle, IR_DMM_MODE_DIODE, c.byref(reading))
         assert math.isclose(reading.value, 0.6125, rel_tol=0.0, abs_tol=1e-9)
         assert reading.mode == IR_DMM_MODE_DIODE

@@ -228,6 +228,32 @@ int main(int argc, char **argv)
               result.completed_frames == 0 && result.cleanup_status == IR_OK, "batch preparation result");
         check(!fs::exists(temporary.path() / "too-small"), "failed batch must not publish output");
 
+        auto limitedStation = station;
+        limitedStation["acquisition"]["queue_capacity"] = 2;
+        limitedStation["acquisition"]["max_inflight_bytes"] = 150;
+        const auto limitedStationText = limitedStation.dump();
+        const auto budgetOutput = temporary.path() / "total-budget";
+        check(IR_RunRecipeJson(limitedStationText.c_str(), recipeText.c_str(), pathUtf8(budgetOutput).c_str(),
+                               &result, error, sizeof error) == IR_BAD_ARGUMENT,
+              "queue and batch above total memory limit must be rejected");
+        check(std::string(error).find("max_inflight_bytes") != std::string::npos &&
+              result.failed_stage == IR_RECIPE_STAGE_PREPARE && result.completed_frames == 0 &&
+              !fs::exists(budgetOutput), "total memory limit result");
+
+        IRGeometry existingGeometry{};
+        check(IR_SetFrameQueueCapacity(8, error, sizeof error) == IR_OK, error);
+        check(IR_OpenFrames(IR_RAW_REPLAY, pathUtf8(rawPath).c_str(), 16, &existingGeometry,
+                            error, sizeof error) == IR_OK, error);
+        const auto busyOutput = pathUtf8(temporary.path() / "existing-source");
+        check(IR_RunRecipeJson(limitedStationText.c_str(), recipeText.c_str(), busyOutput.c_str(),
+                               &result, error, sizeof error) == IR_BUSY, "existing source must remain reserved");
+        IRCaptureStats existingStats{};
+        check(IR_GetCaptureStats(&existingStats, error, sizeof error) == IR_OK, error);
+        check(existingStats.queue_capacity == 8, "busy recipe must preserve the caller queue");
+        check(IR_StartFrames(error, sizeof error) == IR_OK, error);
+        check(IR_StopFrames(error, sizeof error) == IR_OK, error);
+        check(IR_CloseFrames(error, sizeof error) == IR_OK, error);
+
         auto shortSource = recipe;
         shortSource["steps"][0]["frames"] = 3;
         const auto shortSourceText = shortSource.dump();

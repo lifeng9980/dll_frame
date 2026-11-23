@@ -54,6 +54,9 @@ endfunction()
 add_ir_client(ir_c_client "${IR_SDK_ROOT}/examples/c_client.c" "${IR_STATION_LIBRARY}")
 add_ir_client(ir_cpp_client "${CMAKE_CURRENT_LIST_DIR}/cpp_client.cpp" "${IR_STATION_LIBRARY}")
 add_ir_client(ir_analysis_c_sample "${IR_SDK_ROOT}/examples/analysis_algorithms.c")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(ir_analysis_c_sample PRIVATE m)
+endif()
 
 add_executable(ir_run_recipe "${CMAKE_CURRENT_LIST_DIR}/ir_recipe_cli.cpp")
 if(MSVC)
@@ -62,7 +65,7 @@ endif()
 target_include_directories(ir_run_recipe PRIVATE
     "${IR_SDK_INCLUDE_DIR}"
     "${IR_SDK_ROOT}/third_party/nlohmann_json/include")
-target_link_libraries(ir_run_recipe PRIVATE "${IR_STATION_LIBRARY}")
+target_link_libraries(ir_run_recipe PRIVATE "${IR_STATION_LIBRARY}" Threads::Threads)
 if(WIN32)
     add_custom_command(TARGET ir_run_recipe POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different

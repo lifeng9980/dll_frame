@@ -14,11 +14,14 @@ import select
 import socket
 import tempfile
 import threading
+import time
 
 
 SIMULATOR_DIR = Path(__file__).resolve().parents[1] / "simulators"
 sys.path.insert(0, str(SIMULATOR_DIR))
 from ir_sim_devices import It6332a  # noqa: E402
+
+IR_BUSY = 9
 
 
 class Reading(c.Structure):
@@ -100,6 +103,8 @@ def main():
     server_error = []
     commands = []
     command_hook = None
+    response_delay = 0.0
+    delay_command = b""
     listener = None
     master = slave = None
 
@@ -138,6 +143,8 @@ def main():
                                 command, pending = pending.split(b"\n", 1)
                                 commands.append(command.strip())
                                 response = controller.handle(command)
+                                if response_delay and command.strip() == delay_command:
+                                    time.sleep(response_delay)
                                 if command_hook and command.strip() == command_hook[0]:
                                     _, callback = command_hook
                                     command_hook = None
@@ -168,6 +175,8 @@ def main():
                         command, pending = pending.split(b"\n", 1)
                         commands.append(command.strip())
                         response = controller.handle(command)
+                        if response_delay and command.strip() == delay_command:
+                            time.sleep(response_delay)
                         if command_hook and command.strip() == command_hook[0]:
                             _, callback = command_hook
                             command_hook = None
@@ -247,13 +256,50 @@ def main():
         check(sdk.IR_WaitPowerCurrentStable(handle, 1, c.byref(over_spec), c.byref(reading), error, len(error)), 6)
 
         cancel_spec = PowerCurrentStableSpec(12.0, 0.2, 2.0, 0.3, 0.3, 0.05, 0, 0, 2, 10, 2000, 0)
-        command_hook = (b"MEAS:CURR?", sdk.IR_RequestStop)
+        concurrent_statuses = []
+
+        def try_concurrent_wait_and_cancel():
+            other_reading = Reading()
+            other_error = c.create_string_buffer(1024)
+            concurrent_statuses.append(sdk.IR_WaitPowerCurrentStable(
+                handle, 1, c.byref(cancel_spec), c.byref(other_reading), other_error, len(other_error)
+            ))
+            sdk.IR_RequestStop()
+
+        command_hook = (b"MEAS:CURR?", try_concurrent_wait_and_cancel)
         check(sdk.IR_WaitPowerCurrentStable(handle, 1, c.byref(cancel_spec), c.byref(reading), error, len(error)), 8)
+        assert concurrent_statuses == [IR_BUSY], concurrent_statuses
 
         check(sdk.IR_SetPowerOutput(handle, 1, 0, c.byref(reading), error, len(error)))
         assert reading.output_enabled == 0 and reading.measured_v == 0.0
         check(sdk.IR_CloseDevice(handle, error, len(error)))
         handle.value = 0
+
+        # Verify that a reply arriving after the startup deadline is rejected,
+        # without using this intentionally delayed connection for later checks.
+        delayed_handle = c.c_uint64()
+        check(sdk.IR_OpenDevice(4, config, c.byref(delayed_handle), error, len(error)))
+        controller.cooler_profile = True
+        controller._ch1_on_reads = 0
+        check(sdk.IR_SetPowerOutput(
+            delayed_handle, 1, 1, c.byref(reading), error, len(error)
+        ))
+        delay_command = b"MEAS:CURR?"
+        response_delay = 0.05
+        delayed_startup_spec = PowerCurrentStableSpec(
+            12.0, 0.2, 2.0, 0.3, 0.3, 0.05, 1, 30, 2, 0, 1000, 0
+        )
+        delayed_status = sdk.IR_WaitPowerCurrentStable(
+            delayed_handle, 1, c.byref(delayed_startup_spec), c.byref(reading), error, len(error)
+        )
+        response_delay = 0.0
+        delay_command = b""
+        assert delayed_status == 7 and b"startup load current" in error.value.lower(), (
+            delayed_status, error.value, commands[-12:], server_error
+        )
+        check(sdk.IR_CloseDevice(delayed_handle, error, len(error)))
+        controller.output[0] = False
+        controller.cooler_profile = False
 
         with tempfile.TemporaryDirectory(prefix="ir-power-recipe-", dir=args.fixture_parent) as temporary:
             root = Path(temporary)

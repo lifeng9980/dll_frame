@@ -1,6 +1,7 @@
 #include "measurement.h"
 #include "api_common.h"
 #include "station/acquisition/frame_source.h"
+#include "station/instruments/device_lease.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -16,7 +17,7 @@ using namespace ir::api;
 Measurement::Measurement() : lock_(acquisition::lockCapture()), capture_(acquisition::capture())
 {
     require(!capture_.running, IR_BUSY, "Stop the stream before starting a measurement");
-    capture_.beginOperation();
+    require(capture_.beginOperation(), IR_BUSY, "Another cancellable SDK operation is active");
 }
 
 Measurement::~Measurement()
@@ -119,14 +120,20 @@ IRPowerReading waitForPowerCurrentStable(const acquisition::Capture &capture, IR
 
     for (;;) {
         capture.checkStop();
-        require(steady_clock::now() < deadline, IR_TIMEOUT,
-                "Power channel current did not stabilize before deadline");
+        const auto nowBeforeRead = steady_clock::now();
+        const auto activeDeadline = startupConfirmed ? deadline : std::min(deadline, startupDeadline);
+        require(nowBeforeRead < activeDeadline, IR_TIMEOUT,
+                startupConfirmed ? "Power channel current did not stabilize before deadline"
+                                 : "Power channel startup load current was not observed before timeout");
 
         IRPowerReading reading{};
         char detail[1024]{};
         checkStatus(IR_ReadPower(handle, channel, &reading, detail, sizeof detail), detail);
         capture.checkStop();
         const auto now = steady_clock::now();
+        require(now < activeDeadline, IR_TIMEOUT,
+                startupConfirmed ? "Power channel current did not stabilize before deadline"
+                                 : "Power channel startup load current was not observed before timeout");
 
         require(reading.output_enabled != 0, IR_IO_ERROR,
                 "Power channel output must be enabled while waiting for stabilization");
@@ -173,7 +180,8 @@ IRPowerReading waitForPowerCurrentStable(const acquisition::Capture &capture, IR
 
         require(now < deadline, IR_TIMEOUT, "Power channel current did not stabilize before deadline");
         if (spec.sample_interval_ms > 0) {
-            const auto sleepEnd = std::min(deadline, now + milliseconds(spec.sample_interval_ms));
+            const auto nextDeadline = startupConfirmed ? deadline : activeDeadline;
+            const auto sleepEnd = std::min(nextDeadline, now + milliseconds(spec.sample_interval_ms));
             while (steady_clock::now() < sleepEnd) {
                 capture.checkStop();
                 const auto remaining = duration_cast<milliseconds>(sleepEnd - steady_clock::now()).count();
@@ -220,15 +228,17 @@ namespace
 struct StandaloneStopGuard
 {
     ir::acquisition::Capture &capture;
-    bool entered = false;
+    ir::acquisition::Capture::OperationScope scope;
 
-    explicit StandaloneStopGuard(ir::acquisition::Capture &c) noexcept
-        : capture(c), entered(c.tryEnterStandaloneStopScope())
+    explicit StandaloneStopGuard(ir::acquisition::Capture &c)
+        : capture(c), scope(c.enterOperationScope())
     {
+        ir::api::require(scope != ir::acquisition::Capture::OperationScope::unavailable,
+                         IR_BUSY, "Another cancellable SDK operation is active");
     }
     ~StandaloneStopGuard()
     {
-        capture.leaveStandaloneStopScope(entered);
+        capture.leaveOperationScope(scope);
     }
 };
 } // namespace
@@ -249,6 +259,7 @@ extern "C" IR_STATION_API int32_t IR_WaitBlackbodyStable(
                          IR_BAD_ARGUMENT, "Invalid blackbody stabilization parameters");
         auto &cap = ir::acquisition::capture();
         StandaloneStopGuard guard(cap);
+        const ir::instruments::DeviceLease lease(&handle, 1);
         const ir::procedures::BlackbodyTarget target{
             target_c, tolerance_c, stable_window_ms, timeout_ms, require_device_stable != 0};
         *reading = ir::procedures::waitForBlackbody(cap, handle, target);
@@ -271,6 +282,7 @@ extern "C" IR_STATION_API int32_t IR_WaitOvenStable(
                          IR_BAD_ARGUMENT, "Invalid oven stabilization parameters");
         auto &cap = ir::acquisition::capture();
         StandaloneStopGuard guard(cap);
+        const ir::instruments::DeviceLease lease(&handle, 1);
         const ir::procedures::OvenTarget target{
             target_c, tolerance_c, stable_window_ms, timeout_ms, require_no_alarm != 0};
         *reading = ir::procedures::waitForOven(cap, handle, target);
@@ -289,6 +301,7 @@ extern "C" IR_STATION_API int32_t IR_WaitPowerCurrentStable(
         ir::api::needed(reading, 1, 1);
         auto &cap = ir::acquisition::capture();
         StandaloneStopGuard guard(cap);
+        const ir::instruments::DeviceLease lease(&handle, 1);
         *reading = ir::procedures::waitForPowerCurrentStable(cap, handle, channel, *spec);
     });
 }

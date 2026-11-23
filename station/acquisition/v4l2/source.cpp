@@ -74,6 +74,7 @@ public:
 
             geometry_ = {int32_t(pixels.width), int32_t(pixels.height), validBits};
             stride_ = pixels.bytesperline;
+            bufferBytesEstimate_ = uint64_t(pixels.sizeimage) * BufferCount;
         } catch (...) {
             if (fd_ >= 0) close(fd_);
             fd_ = -1;
@@ -88,6 +89,10 @@ public:
     }
 
     IRGeometry geometry() const override { return geometry_; }
+    uint64_t bufferedBytes() const noexcept override
+    {
+        return mappedBufferBytes_ ? mappedBufferBytes_ : bufferBytesEstimate_;
+    }
 
     void start() override
     {
@@ -102,6 +107,7 @@ public:
 
         try {
             mappings_.resize(request.count);
+            mappedBufferBytes_ = 0;
             for (uint32_t index = 0; index < request.count; ++index) {
                 v4l2_buffer buffer{};
                 buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -111,6 +117,9 @@ public:
 
                 auto &mapping = mappings_[index];
                 mapping.length = buffer.length;
+                if (mapping.length > UINT64_MAX - mappedBufferBytes_)
+                    throw Error(IR_BAD_ARGUMENT, "V4L2 buffer memory estimate overflows");
+                mappedBufferBytes_ += mapping.length;
                 mapping.address = mmap(nullptr, mapping.length, PROT_READ | PROT_WRITE,
                                        MAP_SHARED, fd_, buffer.m.offset);
                 if (mapping.address == MAP_FAILED) ioError("Map V4L2 capture buffer");
@@ -240,6 +249,7 @@ private:
         for (const auto &mapping : mappings_)
             if (mapping.address != MAP_FAILED) munmap(mapping.address, mapping.length);
         mappings_.clear();
+        mappedBufferBytes_ = 0;
 
         if (fd_ >= 0) {
             v4l2_requestbuffers request{};
@@ -263,6 +273,8 @@ private:
     int fd_{-1};
     IRGeometry geometry_{};
     size_t stride_{};
+    uint64_t bufferBytesEstimate_{};
+    uint64_t mappedBufferBytes_{};
     std::vector<Mapping> mappings_;
     uint32_t previousDriverSequence_{};
     uint64_t applicationSequence_{};

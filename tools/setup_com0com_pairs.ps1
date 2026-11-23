@@ -16,24 +16,16 @@ $DesiredPairs = @(
     [ordered]@{ role = "blackbody"; client = "COM20"; sim = "COM21"; baud_rate = 9600;   stop_bits = 1 }
 )
 
+$resolvedSerialMap = $null
 if ($EmitSerialMap) {
-    $mapObj = [ordered]@{}
-    foreach ($pair in $DesiredPairs) {
-        $mapObj[$pair.role] = [ordered]@{
-            port        = $pair.sim
-            client_port = $pair.client
-            baud_rate   = $pair.baud_rate
-            stop_bits   = $pair.stop_bits
-        }
+    $resolvedSerialMap = [System.IO.Path]::GetFullPath($EmitSerialMap)
+    if (Test-Path -LiteralPath $resolvedSerialMap) {
+        throw "Serial map already exists and will not be overwritten: $resolvedSerialMap"
     }
-    $resolvedOut = [System.IO.Path]::GetFullPath($EmitSerialMap)
-    $parentDir = Split-Path -Parent $resolvedOut
-    if ($parentDir -and -not (Test-Path $parentDir)) {
-        New-Item -ItemType Directory -Path $parentDir -Force | Out-Null
+    $parentDir = Split-Path -Parent $resolvedSerialMap
+    if ($parentDir -and -not (Test-Path -LiteralPath $parentDir -PathType Container)) {
+        throw "Serial map parent directory does not exist: $parentDir"
     }
-    $jsonText = ($mapObj | ConvertTo-Json -Depth 4) + "`n"
-    [System.IO.File]::WriteAllText($resolvedOut, $jsonText, [System.Text.UTF8Encoding]::new($false))
-    Write-Output "Wrote serial map: $resolvedOut"
 }
 
 function Find-SetupC {
@@ -53,7 +45,10 @@ $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administ
 if (-not $isAdmin) {
     if ($Elevate) {
         Write-Output "Requesting Windows UAC elevation to configure com0com virtual COM pairs..."
-        $childArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath)
+        $childArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"")
+        if ($resolvedSerialMap) {
+            $childArgs += @("-EmitSerialMap", "`"$resolvedSerialMap`"")
+        }
         $proc = Start-Process -FilePath "powershell.exe" -ArgumentList $childArgs -Verb RunAs -PassThru
         if (-not $proc.WaitForExit($ElevationTimeoutSec * 1000)) {
             throw "Timed out after $ElevationTimeoutSec seconds waiting for elevated setup_com0com_pairs.ps1."
@@ -177,8 +172,62 @@ try {
         Invoke-SetupC @("update") | Out-Null
     }
 
+    $finalLines = Invoke-SetupC @("list")
     Write-Output "=== Final com0com port configuration ==="
-    Invoke-SetupC @("list") | ForEach-Object { Write-Output $_ }
+    $finalLines | ForEach-Object { Write-Output $_ }
+
+    $finalPorts = Get-Com0ComPorts $finalLines
+    foreach ($pair in $DesiredPairs) {
+        $clientDevices = @($finalPorts.Values | Where-Object { $_.port_name -ieq $pair.client })
+        $simDevices = @($finalPorts.Values | Where-Object { $_.port_name -ieq $pair.sim })
+        if ($clientDevices.Count -ne 1 -or $simDevices.Count -ne 1) {
+            throw "Expected exactly one configured com0com endpoint for $($pair.client)<->$($pair.sim)."
+        }
+        $a = $clientDevices[0]
+        $b = $simDevices[0]
+        if ($a.id -match '^CNCA(\d+)$') {
+            $pairNumber = $matches[1]
+        } else {
+            throw "The client endpoint $($pair.client) is not a CNCA device."
+        }
+        $aId = $a.id
+        $bId = $b.id
+        $expectedBId = "CNCB$pairNumber"
+        if ($bId -ine $expectedBId) {
+            throw "The configured endpoints $($pair.client) and $($pair.sim) are not opposite ends of one com0com pair."
+        }
+        if ($a.port_name -ine $pair.client -or $b.port_name -ine $pair.sim -or
+            $a.raw -notmatch 'EmuOverrun=yes' -or $b.raw -notmatch 'EmuOverrun=yes') {
+            throw "Final com0com pair $aId/$bId does not match $($pair.client)<->$($pair.sim) with EmuOverrun=yes."
+        }
+    }
+
+    if ($resolvedSerialMap) {
+        $mapObj = [ordered]@{}
+        foreach ($pair in $DesiredPairs) {
+            $mapObj[$pair.role] = [ordered]@{
+                port        = $pair.sim
+                client_port = $pair.client
+                baud_rate   = $pair.baud_rate
+                stop_bits   = $pair.stop_bits
+            }
+        }
+        $jsonText = ($mapObj | ConvertTo-Json -Depth 4) + "`n"
+        $encoding = [System.Text.UTF8Encoding]::new($false)
+        $bytes = $encoding.GetBytes($jsonText)
+        $stream = [System.IO.File]::Open(
+            $resolvedSerialMap,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None
+        )
+        try {
+            $stream.Write($bytes, 0, $bytes.Length)
+        } finally {
+            $stream.Dispose()
+        }
+        Write-Output "Wrote serial map: $resolvedSerialMap"
+    }
 } finally {
     Pop-Location
 }

@@ -41,10 +41,14 @@ std::string upper(std::string text)
 int32_t classifyFunction(std::string_view raw)
 {
     const auto text = upper(cleanReply(std::string(raw)));
-    if (text.find("DIOD") != std::string::npos) return IR_DMM_MODE_DIODE;
-    if (text.find("VOLT") != std::string::npos) return IR_DMM_MODE_DCV;
-    if (text.find("CURR") != std::string::npos) return IR_DMM_MODE_DCI;
-    if (text.find("RES") != std::string::npos) return IR_DMM_MODE_RES;
+    if (text == "DIOD" || text == "DIODE")
+        return IR_DMM_MODE_DIODE;
+    if (text == "VOLT" || text == "VOLTAGE" || text == "VOLT:DC" || text == "VOLTAGE:DC")
+        return IR_DMM_MODE_DCV;
+    if (text == "CURR" || text == "CURRENT" || text == "CURR:DC" || text == "CURRENT:DC")
+        return IR_DMM_MODE_DCI;
+    if (text == "RES" || text == "RESISTANCE" || text == "FRES" || text == "FRESISTANCE")
+        return IR_DMM_MODE_RES;
     return IR_DMM_MODE_ANY;
 }
 

@@ -1,6 +1,7 @@
 #include "IR_analysis.h"
 #include "IR_device.h"
 #include "IR_station.h"
+#include "posix_stop_signal.h"
 #include <nlohmann/json.hpp>
 
 #ifdef _WIN32
@@ -96,31 +97,7 @@ private:
     bool installed_{false};
 };
 #else
-void interruptHandler(int)
-{
-    if (stopWindowActive.load(std::memory_order_acquire))
-        IR_RequestStop();
-}
-
-class StopSignalGuard {
-public:
-    StopSignalGuard()
-    {
-        IR_RequestStop();
-        stopWindowActive.store(true, std::memory_order_release);
-        previousInt_ = std::signal(SIGINT, interruptHandler);
-        previousTerm_ = std::signal(SIGTERM, interruptHandler);
-    }
-    ~StopSignalGuard()
-    {
-        stopWindowActive.store(false, std::memory_order_release);
-        std::signal(SIGINT, previousInt_);
-        std::signal(SIGTERM, previousTerm_);
-    }
-private:
-    void (*previousInt_)(int){SIG_DFL};
-    void (*previousTerm_)(int){SIG_DFL};
-};
+using StopSignalGuard = ir::examples::PosixStopSignalGuard;
 #endif
 
 struct FramesGuard {
@@ -282,6 +259,7 @@ int runAcceptMode(const Arguments &args)
         source = pathUtf8(fs::absolute(pathFromUtf8(args.source)).lexically_normal());
 
     char err[2048]{};
+    StopSignalGuard stopGuard;
     FramesGuard guard;
     IRGeometry geom{};
     int32_t st = IR_OpenFrames(backend, source.c_str(), args.validBits, &geom, err, sizeof err);
@@ -362,7 +340,6 @@ int runAcceptMode(const Arguments &args)
 
     const auto runStart = std::chrono::steady_clock::now();
     {
-        StopSignalGuard stopGuard;
         if (continuousStream) {
             st = IR_StartFrames(err, sizeof err);
             if (st != IR_OK) {

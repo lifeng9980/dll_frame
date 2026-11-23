@@ -6,6 +6,8 @@
 #include <nlohmann/json.hpp>
 #include <functional>
 #include <initializer_list>
+#include <cstdint>
+#include <limits>
 #include <map>
 #include <span>
 #include <string>
@@ -24,6 +26,7 @@ struct StationConfig {
     int backend{};
     int validBits{};
     int64_t maxBatchBytes{256 * 1024 * 1024};
+    uint64_t maxInflightBytes{1024ULL * 1024ULL * 1024ULL};
     int32_t queueCapacity{64};
     std::string source;
     std::map<std::string, DeviceConfig> devices;
@@ -124,6 +127,33 @@ struct ExecutionContext {
     std::map<std::string, IRGjbDriftContext> driftContexts;
     std::map<std::string, Json> metrics;
     std::map<std::string, double> scalarValues;
+
+    uint64_t retainedBytes() const noexcept
+    {
+        uint64_t bytes = 0;
+        const auto add = [&bytes](uint64_t count, uint64_t itemBytes) {
+            if (itemBytes != 0 && count > (std::numeric_limits<uint64_t>::max() - bytes) / itemBytes) {
+                bytes = std::numeric_limits<uint64_t>::max();
+                return;
+            }
+            bytes += count * itemBytes;
+        };
+        for (const auto &[name, batch] : batches) {
+            (void)name;
+            add(batch.pixels.capacity(), sizeof(uint16_t));
+            add(batch.stamps.capacity(), sizeof(IRFrameStamp));
+        }
+        for (const auto &[name, map] : maps) {
+            (void)name;
+            add(map.data.capacity(), sizeof(double));
+        }
+        for (const auto &[name, mask] : masks) {
+            (void)name;
+            add(mask.data.capacity(), sizeof(uint8_t));
+        }
+        add(driftContexts.size(), sizeof(IRGjbDriftContext));
+        return bytes;
+    }
 };
 
 struct FlushStep {
@@ -258,6 +288,9 @@ struct RecipeConfigV2 {
     std::vector<std::string> standbyOvens;
     Json definition;
     bool hasRepeatBurst{false};
+    size_t doubleMapSlotCount{};
+    size_t byteMaskSlotCount{};
+    size_t driftContextSlotCount{};
 };
 
 StationConfig parseStation(const char *text);
@@ -266,6 +299,11 @@ int detectRecipeSchemaVersion(const char *text);
 RecipeConfigV2 parseRecipeV2(const char *text, const StationConfig &station);
 void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station,
                  const RecipeConfigV2 &recipe, const char *directory, IRRecipeResult &result);
+
+uint64_t addBytes(uint64_t total, uint64_t additional);
+uint64_t multiplyBytes(uint64_t count, uint64_t itemBytes);
+uint64_t batchStorageBytes(IRGeometry geometry, int32_t frames, int64_t maxBatchBytes);
+void requireWithinMemoryLimit(uint64_t required, uint64_t limit);
 
 // 设备和指标配置共用字段读取与错误位置。
 const Json &objectField(const Json &object, const char *key, const std::string &path);

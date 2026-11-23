@@ -181,7 +181,8 @@ struct ComplexFft1dPlan
 std::vector<double> buildWindow1d(int32_t length, int32_t windowKind)
 {
     std::vector<double> w(static_cast<size_t>(length), 1.0);
-    if (length <= 1 || windowKind == IR_WINDOW_RECTANGULAR)
+    // 对称 Hann 在长度为 2 时两个端点均为零，短轴保留等权采样。
+    if (length <= 2 || windowKind == IR_WINDOW_RECTANGULAR)
         return w;
     for (int32_t i = 0; i < length; ++i)
     {

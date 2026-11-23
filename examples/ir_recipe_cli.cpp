@@ -1,4 +1,5 @@
 #include "IR_recipe.h"
+#include "posix_stop_signal.h"
 #include <nlohmann/json.hpp>
 #ifdef _WIN32
 #include <Windows.h>
@@ -161,31 +162,7 @@ private:
     bool installed_{false};
 };
 #else
-void interruptHandler(int)
-{
-    if (stopWindowActive.load(std::memory_order_acquire))
-        IR_RequestStop();
-}
-
-class StopSignalGuard {
-public:
-    StopSignalGuard()
-    {
-        IR_RequestStop();
-        stopWindowActive.store(true, std::memory_order_release);
-        previousInt_ = std::signal(SIGINT, interruptHandler);
-        previousTerm_ = std::signal(SIGTERM, interruptHandler);
-    }
-    ~StopSignalGuard()
-    {
-        stopWindowActive.store(false, std::memory_order_release);
-        std::signal(SIGINT, previousInt_);
-        std::signal(SIGTERM, previousTerm_);
-    }
-private:
-    void (*previousInt_)(int){SIG_DFL};
-    void (*previousTerm_)(int){SIG_DFL};
-};
+using StopSignalGuard = ir::examples::PosixStopSignalGuard;
 #endif
 
 int execute(const std::vector<std::string> &values)

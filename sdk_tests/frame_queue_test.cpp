@@ -7,11 +7,24 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <string>
 #include <thread>
 #include <vector>
 
 namespace fs = std::filesystem;
+
+namespace ir::acquisition {
+struct FrameQueueTestAccess {
+    static void holdPreviewLock(FrameQueue &queue, std::promise<void> &locked,
+                                std::shared_future<void> release)
+    {
+        std::unique_lock lock(queue.previewMutex_);
+        locked.set_value();
+        release.wait();
+    }
+};
+}
 
 namespace {
 
@@ -43,6 +56,53 @@ struct TempDirGuard {
 };
 
 using ir::acquisition::FrameQueue;
+
+void testPreviewContentionDoesNotBlockMeasurementQueue()
+{
+    FrameQueue queue;
+    const IRGeometry geometry{4, 4, 16};
+    queue.configure(geometry, 8);
+    queue.resetSession(geometry, 8, true);
+
+    std::promise<void> locked;
+    std::promise<void> release;
+    const auto releaseFuture = release.get_future().share();
+    std::thread previewHolder([&] {
+        ir::acquisition::FrameQueueTestAccess::holdPreviewLock(queue, locked, releaseFuture);
+    });
+    locked.get_future().wait();
+
+    std::vector<uint16_t> previewPixels(16);
+    IRGeometry previewGeometry{};
+    int32_t hasFrame = 1;
+    queue.tryReadLatest(previewPixels.data(), 16, &previewGeometry, nullptr, hasFrame);
+    CHECK(hasFrame == 0);
+
+    std::promise<void> producerDone;
+    auto producerFuture = producerDone.get_future();
+    std::thread producer([&] {
+        std::vector<uint16_t> pixels(16, 7);
+        for (uint64_t sequence = 1; sequence <= 100; ++sequence) {
+            IRFrameStamp stamp{};
+            stamp.sequence = sequence;
+            stamp.fields = IR_HAS_SEQUENCE;
+            queue.push(pixels.data(), stamp);
+        }
+        producerDone.set_value();
+    });
+
+    const bool producedWhilePreviewHeld =
+        producerFuture.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready;
+    release.set_value();
+    producer.join();
+    previewHolder.join();
+
+    const auto stats = queue.stats();
+    CHECK(producedWhilePreviewHeld);
+    CHECK(stats.frames_received == 100);
+    CHECK(stats.queue_depth == 8);
+    CHECK(stats.frames_dropped >= 92);
+}
 
 void testConcurrentLiveProducerAndSlowPreview()
 {
@@ -113,8 +173,9 @@ void testConcurrentLiveProducerAndSlowPreview()
     CHECK(delivered == 80);
     CHECK(!previewError.load());
     CHECK(previewSeen.load());
+    CHECK(stats.frames_received == 80);
     CHECK(stats.frames_delivered == 80);
-    CHECK(stats.preview_frames >= 80);
+    CHECK(stats.preview_frames > 0 && stats.preview_frames <= 80);
     CHECK(stats.frames_dropped == 0);
     CHECK(stats.estimated_fps > 0.0);
 }
@@ -318,6 +379,19 @@ void testPublicCApiConcurrentPreviewAndStats()
 
     std::vector<uint16_t> readBuf(static_cast<size_t>(nPix), 0);
     IRFrameStamp oneStamp{};
+    int32_t foreignCompleted = 0;
+    int32_t foreignStatus = IR_OK;
+    std::thread foreignReader([&] {
+        uint16_t foreignBuffer[16]{};
+        IRFrameStamp foreignStamp{};
+        char foreignError[256]{};
+        foreignStatus = IR_ReadFrames(1, 1000, foreignBuffer, 16, &foreignStamp, 1,
+                                      &foreignCompleted, foreignError, sizeof foreignError);
+    });
+    foreignReader.join();
+    CHECK(foreignStatus == IR_BUSY);
+    CHECK(foreignCompleted == 0);
+
     for (int i = 0; i < 10; ++i) {
         int32_t completed = 0;
         CHECK(IR_ReadFrames(1, 1000, readBuf.data(), static_cast<int64_t>(readBuf.size()),
@@ -327,6 +401,12 @@ void testPublicCApiConcurrentPreviewAndStats()
     }
     for (int wait = 0; wait < 200 && (!sawPreview.load() || !sawTooSmallGeom.load()); ++wait)
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    std::thread canceler([] { IR_RequestStop(); });
+    canceler.join();
+    int32_t cancelledCompleted = 0;
+    CHECK(IR_ReadFrames(1, 1000, readBuf.data(), static_cast<int64_t>(readBuf.size()),
+                        &oneStamp, 1, &cancelledCompleted, err, sizeof err) == IR_CANCELLED);
+    CHECK(cancelledCompleted == 0);
     CHECK(IR_StopFrames(err, sizeof err) == IR_OK);
 
     IRNoiseRecipe recipe{};
@@ -355,12 +435,33 @@ void testPublicCApiConcurrentPreviewAndStats()
     CHECK(IR_GetCaptureStats(&finalStats, err, sizeof err) == IR_OK);
     CHECK(finalStats.running == 0);
     CHECK(IR_SetFrameQueueCapacity(64, err, sizeof err) == IR_OK);
+
+    const TempDirGuard largeFixture(fs::temp_directory_path() / "ir_sdk_frame_queue_budget_test");
+    constexpr int32_t largeRows = 512;
+    constexpr int32_t largeCols = 640;
+    std::vector<uint16_t> largeFrame(static_cast<size_t>(largeRows) * largeCols, 0);
+    {
+        std::ofstream rawOut(largeFixture.dir / "frames.raw", std::ios::binary);
+        rawOut.write(reinterpret_cast<const char *>(largeFrame.data()),
+                     static_cast<std::streamsize>(largeFrame.size() * sizeof(uint16_t)));
+        std::ofstream csvOut(largeFixture.dir / "frames.csv", std::ios::binary);
+        csvOut << "frame_index,width,height,stride_bytes,pixel_format,bit_depth,endianness\n";
+        csvOut << "0,640,512,1280,RAW16_LE,16,little\n";
+    }
+    const auto largeU8Path = largeFixture.dir.u8string();
+    const std::string largePath(reinterpret_cast<const char *>(largeU8Path.data()), largeU8Path.size());
+    CHECK(IR_OpenFrames(IR_RAW_REPLAY, largePath.c_str(), 16, &geom, err, sizeof err) == IR_OK);
+    CHECK(IR_SetFrameQueueCapacity(4096, err, sizeof err) == IR_BAD_ARGUMENT);
+    CHECK(IR_GetCaptureStats(&finalStats, err, sizeof err) == IR_OK);
+    CHECK(finalStats.queue_capacity == 64);
+    CHECK(IR_CloseFrames(err, sizeof err) == IR_OK);
 }
 
 } // namespace
 
 int main()
 {
+    testPreviewContentionDoesNotBlockMeasurementQueue();
     testConcurrentLiveProducerAndSlowPreview();
     testOverflowPrefixAndGapRecovery();
     testCancelWakesBlockedConsumer();
