@@ -128,7 +128,7 @@ std::shared_ptr<LibraryHandle> getOrLoadNativeLibrary(
 
 bool isPluginFileExtension(const std::filesystem::path &p)
 {
-    std::string ext = p.extension().string();
+    std::string ext = pathToUtf8(p.extension());
     std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
     });
@@ -234,7 +234,7 @@ public:
                                  "C++ exception escaped plugin prepare(): " + plugin_.methodName);
         }
         errBuf[sizeof(errBuf) - 1] = '\0';
-        if (st != IR_OK) {
+        if (st != IR_OK || firstCallbackErrorCode_ != IR_OK) {
             const int32_t finalCode = (firstCallbackErrorCode_ != IR_OK) ? firstCallbackErrorCode_ : st;
             std::string msg = errBuf[0] != '\0'
                 ? std::string(errBuf)
@@ -334,8 +334,9 @@ private:
         ir::procedures::recipe::SlotKind kind{};
         if (!toRecipeSlotKind(slotKind, kind))
             return recordCallbackError(IR_BAD_ARGUMENT, "bind_output_slot: invalid slot_kind");
-        if (kind == ir::procedures::recipe::SlotKind::batch)
-            return recordCallbackError(IR_BAD_ARGUMENT, "bind_output_slot: plugins cannot allocate batch slots");
+        if (kind != ir::procedures::recipe::SlotKind::double_map &&
+            kind != ir::procedures::recipe::SlotKind::byte_mask)
+            return recordCallbackError(IR_BAD_ARGUMENT, "bind_output_slot: only double_map and byte_mask are supported");
 
         try {
             queriedOutputs_.insert(outputKey);
@@ -364,8 +365,8 @@ private:
     {
         if (suffixUtf8 == nullptr || unitUtf8 == nullptr)
             return recordCallbackError(IR_NULL_POINTER, "declare_scalar_output: suffix and unit must not be null");
-        if (suffixUtf8[0] != '\0' && suffixUtf8[0] != '.')
-            return recordCallbackError(IR_BAD_ARGUMENT, "declare_scalar_output: non-empty suffix must start with '.'");
+        if (suffixUtf8[0] != '.' || suffixUtf8[1] == '\0' || unitUtf8[0] == '\0')
+            return recordCallbackError(IR_BAD_ARGUMENT, "declare_scalar_output: requires '.suffix' and non-empty unit");
 
         try {
             if (!declaredSuffixes_.insert(suffixUtf8).second) {
@@ -448,6 +449,12 @@ public:
                 : (lastError_[0] != '\0' ? std::string(lastError_)
                                          : ("Plugin execute() failed: " + plugin_.methodName));
             throw ir::api::Error(st, std::move(msg));
+        }
+
+        for (const auto &[outKey, _] : binding_.outputs) {
+            ir::api::require(allocatedOutputs_.count(outKey) > 0, IR_COMPUTATION_FAILED,
+                             "Plugin did not allocate bound output slot '" + outKey +
+                                 "' in " + plugin_.methodName);
         }
 
         std::vector<double> orderedScalars;
@@ -682,6 +689,7 @@ private:
             slot.data.resize(static_cast<size_t>(count));
             if (!inPlaceAlias)
                 std::fill(slot.data.begin(), slot.data.end(), T{});
+            allocatedOutputs_.insert(outputKey);
             *outData = slot.data.data();
             return IR_OK;
         } catch (const std::exception &e) {
@@ -731,7 +739,10 @@ private:
                 setLastError("emit_scalar: undeclared scalar output suffix");
                 return IR_BAD_ARGUMENT;
             }
-            emittedScalars_[suffixUtf8] = value;
+            if (!emittedScalars_.emplace(suffixUtf8, value).second) {
+                setLastError("emit_scalar: duplicate scalar emission in single execute()");
+                return IR_BAD_ARGUMENT;
+            }
             return IR_OK;
         } catch (const std::exception &e) {
             setLastError(e.what());
@@ -751,6 +762,7 @@ private:
     const PluginStepBinding &binding_;
     const std::string &stepName_;
     ir::procedures::recipe::AnalysisRunContext &runCtx_;
+    std::set<std::string> allocatedOutputs_;
     std::map<std::string, double, std::less<>> emittedScalars_;
     char lastError_[1024]{};
     IRHostCallbacks vtable_{};
