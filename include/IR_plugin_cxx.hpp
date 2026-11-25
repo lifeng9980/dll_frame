@@ -11,6 +11,8 @@
 template <class Fn>
 inline int32_t ir_plugin_guard(char *err, int32_t err_bytes, Fn &&fn) noexcept
 {
+    if (err_bytes < 0 || (err_bytes > 0 && !err))
+        return IR_BAD_ARGUMENT;
     if (err && err_bytes > 0)
         err[0] = '\0';
     auto copy_err = [err, err_bytes](const char *msg) noexcept {

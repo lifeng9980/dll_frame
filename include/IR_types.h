@@ -36,6 +36,7 @@ typedef struct IRFrameStamp {
     int64_t timestamp_ns;
     uint32_t lost_frames, fields;
     int32_t time_origin;
+    int32_t reserved;
 } IRFrameStamp;
 
 #ifdef __cplusplus

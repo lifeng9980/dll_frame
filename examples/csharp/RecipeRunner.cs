@@ -20,13 +20,7 @@ internal static class RecipeRunner
 
         try
         {
-            var libraryDirectory = Environment.GetEnvironmentVariable("IR_SDK_LIB_DIR");
-            if (string.IsNullOrWhiteSpace(libraryDirectory))
-            {
-                Console.Error.WriteLine("Set IR_SDK_LIB_DIR to the platform library directory.");
-                return 2;
-            }
-            IRStation.ConfigureNativeLibraries(Path.GetFullPath(libraryDirectory));
+            IRStation.ConfigureNativeLibraries(IRStation.ResolveLibraryDirectory());
             if (string.IsNullOrEmpty(IRStation.StationVersion()))
                 throw new InvalidOperationException("IR_StationVersion returned an empty string.");
 

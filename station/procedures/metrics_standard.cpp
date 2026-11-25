@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <optional>
 #include <vector>
 
 namespace ir::procedures::recipe {
@@ -57,24 +58,24 @@ PreparedMetric prepGbEvaluate(const std::string &name, const Json &inputs, const
             checkMapSize(v1, n, g, "gb_evaluate.v1_map");
             checkMapSize(v2, n, g, "gb_evaluate.v2_map");
             checkMapSize(vn, n, g, "gb_evaluate.vn_map");
-            std::vector<uint8_t> validMask, badMask;
+            std::optional<SlotBufferWriter<ByteMask>> validWriter, badWriter;
             IRGbBadPixelMasks masks{};
             masks.pixel_capacity = n;
             if (!validOut.empty()) {
-                validMask.assign(static_cast<size_t>(n), 0);
-                masks.valid_mask = validMask.data();
+                validWriter.emplace(ctx.masks, validOut, g, n, validOut != badOut, true);
+                masks.valid_mask = validWriter->data();
             }
             if (!badOut.empty()) {
-                badMask.assign(static_cast<size_t>(n), 0);
-                masks.total_bad_mask = badMask.data();
+                badWriter.emplace(ctx.masks, badOut, g, n, badOut != validOut, true);
+                masks.total_bad_mask = badWriter->data();
             }
             IRGbSummary gb{};
             char err[1024]{};
             checkStatus(IR_GbEvaluateMaps(v1.data.data(), v2.data.data(), vn.data.data(),
                 g.height, g.width, n, &cp, &crit, &gb,
                 (!validOut.empty() || !badOut.empty()) ? &masks : nullptr, err, sizeof err), err);
-            if (!validOut.empty()) ctx.masks[validOut] = {g, std::move(validMask)};
-            if (!badOut.empty()) ctx.masks[badOut] = {g, std::move(badMask)};
+            if (validWriter) validWriter->commit();
+            if (badWriter) badWriter->commit();
             recordScalarOutputs(ctx, name, outs, {
                 gb.before_avg_snr, gb.after_avg_netd_mk, gb.after_response_nonuniformity_pct,
                 double(gb.bad_pixels.total_bad_count), gb.bad_pixels.total_bad_rate_pct,
@@ -142,24 +143,24 @@ PreparedMetric prepGjbEvaluate(const std::string &name, const Json &inputs, cons
             checkMapSize(vn, n, g, "gjb_evaluate.vn_map");
             checkMapSize(vm, n, g, "gjb_evaluate.vm_map");
 
-            std::vector<uint8_t> validMask, badMask;
+            std::optional<SlotBufferWriter<ByteMask>> validWriter, badWriter;
             IRGjbBadPixelMasks masks{};
             masks.pixel_capacity = n;
             if (!validOut.empty()) {
-                validMask.assign(static_cast<size_t>(n), 0);
-                masks.valid_mask = validMask.data();
+                validWriter.emplace(ctx.masks, validOut, g, n, validOut != badOut, true);
+                masks.valid_mask = validWriter->data();
             }
             if (!badOut.empty()) {
-                badMask.assign(static_cast<size_t>(n), 0);
-                masks.total_bad_mask = badMask.data();
+                badWriter.emplace(ctx.masks, badOut, g, n, badOut != validOut, true);
+                masks.total_bad_mask = badWriter->data();
             }
             IRGjbSummary gjb{};
             char err[1024]{};
             checkStatus(IR_GjbEvaluateMaps(v1.data.data(), v2.data.data(), vn.data.data(), vm.data.data(),
                 g.height, g.width, n, &cp, &crit, &gjb,
                 (!validOut.empty() || !badOut.empty()) ? &masks : nullptr, err, sizeof err), err);
-            if (!validOut.empty()) ctx.masks[validOut] = {g, std::move(validMask)};
-            if (!badOut.empty()) ctx.masks[badOut] = {g, std::move(badMask)};
+            if (validWriter) validWriter->commit();
+            if (badWriter) badWriter->commit();
             if (!ctxOut.empty()) {
                 IRGjbDriftContext dctx{};
                 dctx.volts_per_count = gjb.volts_per_count;
@@ -501,11 +502,11 @@ PreparedMetric prepFlickerDetect(const std::string &name, const Json &inputs, co
                 checkMaskSize(vm, n, g, "flicker_detect.valid_mask");
                 maskPtr = vm.data.data();
             }
-            std::vector<uint8_t> outMask;
+            std::optional<SlotBufferWriter<ByteMask>> outWriter;
             uint8_t *outMaskPtr = nullptr;
             if (!flickerOut.empty()) {
-                outMask.resize(static_cast<size_t>(n));
-                outMaskPtr = outMask.data();
+                outWriter.emplace(ctx.masks, flickerOut, g, n, flickerOut != maskSlot);
+                outMaskPtr = outWriter->data();
             }
             IRFlickerSummary summary{};
             char err[1024]{};
@@ -514,8 +515,8 @@ PreparedMetric prepFlickerDetect(const std::string &name, const Json &inputs, co
                 kPtr, bPtr, maskPtr, mult, exceedThresh,
                 &summary, nullptr, outMaskPtr, n, nullptr, nullptr, 0,
                 err, sizeof err), err);
-            if (!flickerOut.empty())
-                ctx.masks[flickerOut] = {g, std::move(outMask)};
+            if (outWriter)
+                outWriter->commit();
             recordScalarOutputs(ctx, name, outs, {
                 static_cast<double>(summary.flicker_count),
                 static_cast<double>(summary.valid_pixel_count),
@@ -566,27 +567,26 @@ PreparedMetric prepFft2d(const std::string &name, const Json &inputs, const Json
                 checkMaskSize(vm, n, g, "fft2d.valid_mask");
                 maskPtr = vm.data.data();
             }
-            std::vector<double> magMap;
-            std::vector<double> pwrMap;
+            std::optional<SlotBufferWriter<DoubleMap>> magWriter, pwrWriter;
             double *magPtr = nullptr;
             double *pwrPtr = nullptr;
             if (!magOut.empty()) {
-                magMap.resize(static_cast<size_t>(n));
-                magPtr = magMap.data();
+                magWriter.emplace(ctx.maps, magOut, g, n, magOut != mapSlot && magOut != pwrOut);
+                magPtr = magWriter->data();
             }
             if (!pwrOut.empty()) {
-                pwrMap.resize(static_cast<size_t>(n));
-                pwrPtr = pwrMap.data();
+                pwrWriter.emplace(ctx.maps, pwrOut, g, n, pwrOut != mapSlot && pwrOut != magOut);
+                pwrPtr = pwrWriter->data();
             }
             IRFft2dSummary summary{};
             char err[1024]{};
             checkStatus(IR_Fft2dMagnitudeF64(m.data.data(), maskPtr, g.height, g.width, n,
                 winKind, detrend ? 1 : 0, shiftDc ? 1 : 0,
                 &summary, magPtr, pwrPtr, err, sizeof err), err);
-            if (!magOut.empty())
-                ctx.maps[magOut] = {g, std::move(magMap)};
-            if (!pwrOut.empty())
-                ctx.maps[pwrOut] = {g, std::move(pwrMap)};
+            if (magWriter)
+                magWriter->commit();
+            if (pwrWriter)
+                pwrWriter->commit();
             recordScalarOutputs(ctx, name, outs, {
                 summary.dc_magnitude,
                 summary.peak_ac_magnitude,

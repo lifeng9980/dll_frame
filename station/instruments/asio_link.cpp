@@ -51,6 +51,18 @@ void withDeadline(asio::io_context &io, Deadline deadline, const char *operation
 
 std::vector<std::string> resolveTcpAddresses(const TcpEndpoint &endpoint, Deadline deadline)
 {
+    asio::error_code literalEc;
+    auto literalAddr = asio::ip::make_address(endpoint.host, literalEc);
+    if (!literalEc) {
+        if (literalAddr.is_v6() && literalAddr.to_v6().is_v4_mapped()) {
+            const auto bytes = literalAddr.to_v6().to_bytes();
+            asio::ip::address_v4::bytes_type ipv4{};
+            std::copy(bytes.end() - ipv4.size(), bytes.end(), ipv4.begin());
+            literalAddr = asio::ip::address_v4(ipv4);
+        }
+        return {literalAddr.to_string()};
+    }
+
     asio::io_context io;
     Tcp::resolver resolver(io);
     Tcp::resolver::results_type resolved;

@@ -81,6 +81,7 @@ class IRFrameStamp(c.Structure):
         ("lost_frames", c.c_uint32),
         ("fields", c.c_uint32),
         ("time_origin", c.c_int32),
+        ("reserved", c.c_int32),
     ]
 
 
@@ -89,6 +90,7 @@ class IRBlackbodyReading(c.Structure):
         ("actual_c", c.c_double),
         ("setpoint_c", c.c_double),
         ("stable", c.c_int32),
+        ("reserved", c.c_int32),
     ]
 
 

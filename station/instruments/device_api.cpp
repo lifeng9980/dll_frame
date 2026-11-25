@@ -2,6 +2,7 @@
 #include "api_common.h"
 #include "device_lease.h"
 #include "drivers.h"
+#include "utf8_path.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cmath>
@@ -86,8 +87,8 @@ std::string serialEndpointKey(const std::string &name)
     return "serial:" + key;
 #else
     std::error_code errorCode;
-    const auto resolved = std::filesystem::canonical(std::filesystem::path(name), errorCode);
-    return "serial:" + (errorCode ? name : resolved.string());
+    const auto resolved = std::filesystem::canonical(ir::utf8::pathFromUtf8(name), errorCode);
+    return "serial:" + (errorCode ? name : ir::utf8::pathToUtf8(resolved));
 #endif
 }
 

@@ -63,42 +63,7 @@ std::string wideToUtf8(const wchar_t *text, size_t len)
 }
 #endif
 
-std::atomic<bool> stopWindowActive{false};
-
-#ifdef _WIN32
-BOOL WINAPI consoleCtrlHandler(DWORD ctrlType)
-{
-    if (!stopWindowActive.load(std::memory_order_acquire))
-        return FALSE;
-    if (ctrlType == CTRL_C_EVENT || ctrlType == CTRL_BREAK_EVENT) {
-        IR_RequestStop();
-        return TRUE;
-    }
-    return FALSE;
-}
-
-class StopSignalGuard {
-public:
-    StopSignalGuard()
-    {
-        IR_RequestStop();
-        stopWindowActive.store(true, std::memory_order_release);
-        installed_ = SetConsoleCtrlHandler(consoleCtrlHandler, TRUE) != 0;
-        if (!installed_)
-            stopWindowActive.store(false, std::memory_order_release);
-    }
-    ~StopSignalGuard()
-    {
-        stopWindowActive.store(false, std::memory_order_release);
-        if (installed_)
-            SetConsoleCtrlHandler(consoleCtrlHandler, FALSE);
-    }
-private:
-    bool installed_{false};
-};
-#else
-using StopSignalGuard = ir::examples::PosixStopSignalGuard;
-#endif
+using ir::examples::StopSignalGuard;
 
 struct FramesGuard {
     bool open = false;

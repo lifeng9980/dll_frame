@@ -177,9 +177,13 @@ public:
             }
             const auto *source = static_cast<const uint8_t *>(mappings_[buffer.index].address);
             auto *destination = reinterpret_cast<uint8_t *>(pixels);
-            for (int32_t row = 0; row < geometry_.height; ++row)
-                std::memcpy(destination + size_t(row) * rowBytes,
-                            source + size_t(row) * stride_, rowBytes);
+            if (stride_ == rowBytes) {
+                std::memcpy(destination, source, frameBytes);
+            } else {
+                for (int32_t row = 0; row < geometry_.height; ++row)
+                    std::memcpy(destination + size_t(row) * rowBytes,
+                                source + size_t(row) * stride_, rowBytes);
+            }
 
             stamp = {};
             stamp.sequence = applicationSequence_++;

@@ -147,14 +147,33 @@ std::vector<double> buildWindow1d(int32_t length, int32_t windowKind, bool fallb
     return w;
 }
 
-void computeRfftCore(const double *signal,
-                     int32_t length,
-                     double sampleRateHz,
-                     int32_t windowKind,
-                     int32_t detrendMean,
-                     double *outFreqsHz,
-                     double *outAmplitude,
-                     double *outPsd)
+struct PreparedRfft1d {
+    std::vector<double> win;
+    double windowSum{0.0};
+    double windowSqSum{0.0};
+    ComplexFft1dPlan plan;
+
+    PreparedRfft1d(int32_t length, int32_t windowKind)
+        : win(buildWindow1d(length, windowKind)),
+          plan(static_cast<size_t>(length))
+    {
+        for (double w : win) {
+            windowSum += w;
+            windowSqSum += w * w;
+        }
+        require(windowSum > 0.0 && windowSqSum > 0.0, IR_BAD_ARGUMENT,
+                "Selected window yields zero weight for this signal length");
+    }
+};
+
+void computeRfftWithPlan(const double *signal,
+                         int32_t length,
+                         double sampleRateHz,
+                         int32_t detrendMean,
+                         const PreparedRfft1d &prep,
+                         double *outFreqsHz,
+                         double *outAmplitude,
+                         double *outPsd)
 {
     double mean = 0.0;
     if (detrendMean != 0)
@@ -165,23 +184,12 @@ void computeRfftCore(const double *signal,
         mean = sum / static_cast<double>(length);
     }
 
-    const std::vector<double> win = buildWindow1d(length, windowKind);
     std::vector<Complex> windowed(static_cast<size_t>(length));
-    double windowSum = 0.0;
-    double windowSqSum = 0.0;
     for (int32_t i = 0; i < length; ++i)
-    {
-        const double w = win[static_cast<size_t>(i)];
-        windowed[static_cast<size_t>(i)] = Complex((signal[i] - mean) * w, 0.0);
-        windowSum += w;
-        windowSqSum += w * w;
-    }
-    require(windowSum > 0.0 && windowSqSum > 0.0, IR_BAD_ARGUMENT,
-            "Selected window yields zero weight for this signal length");
+        windowed[static_cast<size_t>(i)] = Complex((signal[i] - mean) * prep.win[static_cast<size_t>(i)], 0.0);
 
-    const ComplexFft1dPlan plan(static_cast<size_t>(length));
     std::vector<Complex> spectrum(static_cast<size_t>(length));
-    plan.transform(windowed.data(), spectrum.data());
+    prep.plan.transform(windowed.data(), spectrum.data());
     const int32_t bins = length / 2 + 1;
     const double df = sampleRateHz / static_cast<double>(length);
 
@@ -194,10 +202,24 @@ void computeRfftCore(const double *signal,
 
         if (outFreqsHz)
             outFreqsHz[bin] = static_cast<double>(bin) * df;
-        outAmplitude[bin] = mag * ampScale / windowSum;
+        outAmplitude[bin] = mag * ampScale / prep.windowSum;
         if (outPsd)
-            outPsd[bin] = (mag * mag) * ampScale / (sampleRateHz * windowSqSum);
+            outPsd[bin] = (mag * mag) * ampScale / (sampleRateHz * prep.windowSqSum);
     }
+}
+
+void computeRfftCore(const double *signal,
+                     int32_t length,
+                     double sampleRateHz,
+                     int32_t windowKind,
+                     int32_t detrendMean,
+                     double *outFreqsHz,
+                     double *outAmplitude,
+                     double *outPsd)
+{
+    const PreparedRfft1d prep(length, windowKind);
+    computeRfftWithPlan(signal, length, sampleRateHz, detrendMean, prep,
+                        outFreqsHz, outAmplitude, outPsd);
 }
 
 void validateWindowKind(int32_t windowKind)
@@ -331,6 +353,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_ChannelSpectrumU16(
             }
         }
 
+        const PreparedRfft1d prep(frame_count, window_kind);
         for (int32_t ch = 0; ch < channel_count; ++ch)
         {
             const auto &series = channelSeries[static_cast<size_t>(ch)];
@@ -359,10 +382,10 @@ extern "C" IR_ANALYSIS_API int32_t IR_ChannelSpectrumU16(
                 }
             }
 
-            computeRfftCore(series.data(), frame_count, sample_rate_hz, window_kind, 1,
-                            (ch == 0) ? out_freqs_hz : nullptr,
-                            out_channel_amplitudes + int64_t(ch) * bins,
-                            nullptr);
+            computeRfftWithPlan(series.data(), frame_count, sample_rate_hz, 1, prep,
+                                (ch == 0) ? out_freqs_hz : nullptr,
+                                out_channel_amplitudes + int64_t(ch) * bins,
+                                nullptr);
         }
     });
 }

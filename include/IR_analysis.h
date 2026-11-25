@@ -40,14 +40,14 @@ IR_ANALYSIS_API int32_t IR_ROIMeanU16(const uint16_t *frames, int64_t frame_elem
 /* ======================== 三维噪声 (3D Noise, DN 两阶段) ======================== */
 
 /* 3D 噪声计算模式：0=原始 ORG 帧；1=在库内应用两点 NUC (k * (org - b) + b_avg)。 */
-enum IRNoise3DMode
+typedef enum IRNoise3DMode
 {
     IR_NOISE3D_MODE_ORG = 0,
     IR_NOISE3D_MODE_NUC = 1
-};
+} IRNoise3DMode;
 
 /* IRNoise3DComputeOutputs.scalars 数组索引（至少需 IR_NOISE3D_SCALAR_COUNT=16 个 double），单位 DN 或计数。 */
-enum IRNoise3DScalarIndex
+typedef enum IRNoise3DScalarIndex
 {
     IR_NOISE3D_SCALAR_DELTA_T = 0,
     IR_NOISE3D_SCALAR_DELTA_I = 1,
@@ -66,10 +66,10 @@ enum IRNoise3DScalarIndex
     IR_NOISE3D_SCALAR_COLS = 14,
     IR_NOISE3D_SCALAR_RESERVED = 15,
     IR_NOISE3D_SCALAR_COUNT = 16
-};
+} IRNoise3DScalarIndex;
 
 /* IRNoise3DCalibOutputs.stats 数组索引（至少需 IR_NOISE3D_STATS_COUNT=32 个 double）。 */
-enum IRNoise3DStatsIndex
+typedef enum IRNoise3DStatsIndex
 {
     IR_NOISE3D_STAT_RESPONSE_MEAN = 0,
     IR_NOISE3D_STAT_RESPONSE_LOW = 1,
@@ -88,20 +88,20 @@ enum IRNoise3DStatsIndex
     IR_NOISE3D_STAT_B_AVG = 14,
     IR_NOISE3D_STAT_K_MEAN_VALID = 15,
     IR_NOISE3D_STATS_COUNT = 32
-};
+} IRNoise3DStatsIndex;
 
 /* 直方图分组索引；hist 共 4 * hist_interval 个 double，hist_meta 共 4 * 3 个 double (min, max, width)。 */
-enum IRNoise3DHistGroup
+typedef enum IRNoise3DHistGroup
 {
     IR_NOISE3D_HIST_T = 0,
     IR_NOISE3D_HIST_I = 1,
     IR_NOISE3D_HIST_J = 2,
     IR_NOISE3D_HIST_TIJ = 3,
     IR_NOISE3D_HIST_GROUP_COUNT = 4
-};
+} IRNoise3DHistGroup;
 
 /* IRNoise3DComputeOutputs.meta 计时元数据索引（若传非 NULL，至少需 IR_NOISE3D_META_COUNT=32 个 double）。 */
-enum IRNoise3DMetaIndex
+typedef enum IRNoise3DMetaIndex
 {
     IR_NOISE3D_META_EFFECTIVE_THREAD_COUNT = 0,
     IR_NOISE3D_META_MASK_BUILD_SECONDS = 1,
@@ -112,7 +112,7 @@ enum IRNoise3DMetaIndex
     IR_NOISE3D_META_TOTAL_SECONDS = 6,
     IR_NOISE3D_META_RESERVED = 7,
     IR_NOISE3D_META_COUNT = 32
-};
+} IRNoise3DMetaIndex;
 
 typedef struct IRNoise3DCalibParams
 {
@@ -214,26 +214,26 @@ IR_ANALYSIS_API int32_t IR_Noise3DComputeFramesDn(
 /* ======================== 国标 (GB) 与国军标 (GJB) 评价 ======================== */
 
 /* GB 芯片等级 */
-enum IRChipGrade
+typedef enum IRChipGrade
 {
     IR_CHIP_GRADE_UNKNOWN = 0,
     IR_CHIP_GRADE_A = 1,
     IR_CHIP_GRADE_B = 2,
     IR_CHIP_GRADE_C = 3,
     IR_CHIP_GRADE_D = 4
-};
+} IRChipGrade;
 
 /* GB 盲元簇划分区域（A 为中心 1/5×1/4，B 为次中心 1/2×1/2，C 为其余边界，优先级 A > B > C）。 */
-enum IRGbRegion
+typedef enum IRGbRegion
 {
     IR_GB_REGION_A = 0,
     IR_GB_REGION_B = 1,
     IR_GB_REGION_C = 2,
     IR_GB_REGION_COUNT = 3
-};
+} IRGbRegion;
 
 /* GB 盲元簇按外接矩形最长边分类：O(>=5), I(4), II(3), III(2), IV(1)。 */
-enum IRGbClusterType
+typedef enum IRGbClusterType
 {
     IR_GB_CLUSTER_O = 0,
     IR_GB_CLUSTER_I = 1,
@@ -241,7 +241,7 @@ enum IRGbClusterType
     IR_GB_CLUSTER_III = 3,
     IR_GB_CLUSTER_IV = 4,
     IR_GB_CLUSTER_TYPE_COUNT = 5
-};
+} IRGbClusterType;
 
 /* 辐射与系统转换参数：
  * 温度单位 °C（物理计算使用 +273 K 口径），像元间距 um，系统增益无量纲，ADC 摆幅 V，积分时间 us。
@@ -469,56 +469,56 @@ IR_ANALYSIS_API int32_t IR_GjbEvaluateMaps(
 
 /* ======================== 可组合基础算子与温漂轻量指标 ======================== */
 
-enum IRSpatialFilterKind
+typedef enum IRSpatialFilterKind
 {
     IR_SPATIAL_FILTER_BOX_MEAN = 0,
     IR_SPATIAL_FILTER_GAUSSIAN = 1
-};
+} IRSpatialFilterKind;
 
-enum IRMapBinaryOp
+typedef enum IRMapBinaryOp
 {
     IR_MAP_OP_SUB = 0,
     IR_MAP_OP_ADD = 1,
     IR_MAP_OP_MUL = 2,
     IR_MAP_OP_SAFE_DIV = 3,
     IR_MAP_OP_VARIANCE_SUBTRACT = 4
-};
+} IRMapBinaryOp;
 
-enum IRThresholdMode
+typedef enum IRThresholdMode
 {
     IR_THRESH_ABSOLUTE = 0,
     IR_THRESH_MEAN_MULTIPLIER = 1,
     IR_THRESH_MEAN_SIGMA = 2,
     IR_THRESH_UPPER_ONLY = 3,
     IR_THRESH_LOWER_ONLY = 4
-};
+} IRThresholdMode;
 
-enum IRMaskOp
+typedef enum IRMaskOp
 {
     IR_MASK_AND = 0,
     IR_MASK_OR = 1,
     IR_MASK_AND_NOT = 2,
     IR_MASK_NOT = 3
-};
+} IRMaskOp;
 
-enum IRWindowKind
+typedef enum IRWindowKind
 {
     IR_WINDOW_RECTANGULAR = 0,
     IR_WINDOW_HANN = 1,
     IR_WINDOW_HAMMING = 2
-};
+} IRWindowKind;
 
-enum IRSpectrumAxis
+typedef enum IRSpectrumAxis
 {
     IR_SPECTRUM_AXIS_COLUMNS = 0,
     IR_SPECTRUM_AXIS_ROWS = 1
-};
+} IRSpectrumAxis;
 
-enum IRNoiseSubtractMode
+typedef enum IRNoiseSubtractMode
 {
     IR_NOISE_SUBTRACT_NONE = 0,
     IR_NOISE_SUBTRACT_VARIANCE_QUADRATURE = 1
-};
+} IRNoiseSubtractMode;
 
 typedef struct IRMapSummary
 {

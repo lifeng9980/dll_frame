@@ -19,6 +19,7 @@ typedef struct IRBlackbodyReading {
     double actual_c;    /* 实际温度，°C */
     double setpoint_c;  /* 控制器回读的设定温度，°C */
     int32_t stable;     /* 设备稳定标志，0 或 1 */
+    int32_t reserved;   /* 对齐保留，置 0 */
 } IRBlackbodyReading;
 
 /* PCN7-LT 配置 JSON 含 host，可选 tcp_port（默认 2101）、head（默认 -1）
@@ -58,6 +59,7 @@ typedef struct IRPowerReading {
     double measured_v;
     double measured_a;
     int32_t output_enabled;
+    int32_t reserved;   /* 对齐保留，置 0 */
 } IRPowerReading;
 
 typedef struct IRPowerCurrentStableSpec {

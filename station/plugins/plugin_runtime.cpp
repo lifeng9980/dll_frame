@@ -707,7 +707,8 @@ private:
                 return IR_BAD_ARGUMENT;
 
             auto &slot = container[slotName];
-            const bool inPlaceAlias = isBoundInputSlot(slotName, expectedKind);
+            const bool inPlaceAlias = isBoundInputSlot(slotName, expectedKind) &&
+                                      slot.data.size() == static_cast<size_t>(count);
             slot.geometry = IRGeometry{width, height, runCtx_.ctx.geometry.valid_bits};
             slot.data.resize(static_cast<size_t>(count));
             if (!inPlaceAlias)

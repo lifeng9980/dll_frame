@@ -1,8 +1,55 @@
 #pragma once
 
-#ifndef _WIN32
 #include "IR_station.h"
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#include <atomic>
+
+namespace ir::examples {
+
+inline std::atomic<bool> stopWindowActive{false};
+
+inline BOOL WINAPI consoleCtrlHandler(DWORD ctrlType)
+{
+    if (!stopWindowActive.load(std::memory_order_acquire))
+        return FALSE;
+    if (ctrlType == CTRL_C_EVENT || ctrlType == CTRL_BREAK_EVENT) {
+        IR_RequestStop();
+        return TRUE;
+    }
+    return FALSE;
+}
+
+class StopSignalGuard {
+public:
+    StopSignalGuard()
+    {
+        stopWindowActive.store(true, std::memory_order_release);
+        installed_ = SetConsoleCtrlHandler(consoleCtrlHandler, TRUE) != 0;
+        if (!installed_)
+            stopWindowActive.store(false, std::memory_order_release);
+    }
+
+    StopSignalGuard(const StopSignalGuard &) = delete;
+    StopSignalGuard &operator=(const StopSignalGuard &) = delete;
+
+    ~StopSignalGuard()
+    {
+        stopWindowActive.store(false, std::memory_order_release);
+        if (installed_)
+            SetConsoleCtrlHandler(consoleCtrlHandler, FALSE);
+    }
+
+private:
+    bool installed_{false};
+};
+
+} // namespace ir::examples
+#else
 #include <atomic>
 #include <cerrno>
 #include <csignal>
@@ -60,6 +107,8 @@ private:
     std::atomic<bool> stopping_{false};
     std::thread signalThread_;
 };
+
+using StopSignalGuard = PosixStopSignalGuard;
 
 } // namespace ir::examples
 #endif

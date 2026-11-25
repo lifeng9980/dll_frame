@@ -121,22 +121,15 @@ public:
         }
 #endif
         if (!published) {
-            // WSL's /mnt or non-Linux POSIX filesystems may not implement renameat2(RENAME_NOREPLACE).
-            // Reserve the new name, then rename the complete staging directory over it.
-            std::error_code createError;
-            if (!fs::create_directory(destination, createError)) {
-                if (createError)
-                    throw fs::filesystem_error("Cannot reserve capture destination", destination, createError);
+            std::error_code statusError;
+            const auto target = fs::symlink_status(destination, statusError);
+            if (statusError == std::errc::no_such_file_or_directory) statusError.clear();
+            if (statusError)
+                throw fs::filesystem_error("Cannot inspect capture destination", destination, statusError);
+            if (target.type() != fs::file_type::not_found)
                 throw std::system_error(std::make_error_code(std::errc::file_exists),
                                         "Capture destination already exists");
-            }
-            try {
-                fs::rename(path_, destination);
-            } catch (...) {
-                std::error_code removeError;
-                fs::remove(destination, removeError);
-                throw;
-            }
+            fs::rename(path_, destination);
         }
 #endif
         path_.clear();

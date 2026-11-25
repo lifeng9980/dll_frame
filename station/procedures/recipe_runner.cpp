@@ -737,9 +737,7 @@ void runRecipe(ir::acquisition::Capture &capture, const StationConfig &station,
                     throw;
                 }
                 const double durationMs = elapsedMsSince(stepStartSteady);
-                const int32_t finalStage = (burstIterationsForRecord >= 0)
-                    ? sInfo.initialStage
-                    : result.failed_stage;
+                const int32_t finalStage = sInfo.initialStage;
                 Json rec{
                     {"index", sInfo.ref->index},
                     {"id", sInfo.ref->id},

@@ -116,22 +116,22 @@ PreparedMetric prepFrameStats(const std::string &name, const Json &inputs, const
                 checkMaskSize(vm, n, g, "frame_stats.valid_mask");
                 maskPtr = vm.data.data();
             }
-            std::vector<double> meanMap(static_cast<size_t>(n));
-            std::vector<double> stdMap(static_cast<size_t>(n));
+            SlotBufferWriter meanWriter(ctx.maps, meanOut, g, n, meanOut != stdOut);
+            SlotBufferWriter stdWriter(ctx.maps, stdOut, g, n, stdOut != meanOut);
             double summary[2]{};
             char err[1024]{};
             const int32_t frameCount = int32_t(b.stamps.size());
             if (!kPtr && !darkPtr && !maskPtr) {
                 checkStatus(IR_FrameStatisticsU16(b.pixels.data(), int64_t(b.pixels.size()),
-                    frameCount, g.height, g.width, sampleStd, meanMap.data(), stdMap.data(),
-                    n, summary, 2, err, sizeof err), err);
+                    frameCount, g.height, g.width, sampleStd, meanWriter.data(), stdWriter.data(), n,
+                    summary, 2, err, sizeof err), err);
             } else {
                 checkStatus(IR_FrameStatisticsNucU16(b.pixels.data(), int64_t(b.pixels.size()),
                     frameCount, g.height, g.width, sampleStd, kPtr, bPtr, darkPtr, maskPtr,
-                    meanMap.data(), stdMap.data(), n, summary, 2, err, sizeof err), err);
+                    meanWriter.data(), stdWriter.data(), n, summary, 2, err, sizeof err), err);
             }
-            if (!meanOut.empty()) ctx.maps[meanOut] = {g, std::move(meanMap)};
-            if (!stdOut.empty()) ctx.maps[stdOut] = {g, std::move(stdMap)};
+            meanWriter.commit();
+            stdWriter.commit();
             recordScalarOutputs(ctx, name, outs, {summary[0], summary[1]});
         }
     }};
@@ -243,13 +243,16 @@ PreparedMetric prepTwoPointNuc(const std::string &name, const Json &inputs, cons
                 checkMapSize(rm, n, g, "two_point_nuc.ref_map");
                 refPtr = rm.data.data();
             }
-            std::vector<double> kMap(static_cast<size_t>(n)), bMap(static_cast<size_t>(n));
+            const bool kDirect = kOut != v1Slot && kOut != v2Slot && kOut != refSlot && kOut != bOut;
+            const bool bDirect = bOut != v1Slot && bOut != v2Slot && bOut != refSlot && bOut != kOut;
+            SlotBufferWriter kWriter(ctx.maps, kOut, g, n, kDirect);
+            SlotBufferWriter bWriter(ctx.maps, bOut, g, n, bDirect);
             double summary[4]{};
             char err[1024]{};
             checkStatus(IR_BuildTwoPointNucF64(v1.data.data(), v2.data.data(), maskPtr, refPtr,
-                g.height, g.width, n, kMap.data(), bMap.data(), summary, 4, err, sizeof err), err);
-            ctx.maps[kOut] = {g, std::move(kMap)};
-            ctx.maps[bOut] = {g, std::move(bMap)};
+                g.height, g.width, n, kWriter.data(), bWriter.data(), summary, 4, err, sizeof err), err);
+            kWriter.commit();
+            bWriter.commit();
             recordScalarOutputs(ctx, name, outs, {summary[0], summary[1], summary[2], summary[3]});
         }
     }};
@@ -297,18 +300,21 @@ PreparedMetric prepSpatialFilter(const std::string &name, const Json &inputs, co
                 checkMaskSize(vm, n, g, "spatial_filter.valid_mask");
                 maskPtr = vm.data.data();
             }
-            std::vector<double> lowMap(static_cast<size_t>(n)), highMap(static_cast<size_t>(n));
+            const bool lowDirect = lowOut != inSlot && lowOut != highOut;
+            const bool highDirect = highOut != inSlot && highOut != lowOut;
+            SlotBufferWriter lowWriter(ctx.maps, lowOut, g, n, lowDirect);
+            SlotBufferWriter highWriter(ctx.maps, highOut, g, n, highDirect);
             char err[1024]{};
             checkStatus(IR_SpatialLowHighPassF64(inMap.data.data(), maskPtr, g.height, g.width, n,
-                filterKind, kw, kh, lowMap.data(), highMap.data(),
+                filterKind, kw, kh, lowWriter.data(), highWriter.data(),
                 err, sizeof err), err);
             IRMapSummary lowSum{}, highSum{};
-            checkStatus(IR_MapSummaryF64(lowMap.data(), maskPtr, g.height, g.width, n,
+            checkStatus(IR_MapSummaryF64(lowWriter.data(), maskPtr, g.height, g.width, n,
                 0, 0, 0, 0, 0.0, 100.0, &lowSum, err, sizeof err), err);
-            checkStatus(IR_MapSummaryF64(highMap.data(), maskPtr, g.height, g.width, n,
+            checkStatus(IR_MapSummaryF64(highWriter.data(), maskPtr, g.height, g.width, n,
                 0, 0, 0, 0, 0.0, 100.0, &highSum, err, sizeof err), err);
-            if (!lowOut.empty()) ctx.maps[lowOut] = {g, std::move(lowMap)};
-            if (!highOut.empty()) ctx.maps[highOut] = {g, std::move(highMap)};
+            lowWriter.commit();
+            highWriter.commit();
             recordScalarOutputs(ctx, name, outs, {lowSum.pop_std, highSum.pop_std});
         }
     }};
@@ -345,14 +351,14 @@ PreparedMetric prepMapBinaryOp(const std::string &name, const Json &inputs, cons
             const auto n = pixels(g.height, g.width);
             checkMapSize(a, n, g, "map_binary_op.a_map");
             checkMapSize(b, n, g, "map_binary_op.b_map");
-            std::vector<double> outMap(static_cast<size_t>(n));
+            SlotBufferWriter outWriter(ctx.maps, outSlot, g, n, outSlot != aSlot && outSlot != bSlot);
             char err[1024]{};
             checkStatus(IR_MapBinaryOpF64(a.data.data(), b.data.data(), g.height, g.width, n,
-                op, paramVal, outMap.data(), err, sizeof err), err);
+                op, paramVal, outWriter.data(), err, sizeof err), err);
             IRMapSummary ms{};
-            checkStatus(IR_MapSummaryF64(outMap.data(), nullptr, g.height, g.width, n,
+            checkStatus(IR_MapSummaryF64(outWriter.data(), nullptr, g.height, g.width, n,
                 0, 0, 0, 0, 0.0, 100.0, &ms, err, sizeof err), err);
-            ctx.maps[outSlot] = {g, std::move(outMap)};
+            outWriter.commit();
             recordScalarOutputs(ctx, name, outs, {ms.mean});
         }
     }};
@@ -397,12 +403,12 @@ PreparedMetric prepThresholdMask(const std::string &name, const Json &inputs, co
                 checkMaskSize(bm, n, g, "threshold_mask.base_valid_mask");
                 basePtr = bm.data.data();
             }
-            std::vector<uint8_t> passMask(static_cast<size_t>(n));
+            SlotBufferWriter passWriter(ctx.masks, outSlot, g, n, outSlot != baseSlot);
             int32_t passCnt = 0, failCnt = 0;
             char err[1024]{};
             checkStatus(IR_ThresholdMaskF64(m.data.data(), basePtr, g.height, g.width, n,
-                mode, lowParam, highParam, passMask.data(), &passCnt, &failCnt, err, sizeof err), err);
-            ctx.masks[outSlot] = {g, std::move(passMask)};
+                mode, lowParam, highParam, passWriter.data(), &passCnt, &failCnt, err, sizeof err), err);
+            passWriter.commit();
             recordScalarOutputs(ctx, name, outs, {double(passCnt), double(failCnt)});
         }
     }};
@@ -443,12 +449,12 @@ PreparedMetric prepMaskCombine(const std::string &name, const Json &inputs, cons
                 checkMaskSize(mb, n, g, "mask_combine.mask_b");
                 bPtr = mb.data.data();
             }
-            std::vector<uint8_t> outMask(static_cast<size_t>(n));
+            SlotBufferWriter outWriter(ctx.masks, outSlot, g, n, outSlot != aSlot && outSlot != bSlot);
             int32_t nonzeroCnt = 0;
             char err[1024]{};
             checkStatus(IR_MaskCombine(ma.data.data(), bPtr, g.height, g.width, n, op,
-                outMask.data(), &nonzeroCnt, err, sizeof err), err);
-            ctx.masks[outSlot] = {g, std::move(outMask)};
+                outWriter.data(), &nonzeroCnt, err, sizeof err), err);
+            outWriter.commit();
             recordScalarOutputs(ctx, name, outs, {double(nonzeroCnt)});
         }
     }};

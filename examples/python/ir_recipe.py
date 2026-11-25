@@ -23,22 +23,30 @@ def sdk_library_directory():
     if configured:
         return Path(configured).resolve()
     package_root = Path(__file__).resolve().parents[2]
-    return package_root / ("windows-x64/bin" if os.name == "nt" else "linux-x86_64/lib")
+    packaged = package_root / ("windows-x64/bin" if os.name == "nt" else "linux-x86_64/lib")
+    if packaged.is_dir():
+        return packaged
+    build_debug = package_root / "实验" / "build-debug" / ("bin" if os.name == "nt" else "lib")
+    if build_debug.is_dir():
+        return build_debug
+    return packaged
 
 
 def load_station(directory):
     if os.name == "nt":
         dll_directory = os.add_dll_directory(str(directory))
         try:
-            return c.CDLL(str(directory / "IR_station.dll")), dll_directory
+            _analysis = c.CDLL(str(directory / "IR_analysis.dll"))
+            return (c.CDLL(str(directory / "IR_station.dll")), _analysis), dll_directory
         except Exception:
             dll_directory.close()
             raise
-    return c.CDLL(str(directory / "libIR_station.so")), None
+    _analysis = c.CDLL(str(directory / "libIR_analysis.so"))
+    return (c.CDLL(str(directory / "libIR_station.so")), _analysis), None
 
 
 def station_text(path):
-    station = json.loads(path.read_text(encoding="utf-8"))
+    station = json.loads(path.read_text(encoding="utf-8-sig"))
     acquisition = station["acquisition"]
     if acquisition["backend"] == "raw_replay":
         source = Path(acquisition["source"])
@@ -84,7 +92,7 @@ def main():
     output = output.resolve()
     check_output_directory(output)
 
-    sdk, dll_directory = load_station(args.library_dir.resolve())
+    (sdk, _analysis), dll_directory = load_station(args.library_dir.resolve())
     sdk.IR_StationVersion.argtypes = []
     sdk.IR_StationVersion.restype = c.c_char_p
     station_version = sdk.IR_StationVersion()
@@ -94,7 +102,7 @@ def main():
     sdk.IR_CheckRecipeJson.argtypes = [c.c_char_p, c.c_char_p, *error_args]
     sdk.IR_RunRecipeJson.argtypes = [c.c_char_p, c.c_char_p, c.c_char_p, c.c_void_p, c.POINTER(RecipeResult), *error_args]
     station_json = station_text(station_path).encode("utf-8")
-    recipe_json = recipe_path.read_text(encoding="utf-8").encode("utf-8")
+    recipe_json = recipe_path.read_text(encoding="utf-8-sig").encode("utf-8")
     error = c.create_string_buffer(2048)
 
     if args.mode == "check":
@@ -110,7 +118,7 @@ def main():
         return 0
 
     run = RecipeResult()
-    status = sdk.IR_RunRecipeJson(station_json, recipe_json, os.fsencode(output), None, c.byref(run), error, len(error))
+    status = sdk.IR_RunRecipeJson(station_json, recipe_json, str(output).encode("utf-8"), None, c.byref(run), error, len(error))
     if status != 0:
         print(f"IR_RunRecipeJson status={status} stage={run.failed_stage} step_index={run.failed_step_index} "
               f"completed_frames={run.completed_frames} cleanup_status={run.cleanup_status} "

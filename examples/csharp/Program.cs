@@ -37,6 +37,7 @@ internal static class IRStation
         public double ActualC;
         public double SetpointC;
         public int Stable;
+        public int Reserved;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -48,6 +49,7 @@ internal static class IRStation
         public uint LostFrames;
         public uint Fields;
         public int TimeOrigin;
+        public int Reserved;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -91,6 +93,7 @@ internal static class IRStation
         public double MeasuredV;
         public double MeasuredA;
         public int OutputEnabled;
+        public int Reserved;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -269,6 +272,27 @@ internal static class IRStation
         [MarshalAs(UnmanagedType.LPUTF8Str)] string outputDirectory,
         IntPtr options, out RecipeResult result, byte[] error, int errorBytes);
 
+    private static IntPtr analysisHandle_;
+
+    internal static string ResolveLibraryDirectory()
+    {
+        var configured = Environment.GetEnvironmentVariable("IR_SDK_LIB_DIR");
+        if (!string.IsNullOrWhiteSpace(configured))
+            return Path.GetFullPath(configured);
+
+        var subDir = OperatingSystem.IsWindows() ? "bin" : "lib";
+        var platDir = OperatingSystem.IsWindows() ? "windows-x64" : "linux-x86_64";
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var i = 0; i < 6 && dir is not null; ++i, dir = dir.Parent)
+        {
+            var packaged = Path.Combine(dir.FullName, platDir, subDir);
+            if (Directory.Exists(packaged)) return packaged;
+            var buildDebug = Path.Combine(dir.FullName, "实验", "build-debug", subDir);
+            if (Directory.Exists(buildDebug)) return buildDebug;
+        }
+        throw new InvalidOperationException("Set IR_SDK_LIB_DIR to the platform library directory.");
+    }
+
     internal static void ConfigureNativeLibraries(string directory)
     {
         NativeLibrary.SetDllImportResolver(typeof(IRStation).Assembly, (name, _, _) =>
@@ -276,8 +300,14 @@ internal static class IRStation
             if (name is not ("IR_station" or "IR_analysis"))
                 return IntPtr.Zero;
 
-            var fileName = OperatingSystem.IsWindows() ? $"{name}.dll" : $"lib{name}.so";
-            return NativeLibrary.Load(Path.Combine(directory, fileName));
+            var analysisFile = OperatingSystem.IsWindows() ? "IR_analysis.dll" : "libIR_analysis.so";
+            if (analysisHandle_ == IntPtr.Zero)
+                analysisHandle_ = NativeLibrary.Load(Path.Combine(directory, analysisFile));
+            if (name == "IR_analysis")
+                return analysisHandle_;
+
+            var stationFile = OperatingSystem.IsWindows() ? "IR_station.dll" : "libIR_station.so";
+            return NativeLibrary.Load(Path.Combine(directory, stationFile));
         });
     }
 }
@@ -296,14 +326,8 @@ internal static class Program
     {
         try
         {
-            var libraryDirectory = Environment.GetEnvironmentVariable("IR_SDK_LIB_DIR");
-            if (string.IsNullOrWhiteSpace(libraryDirectory))
-            {
-                Console.Error.WriteLine("Set IR_SDK_LIB_DIR to the platform library directory.");
-                return 2;
-            }
             IRAnalysis.VerifyAbiSizes();
-            IRStation.ConfigureNativeLibraries(Path.GetFullPath(libraryDirectory));
+            IRStation.ConfigureNativeLibraries(IRStation.ResolveLibraryDirectory());
             var version = IRAnalysis.AnalysisVersion();
             if (string.IsNullOrEmpty(version))
                 throw new InvalidOperationException("IR_AnalysisVersion returned an empty string.");
@@ -445,12 +469,6 @@ internal static class Program
 
         try
         {
-            var libraryDirectory = Environment.GetEnvironmentVariable("IR_SDK_LIB_DIR");
-            if (string.IsNullOrWhiteSpace(libraryDirectory))
-            {
-                Console.Error.WriteLine("Set IR_SDK_LIB_DIR to the platform library directory.");
-                return 2;
-            }
             if (Marshal.SizeOf<IRStation.BlackbodyReading>() != 24 ||
                 Marshal.SizeOf<IRStation.OvenReading>() != 24 ||
                 Marshal.SizeOf<IRStation.DmmReading>() != 16 ||
@@ -461,7 +479,7 @@ internal static class Program
                 Marshal.SizeOf<IRStation.FrameStamp>() != 40 ||
                 Marshal.SizeOf<IRStation.CaptureStats>() != 64)
                 throw new InvalidOperationException("The C# structures do not match the IR SDK x64 C ABI.");
-            IRStation.ConfigureNativeLibraries(Path.GetFullPath(libraryDirectory));
+            IRStation.ConfigureNativeLibraries(IRStation.ResolveLibraryDirectory());
             if (string.IsNullOrEmpty(IRStation.StationVersion()))
                 throw new InvalidOperationException("IR_StationVersion returned an empty string.");
 

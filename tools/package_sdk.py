@@ -309,8 +309,10 @@ def make_package(source_root, windows_install, linux_install, archive, windows_o
                 if relative in (
                     f"{archive_name}/linux-x86_64/bin/ir_run_recipe",
                     f"{archive_name}/linux-x86_64/bin/ir_capture_accept",
+                    f"{archive_name}/linux-x86_64/lib/libIR_station.so",
+                    f"{archive_name}/linux-x86_64/lib/libIR_analysis.so",
                 ):
-                    # Windows 打包时也为 Linux 可执行文件写入 Unix 权限。
+                    # Windows 打包时也为 Linux 可执行文件与动态库写入 Unix 权限。
                     entry = zipfile.ZipInfo.from_file(path, relative)
                     entry.create_system = 3  # Unix ZIP entry
                     entry.external_attr = (stat.S_IFREG | 0o755) << 16
