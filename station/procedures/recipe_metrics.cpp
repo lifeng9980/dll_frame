@@ -127,9 +127,7 @@ void recordScalarOutputs(ExecutionContext &ctx, const std::string &name,
         };
         if (out.plugin.has_value()) {
             entry["plugin_id"] = out.plugin->id;
-            entry["plugin_version"] = out.plugin->version;
             entry["plugin_file"] = out.plugin->file;
-            entry["plugin_sha256"] = out.plugin->sha256;
         }
         ctx.metrics[key] = std::move(entry);
     }

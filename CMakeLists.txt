@@ -100,8 +100,7 @@ if(WIN32)
 endif()
 # 流程编排与算子插件：协调仪器、采集和独立的 IR_analysis 指标库。
 target_sources(IR_station PRIVATE
-    station/plugins/plugin_host_adapter.cpp
-    station/plugins/plugin_manager.cpp
+    station/plugins/plugin_runtime.cpp
     station/procedures/measurement.cpp
     station/procedures/recipe_json.cpp
     station/procedures/metrics_basic.cpp

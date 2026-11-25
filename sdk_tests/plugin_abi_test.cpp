@@ -45,16 +45,6 @@ std::string readText(const fs::path &p)
     return {std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
 }
 
-bool isHex64(const std::string &s)
-{
-    if (s.size() != 64) return false;
-    for (char ch : s) {
-        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')))
-            return false;
-    }
-    return true;
-}
-
 class TempDirGuard {
 public:
     explicit TempDirGuard(const std::string &suffixUtf8)
@@ -240,9 +230,8 @@ int main(int argc, char **argv)
     CHECK(std::abs(recPass.at("metrics").at("span_sum.mean").at("value").get<double>() - 2.0) < 1e-12);
     const auto &mSpan = recPass.at("metrics").at("span_step.span_dn");
     CHECK(mSpan.at("plugin_id") == "ir.test.suite");
-    CHECK(mSpan.at("plugin_version") == "1.2.3");
     CHECK(mSpan.at("plugin_file") == pluginFilename("ir_test_plugin_good"));
-    CHECK(isHex64(mSpan.at("plugin_sha256").get<std::string>()));
+    CHECK(!mSpan.contains("plugin_sha256"));
     CHECK(!mSpan.contains("library_path"));
     CHECK(recPass.at("step_records").size() == 3);
 
@@ -252,12 +241,12 @@ int main(int argc, char **argv)
     CHECK(IR_RunRecipeJson(stGood.c_str(), ngRecipe.dump().c_str(), utf8(outNg).c_str(), nullptr, &rr, err, sizeof err) == IR_OK);
     CHECK(Json::parse(readText(outNg / "result.json")).at("run_status") == "NG");
 
-    // 4. repeat_burst reusing span_map under tight max_inflight_bytes (must not double-charge)
+    // 4. repeat_burst reusing span_map under tight max_inflight_bytes (in-place reuse, zero double-charge)
     // sizeof(IRFrameStamp) == 40: 2x2x2 batch = 8*2 + 2*40 = 96 B; queue(2) = 4*8 + 2*40 = 112 B;
-    // span_map = 4*8 = 32 B. During HostCallbackBridge staging on iter>=2: 112 + 96 + 32 + 32 = 272 B.
+    // span_map = 4*8 = 32 B. Direct in-place reuse keeps peak at 112 + 96 + 32 = 240 B.
     Json tightStation = stationGood;
     tightStation["acquisition"]["queue_capacity"] = 2;
-    tightStation["acquisition"]["max_inflight_bytes"] = 272;
+    tightStation["acquisition"]["max_inflight_bytes"] = 240;
     const Json burstRecipe{
         {"schemav", 1},
         {"recipe_id", "plugin-burst-overwrite"},
@@ -276,19 +265,34 @@ int main(int argc, char **argv)
     CHECK(IR_RunRecipeJson(tightStation.dump().c_str(), burstRecipe.dump().c_str(), utf8(outBurst).c_str(), nullptr, &rr, err, sizeof err) == IR_OK);
     CHECK(rr.completed_frames == 6);
 
+    // 4b. Heterogeneous output dimensions (1x2 map from 2x2 frame) + zero-copy in-place add under 240 B budget
+    const Json heteroRecipe{
+        {"schemav", 1},
+        {"recipe_id", "plugin-hetero-inplace"},
+        {"steps", Json::array({
+            {{"id", "c"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}, {"output", "b"}},
+            {{"id", "ps"}, {"type", "analyze"}, {"method", "plugin:test.pixel_span"},
+             {"input", "b"}, {"params", {{"out_width", 1}, {"out_height", 2}}},
+             {"outputs", {{"span_map", "bm"}}}},
+            {{"id", "add"}, {"type", "analyze"}, {"method", "plugin:test.in_place_add"},
+             {"name", "add"}, {"inputs", {{"in_map", "bm"}}}, {"outputs", {{"out_map", "bm"}}}}
+        })}
+    };
+    const fs::path outHetero = root.path() / "out_hetero";
+    CHECK(IR_RunRecipeJson(tightStation.dump().c_str(), heteroRecipe.dump().c_str(), utf8(outHetero).c_str(), nullptr, &rr, err, sizeof err) == IR_OK);
+    CHECK(std::abs(Json::parse(readText(outHetero / "result.json")).at("metrics").at("add.mean_out").at("value").get<double>() - 12.0) < 1e-12);
+
     // 5. Runtime over-budget plugin allocation inside execute() rejected at ANALYZE with IR_BAD_ARGUMENT
     Json tinyStation = stationGood;
     tinyStation["acquisition"]["queue_capacity"] = 2;
-    tinyStation["acquisition"]["max_inflight_bytes"] = 256; // 112+96+32=240 passes PREPARE & ps, staging in_place_add needs 272 > 256
+    tinyStation["acquisition"]["max_inflight_bytes"] = 272; // 112+96+64=272 passes PREPARE; 4x4 big_map2 (+128=368 > 272) rejected
     const Json overBudgetRecipe{
         {"schemav", 1},
         {"recipe_id", "plugin-over-budget"},
         {"steps", Json::array({
             {{"id", "c"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}, {"output", "b"}},
-            {{"id", "ps"}, {"type", "analyze"}, {"method", "plugin:test.pixel_span"},
-             {"input", "b"}, {"outputs", {{"span_map", "bm"}}}},
-            {{"id", "ob"}, {"type", "analyze"}, {"method", "plugin:test.in_place_add"},
-             {"inputs", {{"in_map", "bm"}}}, {"outputs", {{"out_map", "bm"}}}}
+            {{"id", "ob"}, {"type", "analyze"}, {"method", "plugin:test.over_budget"},
+             {"input", "b"}, {"outputs", {{"big_map", "bm"}, {"big_map2", "bm2"}}}}
         })}
     };
     const fs::path outBudget = root.path() / "out_budget";

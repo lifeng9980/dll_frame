@@ -47,7 +47,7 @@ int32_t extractIntParam(const char *paramsJson, const char *key, int32_t fallbac
     }
 }
 
-int32_t prepPixelSpan(const IRPrepareCallbacksV1 *prep, const char *paramsJson,
+int32_t prepPixelSpan(const IRPrepareCallbacks *prep, const char *paramsJson,
                       char *err, int32_t errBytes)
 {
     return ir_plugin_guard(err, errBytes, [&]() -> int32_t {
@@ -76,35 +76,32 @@ int32_t prepPixelSpan(const IRPrepareCallbacksV1 *prep, const char *paramsJson,
     });
 }
 
-int32_t checkGeomPixelSpan(const char *paramsJson, IRGeometry geom, char *err, int32_t errBytes)
-{
-    return ir_plugin_guard(err, errBytes, [&]() -> int32_t {
-        bool ok = true;
-        const int32_t minWidth = extractIntParam(paramsJson, "min_width", 1, ok);
-        if (!ok || geom.width < minWidth || geom.height < 1) {
-            writeErr(err, errBytes, "Image width is smaller than plugin min_width");
-            return IR_BAD_ARGUMENT;
-        }
-        return IR_OK;
-    });
-}
-
-int32_t execPixelSpan(const IRHostCallbacksV1 *host, const char *paramsJson,
-                      char *err, int32_t errBytes)
+int32_t execPixelSpan(const IRHostCallbacks *host, IRGeometry geometry,
+                      const char *paramsJson, char *err, int32_t errBytes)
 {
     return ir_plugin_guard(err, errBytes, [&]() -> int32_t {
         if (!host || !host->host_ctx || !host->get_slot || !host->has_slot ||
             !host->alloc_double_map || !host->emit_scalar)
             return IR_NULL_POINTER;
+        bool ok = true;
+        const int32_t minWidth = extractIntParam(paramsJson, "min_width", 1, ok);
+        if (!ok || geometry.width < minWidth || geometry.height < 1) {
+            writeErr(err, errBytes, "Image width is smaller than plugin min_width");
+            return IR_BAD_ARGUMENT;
+        }
+        const int32_t minFrames = extractIntParam(paramsJson, "min_frames", 1, ok);
+        if (!ok || minFrames < 1) {
+            writeErr(err, errBytes, "Invalid min_frames parameter");
+            return IR_BAD_ARGUMENT;
+        }
+
         IRSlotView view{};
         int32_t st = host->get_slot(host->host_ctx, "frames", &view);
         if (st != IR_OK) {
             writeErr(err, errBytes, "Failed to read frames slot");
             return st;
         }
-        bool ok = true;
-        const int32_t minFrames = extractIntParam(paramsJson, "min_frames", 1, ok);
-        if (!ok || view.frames < minFrames || view.width <= 0 || view.height <= 0 || !view.data || !view.stamps) {
+        if (view.frames < minFrames || view.width <= 0 || view.height <= 0 || !view.data || !view.stamps) {
             writeErr(err, errBytes, "Invalid frames slot view");
             return IR_BAD_ARGUMENT;
         }
@@ -113,12 +110,23 @@ int32_t execPixelSpan(const IRHostCallbacksV1 *host, const char *paramsJson,
             return IR_BAD_ARGUMENT;
         }
 
+        const int32_t outW = extractIntParam(paramsJson, "out_width", view.width, ok);
+        if (!ok || outW <= 0 || outW > view.width) {
+            writeErr(err, errBytes, "Invalid out_width");
+            return IR_BAD_ARGUMENT;
+        }
+        const int32_t outH = extractIntParam(paramsJson, "out_height", view.height, ok);
+        if (!ok || outH <= 0 || outH > view.height) {
+            writeErr(err, errBytes, "Invalid out_height");
+            return IR_BAD_ARGUMENT;
+        }
+
         const size_t nPix = static_cast<size_t>(view.width) * static_cast<size_t>(view.height);
         const auto *pixels = static_cast<const uint16_t *>(view.data);
 
         double *spanMap = nullptr;
         if (host->has_slot(host->host_ctx, "span_map")) {
-            st = host->alloc_double_map(host->host_ctx, "span_map", view.width, view.height, &spanMap);
+            st = host->alloc_double_map(host->host_ctx, "span_map", outW, outH, &spanMap);
             if (st != IR_OK) {
                 writeErr(err, errBytes, "Failed allocating span_map");
                 return st;
@@ -127,18 +135,23 @@ int32_t execPixelSpan(const IRHostCallbacksV1 *host, const char *paramsJson,
 
         double globalMin = static_cast<double>(pixels[0]);
         double globalMax = static_cast<double>(pixels[0]);
-        for (size_t i = 0; i < nPix; ++i) {
-            uint16_t pMin = pixels[i];
-            uint16_t pMax = pixels[i];
-            for (int32_t f = 1; f < view.frames; ++f) {
-                const uint16_t v = pixels[static_cast<size_t>(f) * nPix + i];
-                if (v < pMin) pMin = v;
-                if (v > pMax) pMax = v;
+        for (int32_t r = 0; r < view.height; ++r) {
+            for (int32_t c = 0; c < view.width; ++c) {
+                const size_t i = static_cast<size_t>(r) * static_cast<size_t>(view.width) + static_cast<size_t>(c);
+                uint16_t pMin = pixels[i];
+                uint16_t pMax = pixels[i];
+                for (int32_t f = 1; f < view.frames; ++f) {
+                    const uint16_t v = pixels[static_cast<size_t>(f) * nPix + i];
+                    if (v < pMin) pMin = v;
+                    if (v > pMax) pMax = v;
+                }
+                if (static_cast<double>(pMin) < globalMin) globalMin = static_cast<double>(pMin);
+                if (static_cast<double>(pMax) > globalMax) globalMax = static_cast<double>(pMax);
+                if (spanMap != nullptr && r < outH && c < outW) {
+                    spanMap[static_cast<size_t>(r) * static_cast<size_t>(outW) + static_cast<size_t>(c)] =
+                        static_cast<double>(pMax - pMin);
+                }
             }
-            if (static_cast<double>(pMin) < globalMin) globalMin = static_cast<double>(pMin);
-            if (static_cast<double>(pMax) > globalMax) globalMax = static_cast<double>(pMax);
-            if (spanMap != nullptr)
-                spanMap[i] = static_cast<double>(pMax - pMin);
         }
 
         st = host->emit_scalar(host->host_ctx, ".min_dn", globalMin);
@@ -149,7 +162,7 @@ int32_t execPixelSpan(const IRHostCallbacksV1 *host, const char *paramsJson,
     });
 }
 
-int32_t prepSimpleFrames(const IRPrepareCallbacksV1 *prep, const char *, char *err, int32_t errBytes)
+int32_t prepSimpleFrames(const IRPrepareCallbacks *prep, const char *, char *err, int32_t errBytes)
 {
     return ir_plugin_guard(err, errBytes, [&]() -> int32_t {
         if (!prep || !prep->prepare_ctx)
@@ -161,7 +174,7 @@ int32_t prepSimpleFrames(const IRPrepareCallbacksV1 *prep, const char *, char *e
     });
 }
 
-int32_t execSlowCancel(const IRHostCallbacksV1 *host, const char *, char *err, int32_t errBytes)
+int32_t execSlowCancel(const IRHostCallbacks *host, IRGeometry, const char *, char *err, int32_t errBytes)
 {
     return ir_plugin_guard(err, errBytes, [&]() -> int32_t {
         if (!host || !host->host_ctx || !host->is_cancelled || !host->emit_scalar)
@@ -177,14 +190,14 @@ int32_t execSlowCancel(const IRHostCallbacksV1 *host, const char *, char *err, i
     });
 }
 
-int32_t execThrowCxx(const IRHostCallbacksV1 *, const char *, char *err, int32_t errBytes)
+int32_t execThrowCxx(const IRHostCallbacks *, IRGeometry, const char *, char *err, int32_t errBytes)
 {
     return ir_plugin_guard(err, errBytes, []() -> int32_t {
         throw std::runtime_error("intentional plugin C++ exception");
     });
 }
 
-int32_t prepOverBudget(const IRPrepareCallbacksV1 *prep, const char *, char *err, int32_t errBytes)
+int32_t prepOverBudget(const IRPrepareCallbacks *prep, const char *, char *err, int32_t errBytes)
 {
     return ir_plugin_guard(err, errBytes, [&]() -> int32_t {
         if (!prep || !prep->prepare_ctx)
@@ -200,7 +213,7 @@ int32_t prepOverBudget(const IRPrepareCallbacksV1 *prep, const char *, char *err
     });
 }
 
-int32_t execOverBudget(const IRHostCallbacksV1 *host, const char *, char *err, int32_t errBytes)
+int32_t execOverBudget(const IRHostCallbacks *host, IRGeometry, const char *, char *err, int32_t errBytes)
 {
     return ir_plugin_guard(err, errBytes, [&]() -> int32_t {
         if (!host || !host->host_ctx || !host->get_slot || !host->has_slot ||
@@ -217,7 +230,7 @@ int32_t execOverBudget(const IRHostCallbacksV1 *host, const char *, char *err, i
         }
         if (host->has_slot(host->host_ctx, "big_map2")) {
             double *ptr2 = nullptr;
-            st = host->alloc_double_map(host->host_ctx, "big_map2", view.width, view.height, &ptr2);
+            st = host->alloc_double_map(host->host_ctx, "big_map2", view.width * 2, view.height * 2, &ptr2);
             if (st != IR_OK) {
                 writeErr(err, errBytes, "Budget limit rejected big_map2");
                 return st;
@@ -227,7 +240,7 @@ int32_t execOverBudget(const IRHostCallbacksV1 *host, const char *, char *err, i
     });
 }
 
-int32_t prepInPlaceAdd(const IRPrepareCallbacksV1 *prep, const char *, char *err, int32_t errBytes)
+int32_t prepInPlaceAdd(const IRPrepareCallbacks *prep, const char *, char *err, int32_t errBytes)
 {
     return ir_plugin_guard(err, errBytes, [&]() -> int32_t {
         if (!prep || !prep->prepare_ctx)
@@ -241,7 +254,7 @@ int32_t prepInPlaceAdd(const IRPrepareCallbacksV1 *prep, const char *, char *err
     });
 }
 
-int32_t execInPlaceAdd(const IRHostCallbacksV1 *host, const char *, char *err, int32_t errBytes)
+int32_t execInPlaceAdd(const IRHostCallbacks *host, IRGeometry, const char *, char *err, int32_t errBytes)
 {
     return ir_plugin_guard(err, errBytes, [&]() -> int32_t {
         if (!host || !host->host_ctx || !host->get_slot || !host->alloc_double_map || !host->emit_scalar)
@@ -263,7 +276,7 @@ int32_t execInPlaceAdd(const IRHostCallbacksV1 *host, const char *, char *err, i
     });
 }
 
-int32_t execEmitNan(const IRHostCallbacksV1 *host, const char *, char *err, int32_t errBytes)
+int32_t execEmitNan(const IRHostCallbacks *host, IRGeometry, const char *, char *err, int32_t errBytes)
 {
     return ir_plugin_guard(err, errBytes, [&]() -> int32_t {
         if (!host || !host->host_ctx || !host->emit_scalar)
@@ -272,73 +285,61 @@ int32_t execEmitNan(const IRHostCallbacksV1 *host, const char *, char *err, int3
     });
 }
 
-const IRMetricPluginV1 kPlugins[]{
+const IRMetricPlugin kPlugins[]{
     {
-        {sizeof(IRPluginHeader), IR_PLUGIN_ABI_VERSION_1, "ir.test.suite", "1.2.3", "SDK Tests"},
+        IR_PLUGIN_ABI_VERSION,
+        "ir.test.suite",
         "plugin:test.pixel_span",
-        1,
-        0,
         "frames",
         prepPixelSpan,
-        checkGeomPixelSpan,
         execPixelSpan
     },
     {
-        {sizeof(IRPluginHeader), IR_PLUGIN_ABI_VERSION_1, "ir.test.suite", "1.2.3", "SDK Tests"},
+        IR_PLUGIN_ABI_VERSION,
+        "ir.test.suite",
         "plugin:test.slow_cancel",
-        1,
-        0,
         "frames",
         prepSimpleFrames,
-        nullptr,
         execSlowCancel
     },
     {
-        {sizeof(IRPluginHeader), IR_PLUGIN_ABI_VERSION_1, "ir.test.suite", "1.2.3", "SDK Tests"},
+        IR_PLUGIN_ABI_VERSION,
+        "ir.test.suite",
         "plugin:test.throw_cxx",
-        1,
-        0,
         "frames",
         prepSimpleFrames,
-        nullptr,
         execThrowCxx
     },
     {
-        {sizeof(IRPluginHeader), IR_PLUGIN_ABI_VERSION_1, "ir.test.suite", "1.2.3", "SDK Tests"},
+        IR_PLUGIN_ABI_VERSION,
+        "ir.test.suite",
         "plugin:test.over_budget",
-        1,
-        0,
         "frames",
         prepOverBudget,
-        nullptr,
         execOverBudget
     },
     {
-        {sizeof(IRPluginHeader), IR_PLUGIN_ABI_VERSION_1, "ir.test.suite", "1.2.3", "SDK Tests"},
+        IR_PLUGIN_ABI_VERSION,
+        "ir.test.suite",
         "plugin:test.in_place_add",
-        1,
-        0,
         "in_map",
         prepInPlaceAdd,
-        nullptr,
         execInPlaceAdd
     },
     {
-        {sizeof(IRPluginHeader), IR_PLUGIN_ABI_VERSION_1, "ir.test.suite", "1.2.3", "SDK Tests"},
+        IR_PLUGIN_ABI_VERSION,
+        "ir.test.suite",
         "plugin:test.emit_nan",
-        1,
-        0,
         "frames",
         prepSimpleFrames,
-        nullptr,
         execEmitNan
     }
 };
 
 } // namespace
 
-extern "C" IR_PLUGIN_EXPORT int32_t ir_plugin_query_v1(
-    const IRMetricPluginV1 **out_list, uint32_t *out_count)
+extern "C" IR_PLUGIN_EXPORT int32_t ir_plugin_query(
+    const IRMetricPlugin **out_list, uint32_t *out_count)
 {
     if (!out_list || !out_count)
         return IR_NULL_POINTER;

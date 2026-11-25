@@ -39,15 +39,14 @@ int main(int argc, char **argv)
         fprintf(stderr, "Unexpected IRCaptureStats ABI size: %zu\n", sizeof(IRCaptureStats));
         return 1;
     }
-    if (strcmp(IR_PLUGIN_QUERY_V1_SYMBOL, "ir_plugin_query_v1") != 0 ||
+    if (strcmp(IR_PLUGIN_QUERY_SYMBOL, "ir_plugin_query") != 0 ||
         sizeof(IRRecipeStepEvent) != 56 ||
         sizeof(IRRecipeRunOptions) != 24 ||
-        sizeof(IRPluginHeader) != 32 ||
         sizeof(IRSlotView) != 48 ||
-        sizeof(IRPrepareCallbacksV1) != 40 ||
-        sizeof(IRHostCallbacksV1) != 72 ||
-        sizeof(IRMetricPluginV1) != 80 ||
-        IR_PLUGIN_ABI_VERSION_1 != 1u) {
+        sizeof(IRPrepareCallbacks) != 32 ||
+        sizeof(IRHostCallbacks) != 64 ||
+        sizeof(IRMetricPlugin) != 48 ||
+        IR_PLUGIN_ABI_VERSION != 1u) {
         fprintf(stderr, "Unexpected recipe/plugin ABI size or symbol\n");
         return 1;
     }

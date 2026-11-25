@@ -212,9 +212,7 @@ struct PowerWaitStableStep {
 
 struct PluginProvenance {
     std::string id;
-    std::string version;
     std::string file;
-    std::string sha256;
 };
 
 struct MetricOutput {

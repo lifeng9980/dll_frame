@@ -23,7 +23,7 @@
 | `station/instruments/` | 扁平存放 `asio_link`、`drivers.h`、`device_lease.h`、`device_api`/`discovery` 及各仪器协议驱动 | 采集逻辑、流程编排、跨驱动互调、单对子目录 |
 | `station/acquisition/` | 扁平存放 `frame_source`、`frame_queue` 与平台后端（`raw_replay_source`/`directshow_source`/`v4l2_source`） | RGB/YUV 转换、伪造帧戳、仪器/配方逻辑、单文件子目录 |
 | `station/procedures/` | 流程生命周期、`recipe_{parse,instruments,runner,metrics,json}.cpp`、`metrics_{basic,standard}.cpp`、`measurement`/`save_raw` | 直接包含 `station/plugins/` 实现细节（仅组合根 `recipe_json.cpp` 可装配插件） |
-| `station/plugins/` | `plugin_manager.{h,cpp}` 与 `plugin_host_adapter.{h,cpp}`（含 `PluginMetricProvider`、沙箱回调与 SHA-256 溯源） | 配方流程控制流、仪器/采集后端直接依赖 |
+| `station/plugins/` | `plugin_runtime.{h,cpp}`（`PluginMetricProvider`、进程级句柄缓存与就地零拷贝回调） | 配方流程控制流、仪器/采集后端直接依赖 |
 | `examples/` · `simulators/` | 多语言客户示例、`schemav` 工位/配方模板、真实数据目录（`examples/data/{tc002a_640,s07_1280}` 不入包不跟踪）与虚拟模拟器 | 内部个人路径、内部分支/关联项目名、人工小仿真 RAW 目录 |
 | `sdk_tests/` · `tools/` | 单元测试、模拟/HIL 测试与打包校验脚本（`package_sdk.py`、`verify_windows.ps1`） | — |
 | `docs/` · `third_party/` | 客户接入说明与内部研发指南；`third_party/` 仅放私有头文件库 | 内部文档禁止打入客户交付包 |

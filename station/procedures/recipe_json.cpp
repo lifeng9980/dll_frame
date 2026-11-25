@@ -3,7 +3,7 @@
 #include "recipe_config.h"
 #include "recipe_runtime_common.h"
 #include "station/acquisition/frame_source.h"
-#include "station/plugins/plugin_host_adapter.h"
+#include "station/plugins/plugin_runtime.h"
 #include <memory>
 
 namespace {
