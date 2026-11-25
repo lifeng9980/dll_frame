@@ -1,6 +1,8 @@
 #include "IR_station.h"
 #include "IR_analysis.h"
 #include "IR_device.h"
+#include "IR_recipe.h"
+#include "IR_plugin_abi.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -35,6 +37,10 @@ int main(int argc, char **argv)
     }
     if (sizeof(IRCaptureStats) != 64) {
         fprintf(stderr, "Unexpected IRCaptureStats ABI size: %zu\n", sizeof(IRCaptureStats));
+        return 1;
+    }
+    if (sizeof(IRRecipeStepEvent) != 56 || sizeof(IRRecipeRunOptions) != 24 || IR_PLUGIN_ABI_VERSION_1 != 1u) {
+        fprintf(stderr, "Unexpected recipe/plugin ABI size\n");
         return 1;
     }
     IRCaptureStats stats = {0};

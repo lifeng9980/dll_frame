@@ -50,6 +50,7 @@ public:
     OperationScope enterOperationScope() noexcept;
     void leaveOperationScope(OperationScope scope) noexcept;
     void requestStop() noexcept;
+    bool isStopRequested() const noexcept;
     void checkStop() const;
     void start();
     void stop();

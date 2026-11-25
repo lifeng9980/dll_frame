@@ -5,6 +5,7 @@
 #include "save_raw.h"
 #include "station/acquisition/frame_source.h"
 #include "station/instruments/device_lease.h"
+#include "station/plugins/plugin_manager.h"
 #include "station/version.h"
 #include <algorithm>
 #include <cctype>
@@ -32,7 +33,7 @@ namespace {
 
 fs::path pathFromUtf8(const std::string &utf8)
 {
-    return fs::path(reinterpret_cast<const char8_t *>(utf8.c_str()));
+    return fs::path(std::u8string(utf8.begin(), utf8.end()));
 }
 
 std::string portableNameKey(std::string value)
@@ -140,7 +141,8 @@ VariantType parseSharedControlOrCaptureOrFlushOrAnalyze(
     const StationConfig &station, std::map<std::string, SlotKind> &knownSlots,
     std::set<std::string> &usedDevices, std::set<std::string> &analysisNames,
     std::map<std::string, std::string> &metricUnits,
-    std::vector<std::string> *producedMetricsOrder)
+    std::vector<std::string> *producedMetricsOrder,
+    const ir::plugins::PluginManager *plugins)
 {
     if (type == "blackbody_stabilize") {
         auto step = parseBlackbodyStep(std::move(ref), fields, path, station);
@@ -344,7 +346,7 @@ VariantType parseSharedControlOrCaptureOrFlushOrAnalyze(
         };
     }
     if (type == "analyze") {
-        auto step = prepareAnalysisV2(std::move(ref), fields, path, knownSlots);
+        auto step = prepareAnalysisV2(std::move(ref), fields, path, knownSlots, plugins);
         require(analysisNames.insert(step.name).second, IR_BAD_ARGUMENT,
                 path + ".name is duplicated: " + step.name);
         for (const auto &out : step.outputs) {
@@ -710,10 +712,93 @@ std::string formatDoubleClassic(double val)
     return oss.str();
 }
 
+void emitV2StepEvent(const IRRecipeRunOptions *options, int32_t kind, int32_t stepIndex,
+                     int32_t stage, int32_t status, double durationMs,
+                     const std::string &stepId, const char *stepType,
+                     const char *detail = "") noexcept
+{
+    if (!options || !options->on_step_event)
+        return;
+    IRRecipeStepEvent ev{};
+    ev.struct_size = sizeof(IRRecipeStepEvent);
+    ev.event_kind = kind;
+    ev.step_index = stepIndex;
+    ev.stage = stage;
+    ev.status = status;
+    ev.reserved = 0;
+    ev.duration_ms = durationMs;
+    ev.step_id_utf8 = stepId.c_str();
+    ev.step_type_utf8 = stepType ? stepType : "";
+    ev.detail_utf8 = detail ? detail : "";
+    try {
+        options->on_step_event(&ev, options->user_data);
+    } catch (...) {
+    }
+}
+
+struct TopStepInfo {
+    const StepRef *ref{nullptr};
+    const char *typeName{""};
+    int32_t initialStage{IR_RECIPE_STAGE_NONE};
+};
+
+TopStepInfo topStepInfo(const StepV2 &step) noexcept
+{
+    return std::visit([](const auto &s) -> TopStepInfo {
+        using T = std::decay_t<decltype(s)>;
+        if constexpr (std::is_same_v<T, BlackbodyStep>) {
+            return {&s.ref, "blackbody_stabilize", IR_RECIPE_STAGE_INSTRUMENT};
+        } else if constexpr (std::is_same_v<T, PowerStep>) {
+            const char *name = "power_read";
+            if (s.operation == PowerStep::Operation::set) name = "power_set";
+            else if (s.operation == PowerStep::Operation::output) name = "power_output";
+            return {&s.ref, name, IR_RECIPE_STAGE_INSTRUMENT};
+        } else if constexpr (std::is_same_v<T, PowerWaitStableStep>) {
+            return {&s.ref, "power_wait_stable", IR_RECIPE_STAGE_INSTRUMENT};
+        } else if constexpr (std::is_same_v<T, OvenStabilizeStep>) {
+            return {&s.ref, "oven_stabilize", IR_RECIPE_STAGE_INSTRUMENT};
+        } else if constexpr (std::is_same_v<T, OvenStandbyStep>) {
+            return {&s.ref, "oven_standby", IR_RECIPE_STAGE_INSTRUMENT};
+        } else if constexpr (std::is_same_v<T, DmmReadStep>) {
+            return {&s.ref, "dmm_read", IR_RECIPE_STAGE_INSTRUMENT};
+        } else if constexpr (std::is_same_v<T, DetectorTimingStep>) {
+            return {&s.ref, "detector_timing", IR_RECIPE_STAGE_INSTRUMENT};
+        } else if constexpr (std::is_same_v<T, DetectorGpolStep>) {
+            return {&s.ref, "detector_gpol", IR_RECIPE_STAGE_INSTRUMENT};
+        } else if constexpr (std::is_same_v<T, DetectorRegisterStep>) {
+            return {&s.ref, "detector_register", IR_RECIPE_STAGE_INSTRUMENT};
+        } else if constexpr (std::is_same_v<T, DetectorCurrentStep>) {
+            return {&s.ref, "detector_current", IR_RECIPE_STAGE_INSTRUMENT};
+        } else if constexpr (std::is_same_v<T, CoolerReadStep>) {
+            return {&s.ref, "cooler_read", IR_RECIPE_STAGE_INSTRUMENT};
+        } else if constexpr (std::is_same_v<T, FlushStep>) {
+            return {&s.ref, "flush_frames", IR_RECIPE_STAGE_CAPTURE};
+        } else if constexpr (std::is_same_v<T, CaptureStepV2>) {
+            return {&s.ref, "capture", IR_RECIPE_STAGE_CAPTURE};
+        } else if constexpr (std::is_same_v<T, AnalysisStepV2>) {
+            return {&s.ref, "analyze", IR_RECIPE_STAGE_ANALYZE};
+        } else if constexpr (std::is_same_v<T, SaveRawStepV2>) {
+            return {&s.ref, "save_raw", IR_RECIPE_STAGE_ARCHIVE};
+        } else if constexpr (std::is_same_v<T, RepeatBurstStep>) {
+            return {&s.ref, "repeat_burst", IR_RECIPE_STAGE_CAPTURE};
+        }
+        return {};
+    }, step);
+}
+
 } // namespace
 
 RecipeConfigV2 parseRecipeV2(const char *text, const StationConfig &station)
 {
+    ir::plugins::PluginManager pluginMgr;
+    const ir::plugins::PluginManager *plugins = nullptr;
+    if (!station.pluginPaths.empty()) {
+        std::string pluginErr;
+        const int32_t pst = pluginMgr.loadConfiguredPaths(station.pluginPaths, &pluginErr);
+        if (pst != IR_OK)
+            throw Error(pst, pluginErr);
+        plugins = &pluginMgr;
+    }
     auto root = parseJson(text, "recipe JSON");
     require(root.is_object(), IR_BAD_ARGUMENT, "recipe JSON must contain an object");
     allowFields(root, {"$schema", "schema_version", "recipe_id", "steps", "safety", "limits"}, "recipe");
@@ -804,7 +889,7 @@ RecipeConfigV2 parseRecipeV2(const char *text, const StationConfig &station)
 
                 burst.steps.emplace_back(parseSharedControlOrCaptureOrFlushOrAnalyze<InnerStepV2>(
                     std::move(innerRef), innerType, innerFields, innerPath, station,
-                    knownSlots, usedDevices, analysisNames, metricUnits, &innerMetrics));
+                    knownSlots, usedDevices, analysisNames, metricUnits, &innerMetrics, plugins));
             }
 
             if (fields.contains("record_metrics")) {
@@ -829,7 +914,7 @@ RecipeConfigV2 parseRecipeV2(const char *text, const StationConfig &station)
         } else {
             recipe.steps.emplace_back(parseSharedControlOrCaptureOrFlushOrAnalyze<StepV2>(
                 std::move(ref), type, fields, path, station,
-                knownSlots, usedDevices, analysisNames, metricUnits, nullptr));
+                knownSlots, usedDevices, analysisNames, metricUnits, nullptr, plugins));
         }
     }
 
@@ -907,7 +992,8 @@ RecipeConfigV2 parseRecipeV2(const char *text, const StationConfig &station)
 }
 
 void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station,
-                 const RecipeConfigV2 &recipe, const char *directory, IRRecipeResult &result)
+                 const RecipeConfigV2 &recipe, const char *directory, IRRecipeResult &result,
+                 const IRRecipeRunOptions *options)
 {
     require(directory && *directory, IR_BAD_ARGUMENT, "Specify a new output directory");
     const auto destination = fs::path(reinterpret_cast<const char8_t *>(directory));
@@ -929,6 +1015,7 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
     std::vector<SavedBatchSnapshot> savedSnapshots;
     uint64_t savedSnapshotBytes = 0;
     std::vector<Json> burstRunsSummary;
+    Json stepRecords = Json::array();
     bool destinationCreated = false;
     bool freshFramesRequired = false;
 
@@ -1099,7 +1186,13 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
                 } else if constexpr (std::is_same_v<T, AnalysisStepV2>) {
                     progress.enter(IR_RECIPE_STAGE_ANALYZE, &s.ref);
                     capture.checkStop();
-                    s.operations.execute(ctx);
+                    AnalysisRunContext runCtx{
+                        ctx,
+                        capture,
+                        addBytes(capture.bufferedBytes(), savedSnapshotBytes),
+                        station.maxInflightBytes
+                    };
+                    s.operations.execute(runCtx);
                     capture.checkStop();
                     requireWithinMemoryLimit(addBytes(
                         addBytes(capture.bufferedBytes(), ctx.retainedBytes()), savedSnapshotBytes),
@@ -1108,104 +1201,152 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
             };
 
             for (const auto &step : recipe.steps) {
-                if (const auto *sr = std::get_if<SaveRawStepV2>(&step)) {
-                    progress.enter(IR_RECIPE_STAGE_ARCHIVE, &sr->ref);
-                    capture.checkStop();
-                    const auto &batch = ctx.batches.at(sr->inputSlot);
-                    const uint64_t snapshotBytes = batchStorageBytes(
-                        batch.geometry, static_cast<int32_t>(batch.stamps.size()),
-                        station.maxBatchBytes);
-                    const uint64_t nextSavedSnapshotBytes = addBytes(
-                        savedSnapshotBytes, snapshotBytes);
-                    const uint64_t requiredStorage = addBytes(
-                        addBytes(capture.bufferedBytes(), ctx.retainedBytes()),
-                        nextSavedSnapshotBytes);
-                    requireWithinMemoryLimit(requiredStorage, station.maxInflightBytes);
-                    savedSnapshots.push_back({sr->inputSlot, sr->subdir, batch});
-                    savedSnapshotBytes = nextSavedSnapshotBytes;
-                } else if (const auto *rb = std::get_if<RepeatBurstStep>(&step)) {
-                    const auto loopStart = std::chrono::steady_clock::now();
-                    std::ofstream csvStream;
-                    int32_t iterationsDone = 0;
-                    for (;;) {
+                const TopStepInfo sInfo = topStepInfo(step);
+                const std::string stepStartUtc = utcTimestampNow();
+                const auto stepStartSteady = std::chrono::steady_clock::now();
+                emitV2StepEvent(options, IR_STEP_EVENT_STARTED, sInfo.ref->index,
+                                sInfo.initialStage, IR_OK, 0.0, sInfo.ref->id, sInfo.typeName);
+                int32_t burstIterationsForRecord = -1;
+                try {
+                    if (const auto *sr = std::get_if<SaveRawStepV2>(&step)) {
+                        progress.enter(IR_RECIPE_STAGE_ARCHIVE, &sr->ref);
                         capture.checkStop();
-                        if (rb->maxIterations > 0 && iterationsDone >= rb->maxIterations)
-                            break;
-                        const double elapsedBefore = std::chrono::duration<double>(
-                            std::chrono::steady_clock::now() - loopStart).count();
-                        if (rb->maxIterations == 0 && iterationsDone > 0 && elapsedBefore >= rb->durationSec)
-                            break;
-                        if (rb->durationSec > 0.0 && iterationsDone > 0 && elapsedBefore >= rb->durationSec)
-                            break;
+                        const auto &batch = ctx.batches.at(sr->inputSlot);
+                        const uint64_t snapshotBytes = batchStorageBytes(
+                            batch.geometry, static_cast<int32_t>(batch.stamps.size()),
+                            station.maxBatchBytes);
+                        const uint64_t nextSavedSnapshotBytes = addBytes(
+                            savedSnapshotBytes, snapshotBytes);
+                        const uint64_t requiredStorage = addBytes(
+                            addBytes(capture.bufferedBytes(), ctx.retainedBytes()),
+                            nextSavedSnapshotBytes);
+                        requireWithinMemoryLimit(requiredStorage, station.maxInflightBytes);
+                        savedSnapshots.push_back({sr->inputSlot, sr->subdir, batch});
+                        savedSnapshotBytes = nextSavedSnapshotBytes;
+                    } else if (const auto *rb = std::get_if<RepeatBurstStep>(&step)) {
+                        progress.enter(IR_RECIPE_STAGE_CAPTURE, &rb->ref);
+                        const auto loopStart = std::chrono::steady_clock::now();
+                        std::ofstream csvStream;
+                        int32_t iterationsDone = 0;
+                        for (;;) {
+                            progress.enter(IR_RECIPE_STAGE_CAPTURE, &rb->ref);
+                            capture.checkStop();
+                            if (rb->maxIterations > 0 && iterationsDone >= rb->maxIterations)
+                                break;
+                            const double elapsedBefore = std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - loopStart).count();
+                            if (rb->maxIterations == 0 && iterationsDone > 0 && elapsedBefore >= rb->durationSec)
+                                break;
+                            if (rb->durationSec > 0.0 && iterationsDone > 0 && elapsedBefore >= rb->durationSec)
+                                break;
 
-                        for (const auto &inner : rb->steps) {
-                            std::visit(executeCommon, inner);
-                        }
-
-                        if (!csvStream.is_open()) {
-                            if (!destinationCreated) {
-                                std::error_code createError;
-                                const bool created = fs::create_directory(destination, createError);
-                                require(created && !createError, IR_IO_ERROR,
-                                        "Cannot exclusively create the recipe output directory");
-                                destinationCreated = true;
+                            for (const auto &inner : rb->steps) {
+                                std::visit(executeCommon, inner);
                             }
-                            const fs::path csvPath = destination / pathFromUtf8(rb->csvFile);
-                            csvStream.open(csvPath, std::ios::binary | std::ios::out);
-                            require(csvStream.is_open(), IR_IO_ERROR,
-                                    "Cannot open burst summary CSV: " + rb->csvFile);
-                            csvStream << "iteration,timestamp_utc,elapsed_s";
-                            for (const auto &col : rb->recordMetrics)
-                                csvStream << ',' << col;
+
+                            progress.enter(IR_RECIPE_STAGE_ARCHIVE, &rb->ref);
+                            if (!csvStream.is_open()) {
+                                if (!destinationCreated) {
+                                    std::error_code createError;
+                                    const bool created = fs::create_directory(destination, createError);
+                                    require(created && !createError, IR_IO_ERROR,
+                                            "Cannot exclusively create the recipe output directory");
+                                    destinationCreated = true;
+                                }
+                                const fs::path csvPath = destination / pathFromUtf8(rb->csvFile);
+                                csvStream.open(csvPath, std::ios::binary | std::ios::out);
+                                require(csvStream.is_open(), IR_IO_ERROR,
+                                        "Cannot open burst summary CSV: " + rb->csvFile);
+                                csvStream << "iteration,timestamp_utc,elapsed_s";
+                                for (const auto &col : rb->recordMetrics)
+                                    csvStream << ',' << col;
+                                csvStream << '\n';
+                            }
+                            const double iterElapsed = std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - loopStart).count();
+                            csvStream << iterationsDone << ',' << utcTimestampNow() << ','
+                                      << formatDoubleClassic(iterElapsed);
+                            for (const auto &col : rb->recordMetrics) {
+                                const auto itVal = ctx.scalarValues.find(col);
+                                require(itVal != ctx.scalarValues.end(), IR_COMPUTATION_FAILED,
+                                        "repeat_burst record metric missing: " + col);
+                                csvStream << ',' << formatDoubleClassic(itVal->second);
+                            }
                             csvStream << '\n';
-                        }
-                        const double iterElapsed = std::chrono::duration<double>(
-                            std::chrono::steady_clock::now() - loopStart).count();
-                        csvStream << iterationsDone << ',' << utcTimestampNow() << ','
-                                  << formatDoubleClassic(iterElapsed);
-                        for (const auto &col : rb->recordMetrics) {
-                            const auto itVal = ctx.scalarValues.find(col);
-                            require(itVal != ctx.scalarValues.end(), IR_COMPUTATION_FAILED,
-                                    "repeat_burst record metric missing: " + col);
-                            csvStream << ',' << formatDoubleClassic(itVal->second);
-                        }
-                        csvStream << '\n';
-                        csvStream.flush();
-                        require(csvStream.good(), IR_IO_ERROR,
-                                "Failed flushing burst summary CSV: " + rb->csvFile);
-                        ++iterationsDone;
-                        if (capture.source && capture.source->isLive())
-                            freshFramesRequired = true;
+                            csvStream.flush();
+                            require(csvStream.good(), IR_IO_ERROR,
+                                    "Failed flushing burst summary CSV: " + rb->csvFile);
+                            ++iterationsDone;
+                            if (capture.source && capture.source->isLive())
+                                freshFramesRequired = true;
 
-                        const bool moreByCount = (rb->maxIterations == 0) || (iterationsDone < rb->maxIterations);
-                        const double elapsedAfter = std::chrono::duration<double>(
-                            std::chrono::steady_clock::now() - loopStart).count();
-                        const bool moreByTime = (rb->durationSec <= 0.0) || (elapsedAfter < rb->durationSec);
-                        if (!moreByCount || !moreByTime)
-                            break;
+                            const bool moreByCount = (rb->maxIterations == 0) || (iterationsDone < rb->maxIterations);
+                            const double elapsedAfter = std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - loopStart).count();
+                            const bool moreByTime = (rb->durationSec <= 0.0) || (elapsedAfter < rb->durationSec);
+                            if (!moreByCount || !moreByTime)
+                                break;
 
-                        if (rb->intervalSec > 0.0) {
-                            const auto sleepEnd = std::chrono::steady_clock::now() +
-                                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                                    std::chrono::duration<double>(rb->intervalSec));
-                            while (std::chrono::steady_clock::now() < sleepEnd) {
-                                capture.checkStop();
-                                const auto rem = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    sleepEnd - std::chrono::steady_clock::now()).count();
-                                if (rem <= 0) break;
-                                std::this_thread::sleep_for(
-                                    std::chrono::milliseconds(std::min<int64_t>(rem, 50)));
+                            if (rb->intervalSec > 0.0) {
+                                progress.enter(IR_RECIPE_STAGE_CAPTURE, &rb->ref);
+                                const auto sleepEnd = std::chrono::steady_clock::now() +
+                                    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                        std::chrono::duration<double>(rb->intervalSec));
+                                while (std::chrono::steady_clock::now() < sleepEnd) {
+                                    capture.checkStop();
+                                    const auto rem = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        sleepEnd - std::chrono::steady_clock::now()).count();
+                                    if (rem <= 0) break;
+                                    std::this_thread::sleep_for(
+                                        std::chrono::milliseconds(std::min<int64_t>(rem, 50)));
+                                }
                             }
                         }
+                        progress.enter(IR_RECIPE_STAGE_CAPTURE, &rb->ref);
+                        burstIterationsForRecord = iterationsDone;
+                        burstRunsSummary.push_back({
+                            {"id", rb->ref.id},
+                            {"csv_file", rb->csvFile},
+                            {"iterations", iterationsDone}
+                        });
+                    } else {
+                        std::visit(executeCommon, step);
                     }
-                    burstRunsSummary.push_back({
-                        {"id", rb->ref.id},
-                        {"csv_file", rb->csvFile},
-                        {"iterations", iterationsDone}
-                    });
-                } else {
-                    std::visit(executeCommon, step);
+                } catch (const Error &e) {
+                    const double elapsedMs = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - stepStartSteady).count();
+                    emitV2StepEvent(options, IR_STEP_EVENT_FAILED, sInfo.ref->index,
+                                    result.failed_stage, e.code, elapsedMs,
+                                    sInfo.ref->id, sInfo.typeName, e.what());
+                    throw;
+                } catch (const std::exception &e) {
+                    const double elapsedMs = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - stepStartSteady).count();
+                    emitV2StepEvent(options, IR_STEP_EVENT_FAILED, sInfo.ref->index,
+                                    result.failed_stage, IR_COMPUTATION_FAILED, elapsedMs,
+                                    sInfo.ref->id, sInfo.typeName, e.what());
+                    throw;
                 }
+                const double durationMs = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - stepStartSteady).count();
+                const int32_t finalStage = (burstIterationsForRecord >= 0)
+                    ? sInfo.initialStage
+                    : result.failed_stage;
+                Json rec{
+                    {"index", sInfo.ref->index},
+                    {"id", sInfo.ref->id},
+                    {"type", sInfo.typeName},
+                    {"stage", finalStage},
+                    {"started_utc", stepStartUtc},
+                    {"finished_utc", utcTimestampNow()},
+                    {"duration_ms", durationMs},
+                    {"status", "OK"}
+                };
+                if (burstIterationsForRecord >= 0)
+                    rec["iterations"] = burstIterationsForRecord;
+                stepRecords.push_back(std::move(rec));
+                emitV2StepEvent(options, IR_STEP_EVENT_COMPLETED, sInfo.ref->index,
+                                finalStage, IR_OK, durationMs, sInfo.ref->id, sInfo.typeName);
             }
         } catch (...) {
             failure = std::current_exception();
@@ -1326,6 +1467,7 @@ void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station
             {"raw_saved", !savedSnapshots.empty()},
             {"saved_batches", std::move(savedBatchesMeta)},
             {"burst_runs", std::move(burstRunsSummary)},
+            {"step_records", std::move(stepRecords)},
             {"station_version", IR_StationVersion()},
             {"analysis_version", IR_AnalysisVersion()},
             {"source_commit", ir::station::sourceCommit()},

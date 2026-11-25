@@ -14,6 +14,10 @@
 #include <variant>
 #include <vector>
 
+namespace ir::plugins {
+class PluginManager;
+}
+
 namespace ir::procedures::recipe {
 using Json = nlohmann::json;
 
@@ -30,6 +34,7 @@ struct StationConfig {
     int32_t queueCapacity{64};
     std::string source;
     std::map<std::string, DeviceConfig> devices;
+    std::vector<std::string> pluginPaths;
 };
 
 struct StepRef {
@@ -244,9 +249,27 @@ struct PowerWaitStableStep {
     IRPowerCurrentStableSpec spec{};
 };
 
+struct MetricOutputV2 {
+    std::string suffix;
+    std::string unit;
+    std::string method;
+    int32_t version{1};
+    std::string pluginId;
+    std::string pluginVersion;
+    std::string pluginFile;
+    std::string pluginSha256;
+};
+
+struct AnalysisRunContext {
+    ExecutionContext &ctx;
+    const ir::acquisition::Capture &capture;
+    uint64_t inflightBaseBytes{0};
+    uint64_t maxInflightBytes{0};
+};
+
 struct MetricV2Operations {
     std::function<void(IRGeometry)> checkGeometry;
-    std::function<void(ExecutionContext &)> execute;
+    std::function<void(AnalysisRunContext &)> execute;
 };
 
 struct AnalysisStepV2 {
@@ -254,7 +277,7 @@ struct AnalysisStepV2 {
     std::string name;
     std::string method;
     int32_t version{1};
-    std::vector<MetricOutput> outputs;
+    std::vector<MetricOutputV2> outputs;
     MetricV2Operations operations;
 };
 
@@ -298,7 +321,8 @@ RecipeConfig parseRecipe(const char *text, const StationConfig &station);
 int detectRecipeSchemaVersion(const char *text);
 RecipeConfigV2 parseRecipeV2(const char *text, const StationConfig &station);
 void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station,
-                 const RecipeConfigV2 &recipe, const char *directory, IRRecipeResult &result);
+                 const RecipeConfigV2 &recipe, const char *directory, IRRecipeResult &result,
+                 const IRRecipeRunOptions *options = nullptr);
 
 uint64_t addBytes(uint64_t total, uint64_t additional);
 uint64_t multiplyBytes(uint64_t count, uint64_t itemBytes);
@@ -326,5 +350,6 @@ PowerStep parsePowerStep(StepRef ref, const std::string &type, const Json &field
                          const std::string &path, const StationConfig &station);
 AnalysisStep prepareAnalysis(StepRef ref, const Json &fields, const std::string &path, int32_t frames);
 AnalysisStepV2 prepareAnalysisV2(StepRef ref, const Json &fields, const std::string &path,
-                                 std::map<std::string, SlotKind> &knownSlots);
+                                 std::map<std::string, SlotKind> &knownSlots,
+                                 const ir::plugins::PluginManager *plugins = nullptr);
 } // namespace ir::procedures::recipe

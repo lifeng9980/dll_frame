@@ -17,6 +17,7 @@ import zipfile
 
 COMMON_ITEMS = ("include", "docs", "examples", "simulators", "third_party", "SDK.md")
 REQUIRED_CUSTOMER_FILES = (
+    "include/IR_plugin_abi.h",
     "SDK.md",
     "docs/客户接入说明.md",
     "docs/测试人员配方指南.md",
@@ -43,6 +44,7 @@ FORBIDDEN_PATTERNS = (
     ("internal sibling repository reference", re.compile(r"(?i)(?:oden_sln|optmeas-usb)")),
     ("internal codex branch reference", re.compile(r"(?i)codex/")),
     ("internal windows-iter branch reference", re.compile(r"(?i)windows-iter")),
+    ("internal feat/plugin-arch branch reference", re.compile(r"(?i)feat/plugin-arch")),
 )
 HYGIENE_TEXT_EXTENSIONS = (
     ".md", ".txt", ".json", ".py", ".c", ".cpp", ".h", ".cs", ".csproj", ".ps1", ".sh", ".cmake",
@@ -190,6 +192,20 @@ def scan_package_hygiene(stage):
                             violations.append(f"{relative}: out-of-package raw_replay source: {source_ref}")
                         elif not resolved_source.exists():
                             violations.append(f"{relative}: missing raw_replay source: {source_ref}")
+                if "plugins" in data:
+                    plugins = data.get("plugins")
+                    if not isinstance(plugins, list):
+                        violations.append(f"{relative}: station.plugins must be an array")
+                    else:
+                        for plugin_ref in plugins:
+                            if not isinstance(plugin_ref, str) or not plugin_ref.strip():
+                                violations.append(f"{relative}: station.plugins entries must be non-empty strings")
+                            else:
+                                resolved_plugin = (path.parent / plugin_ref).resolve()
+                                if not resolved_plugin.is_relative_to(stage):
+                                    violations.append(f"{relative}: out-of-package plugin path: {plugin_ref}")
+                                elif not resolved_plugin.exists():
+                                    violations.append(f"{relative}: missing plugin path: {plugin_ref}")
 
     if violations:
         details = "\n  - ".join(violations)

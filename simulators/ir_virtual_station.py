@@ -22,6 +22,8 @@ from ir_sim_devices import (
     It6332a,
     _consume_modbus_buffer,
     _dispatch_buffer,
+    close_serial,
+    open_serial,
     serve_serial,
 )
 
@@ -429,63 +431,68 @@ def main():
     tcp_servers = []
     serial_threads = []
     endpoints = {}
-    for name, (controller, delimiter, consume_fn, default_baud, default_stop, tcp_default) in specs.items():
-        cfg = serial_map.get(name) if args.mode == "serial-map" else None
-        if cfg and "port" in cfg:
-            port_name = cfg["port"]
-            client_port = cfg.get("client_port")
-            baud = int(cfg.get("baud_rate", default_baud))
-            stop_bits = int(cfg.get("stop_bits", default_stop))
-            if name == "blackbody":
-                controller.tcp = False
-            ep_info = {"port": port_name, "baud_rate": baud, "stop_bits": stop_bits}
-            if client_port:
-                ep_info["client_port"] = client_port
-            endpoints[name] = ep_info
-            t = threading.Thread(
-                target=serve_serial,
-                args=(port_name, baud, controller, delimiter, stop),
-                kwargs={
-                    "log_io": args.log_io,
-                    "stop_bits": stop_bits,
-                    "consume_fn": consume_fn,
-                    "dispatch_lock": state.lock,
-                },
-                daemon=True,
-            )
-            t.start()
-            serial_threads.append(t)
-        else:
-            tcp_host = (cfg or {}).get("host", args.host)
-            tcp_port = int((cfg or {}).get("tcp_port", tcp_default))
-            srv = BoundTcpDevice(tcp_host, tcp_port, controller, delimiter, stop,
-                                 log_io=args.log_io, consume_fn=consume_fn, lock=state.lock)
-            srv.start()
-            tcp_servers.append(srv)
-            endpoints[name] = {"host": tcp_host, "tcp_port": srv.port}
-
-    ctrl_server = None
     ctrl_thread = None
-    if args.control_port is not None:
-        ctrl_server, actual_ctrl_port, ctrl_thread = start_control_http(args.host, args.control_port, state, stop)
-        endpoints["control_url"] = f"http://{args.host}:{actual_ctrl_port}"
-
-    state.endpoints = endpoints
-    if args.emit_station_json:
-        args.emit_station_json.parent.mkdir(parents=True, exist_ok=True)
-        args.emit_station_json.write_text(
-            json.dumps(build_station_json(endpoints, args.raw_source), ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-    if args.emit_blackbody_config and "blackbody" in endpoints:
-        args.emit_blackbody_config.parent.mkdir(parents=True, exist_ok=True)
-        args.emit_blackbody_config.write_text(
-            json.dumps(build_host_blackbody_json(endpoints["blackbody"]), ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-
-    print("VIRTUAL_STATION_READY=" + json.dumps(endpoints, ensure_ascii=False), flush=True)
     try:
+        for name, (controller, delimiter, consume_fn, default_baud, default_stop, tcp_default) in specs.items():
+            cfg = serial_map.get(name) if args.mode == "serial-map" else None
+            if cfg and "port" in cfg:
+                port_name = cfg["port"]
+                client_port = cfg.get("client_port")
+                baud = int(cfg.get("baud_rate", default_baud))
+                stop_bits = int(cfg.get("stop_bits", default_stop))
+                if name == "blackbody":
+                    controller.tcp = False
+                ep_info = {"port": port_name, "baud_rate": baud, "stop_bits": stop_bits}
+                if client_port:
+                    ep_info["client_port"] = client_port
+                ser_handle = open_serial(port_name, baud, stop_bits=stop_bits)
+                try:
+                    endpoints[name] = ep_info
+                    t = threading.Thread(
+                        target=serve_serial,
+                        args=(port_name, baud, controller, delimiter, stop),
+                        kwargs={
+                            "log_io": args.log_io,
+                            "stop_bits": stop_bits,
+                            "consume_fn": consume_fn,
+                            "dispatch_lock": state.lock,
+                            "preopened_handle": ser_handle,
+                        },
+                        daemon=True,
+                    )
+                    t.start()
+                except Exception:
+                    close_serial(ser_handle)
+                    raise
+                serial_threads.append(t)
+            else:
+                tcp_host = (cfg or {}).get("host", args.host)
+                tcp_port = int((cfg or {}).get("tcp_port", tcp_default))
+                srv = BoundTcpDevice(tcp_host, tcp_port, controller, delimiter, stop,
+                                     log_io=args.log_io, consume_fn=consume_fn, lock=state.lock)
+                tcp_servers.append(srv)
+                srv.start()
+                endpoints[name] = {"host": tcp_host, "tcp_port": srv.port}
+
+        if args.control_port is not None:
+            _, actual_ctrl_port, ctrl_thread = start_control_http(args.host, args.control_port, state, stop)
+            endpoints["control_url"] = f"http://{args.host}:{actual_ctrl_port}"
+
+        state.endpoints = endpoints
+        if args.emit_station_json:
+            args.emit_station_json.parent.mkdir(parents=True, exist_ok=True)
+            args.emit_station_json.write_text(
+                json.dumps(build_station_json(endpoints, args.raw_source), ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        if args.emit_blackbody_config and "blackbody" in endpoints:
+            args.emit_blackbody_config.parent.mkdir(parents=True, exist_ok=True)
+            args.emit_blackbody_config.write_text(
+                json.dumps(build_host_blackbody_json(endpoints["blackbody"]), ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+        print("VIRTUAL_STATION_READY=" + json.dumps(endpoints, ensure_ascii=False), flush=True)
         while not stop.wait(0.25):
             pass
     finally:

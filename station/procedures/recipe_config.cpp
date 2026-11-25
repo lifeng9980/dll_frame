@@ -160,7 +160,7 @@ StationConfig parseStation(const char *text)
 {
     const auto root = parseJson(text, "station JSON");
     require(root.is_object(), IR_BAD_ARGUMENT, "station JSON must contain an object");
-    allowFields(root, {"$schema", "schema_version", "acquisition", "devices"}, "station");
+    allowFields(root, {"$schema", "schema_version", "acquisition", "devices", "plugins"}, "station");
     (void)optionalString(root, "$schema", "", "station");
     require(integerField(root, "schema_version", 1, 1, "station") == 1,
             IR_BAD_ARGUMENT, "station.schema_version is unsupported");
@@ -193,6 +193,19 @@ StationConfig parseStation(const char *text)
         "station.acquisition"));
     station.queueCapacity = optionalInteger(acquisition, "queue_capacity", station.queueCapacity,
                                             2, 4096, "station.acquisition");
+
+    if (const auto pluginsField = root.find("plugins"); pluginsField != root.end()) {
+        require(pluginsField->is_array(), IR_BAD_ARGUMENT, "station.plugins must be an array");
+        station.pluginPaths.reserve(pluginsField->size());
+        for (size_t i = 0; i < pluginsField->size(); ++i) {
+            const auto pPath = "station.plugins[" + std::to_string(i) + "]";
+            require((*pluginsField)[i].is_string(), IR_BAD_ARGUMENT, pPath + " must be a string");
+            auto val = (*pluginsField)[i].get<std::string>();
+            require(!val.empty() && val.find('\0') == std::string::npos, IR_BAD_ARGUMENT,
+                    pPath + " must be nonempty UTF-8 text without NUL");
+            station.pluginPaths.push_back(std::move(val));
+        }
+    }
 
     const auto devicesField = root.find("devices");
     if (devicesField == root.end()) return station;

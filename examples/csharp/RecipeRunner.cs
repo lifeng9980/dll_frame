@@ -42,6 +42,18 @@ internal static class RecipeRunner
                     ?? throw new InvalidOperationException("station.acquisition.source is missing.");
                 acquisition["source"] = Path.GetFullPath(source, Path.GetDirectoryName(stationPath)!);
             }
+            if (station["plugins"] is JsonArray pluginsArray)
+            {
+                for (var i = 0; i < pluginsArray.Count; i++)
+                {
+                    if (pluginsArray[i] is JsonValue pluginValue &&
+                        pluginValue.TryGetValue<string>(out var pluginEntry) &&
+                        !string.IsNullOrEmpty(pluginEntry))
+                    {
+                        pluginsArray[i] = Path.GetFullPath(pluginEntry, Path.GetDirectoryName(stationPath)!);
+                    }
+                }
+            }
 
             var stationJson = station.ToJsonString();
             var recipeJson = File.ReadAllText(recipePath);

@@ -41,6 +41,40 @@ IR_STATION_API int32_t IR_RunRecipeJson(const char *station_json_utf8,
     const char *recipe_json_utf8, const char *new_output_directory_utf8,
     IRRecipeResult *result, char *err, int32_t err_bytes);
 
+enum IRRecipeStepEventKind {
+    IR_STEP_EVENT_STARTED = 1,
+    IR_STEP_EVENT_COMPLETED = 2,
+    IR_STEP_EVENT_FAILED = 3
+};
+
+typedef struct IRRecipeStepEvent {
+    uint32_t struct_size;
+    int32_t event_kind;        /* IRRecipeStepEventKind */
+    int32_t step_index;        /* recipe.steps 下标，从 0 开始；无对应步骤时为 -1。 */
+    int32_t stage;             /* IRRecipeStage */
+    int32_t status;            /* IRStatus */
+    int32_t reserved;          /* 对齐保留字段，置 0。 */
+    double duration_ms;        /* 步骤耗时（毫秒）；STARTED 时为 0。 */
+    const char *step_id_utf8;  /* 仅在本次回调调用期间有效。 */
+    const char *step_type_utf8;/* 仅在本次回调调用期间有效。 */
+    const char *detail_utf8;   /* 失败详情或附加说明，仅在本次回调调用期间有效。 */
+} IRRecipeStepEvent;
+
+/* 在 IR_RunRecipeJsonEx 调用线程同步触发；严禁向 C ABI 边界外抛出 C++ 异常。 */
+typedef void (*IRRecipeStepCallback)(const IRRecipeStepEvent *event, void *user_data);
+
+typedef struct IRRecipeRunOptions {
+    uint32_t struct_size;
+    uint32_t flags;            /* 保留标志位，必须为 0。 */
+    IRRecipeStepCallback on_step_event;
+    void *user_data;
+} IRRecipeRunOptions;
+
+/* 与 IR_RunRecipeJson 行为一致，额外支持通过 options 接收步骤级运行事件回调（可传 NULL）。 */
+IR_STATION_API int32_t IR_RunRecipeJsonEx(const char *station_json_utf8,
+    const char *recipe_json_utf8, const char *new_output_directory_utf8,
+    const IRRecipeRunOptions *options, IRRecipeResult *result, char *err, int32_t err_bytes);
+
 #ifdef __cplusplus
 }
 #endif

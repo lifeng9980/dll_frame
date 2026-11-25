@@ -164,6 +164,10 @@ void Capture::requestStop() noexcept
         return;
     frameQueue_.wakeWaiters();
 }
+bool Capture::isStopRequested() const noexcept
+{
+    return stopState_.load(std::memory_order_acquire) == StopState::requested;
+}
 void Capture::checkStop() const
 {
     require(stopState_.load() != StopState::requested, IR_CANCELLED, "Measurement or acquisition cancelled");

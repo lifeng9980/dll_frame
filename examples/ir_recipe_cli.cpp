@@ -29,7 +29,7 @@ std::string pathUtf8(const fs::path &path)
 fs::path pathFromUtf8(const std::string &value)
 {
 #ifdef _WIN32
-    return fs::u8path(value);
+    return fs::path(std::u8string(value.begin(), value.end()));
 #else
     return fs::path(value);
 #endif
@@ -66,17 +66,33 @@ std::string resolveStationSource(const fs::path &stationPath, const std::string 
     }
     if (!station.is_object()) return stationText;
     const auto acqIt = station.find("acquisition");
-    if (acqIt == station.end() || !acqIt->is_object()) return stationText;
-    auto &acquisition = *acqIt;
-    const auto backendIt = acquisition.find("backend");
-    const auto sourceIt = acquisition.find("source");
-    if (backendIt != acquisition.end() && backendIt->is_string() && *backendIt == "raw_replay" &&
-        sourceIt != acquisition.end() && sourceIt->is_string()) {
-        const auto rawSource = sourceIt->get<std::string>();
-        if (!rawSource.empty()) {
-            const auto source = pathFromUtf8(rawSource);
-            const auto absolute = fs::absolute(stationPath.parent_path() / source).lexically_normal();
-            acquisition["source"] = pathUtf8(absolute);
+    if (acqIt != station.end() && acqIt->is_object()) {
+        auto &acquisition = *acqIt;
+        const auto backendIt = acquisition.find("backend");
+        const auto sourceIt = acquisition.find("source");
+        if (backendIt != acquisition.end() && backendIt->is_string() && *backendIt == "raw_replay" &&
+            sourceIt != acquisition.end() && sourceIt->is_string()) {
+            const auto rawSource = sourceIt->get<std::string>();
+            if (!rawSource.empty()) {
+                const auto source = pathFromUtf8(rawSource);
+                if (source.is_relative()) {
+                    const auto absolute = fs::absolute(stationPath.parent_path() / source).lexically_normal();
+                    acquisition["source"] = pathUtf8(absolute);
+                }
+            }
+        }
+    }
+    const auto pluginsIt = station.find("plugins");
+    if (pluginsIt != station.end() && pluginsIt->is_array()) {
+        for (auto &item : *pluginsIt) {
+            if (!item.is_string()) continue;
+            const auto rawPlugin = item.get<std::string>();
+            if (rawPlugin.empty()) continue;
+            const auto pluginPath = pathFromUtf8(rawPlugin);
+            if (pluginPath.is_relative()) {
+                const auto absolute = fs::absolute(stationPath.parent_path() / pluginPath).lexically_normal();
+                item = pathUtf8(absolute);
+            }
         }
     }
     return station.dump();

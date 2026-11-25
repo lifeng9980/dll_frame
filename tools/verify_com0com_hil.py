@@ -199,8 +199,10 @@ def find_dotnet10(explicit: Path | None) -> Path | None:
         if cand.is_file():
             try:
                 out = subprocess.check_output([str(cand), "--list-sdks"], text=True, stderr=subprocess.DEVNULL)
-                if any(line.startswith("10.") for line in out.splitlines()):
-                    return cand
+                for line in out.splitlines():
+                    head = line.strip().split(".", 1)[0]
+                    if head.isdigit() and int(head) >= 10:
+                        return cand
             except Exception:
                 continue
     return None
@@ -371,7 +373,10 @@ def main():
             finally:
                 for h in handles:
                     if h.value:
-                        check(sdk.IR_CloseDevice, h)
+                        try:
+                            check(sdk.IR_CloseDevice, h)
+                        except Exception:
+                            pass
             print(f"COM0COM_HIL_PHASE_A=PASS open_all_6_ms={open_ms:.1f}")
 
             # Phase B: CLI Schema v2 PASS + mid-recipe fault rollback
@@ -460,7 +465,11 @@ def main():
                     pass
             if proc.poll() is None:
                 proc.terminate()
-            proc.wait(timeout=5)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
 
 
 if __name__ == "__main__":

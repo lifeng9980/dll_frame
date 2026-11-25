@@ -519,6 +519,15 @@ def serve_tcp(host, port, controller, stop, delimiter=b"\r", fragment=False, log
                         break
 
 
+def close_serial(handle):
+    if handle is None:
+        return
+    if hasattr(handle, "close"):
+        handle.close()
+    else:
+        os.close(handle)
+
+
 def open_serial(port, baud, data_bits=8, parity="none", stop_bits=1):
     if os.name == "nt":
         try:
@@ -537,34 +546,41 @@ def open_serial(port, baud, data_bits=8, parity="none", stop_bits=1):
             timeout=0.05,
             write_timeout=1,
         )
-        handle.reset_input_buffer()
+        try:
+            handle.reset_input_buffer()
+        except Exception:
+            close_serial(handle)
+            raise
         return handle
 
     import termios
     import tty
 
     descriptor = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-    tty.setraw(descriptor)
-    attributes = termios.tcgetattr(descriptor)
-    speed = getattr(termios, f"B{baud}", None)
-    if speed is None:
-        os.close(descriptor)
-        raise RuntimeError(f"This platform does not expose a {baud} baud termios setting")
-    attributes[4] = speed
-    attributes[5] = speed
-    if stop_bits == 2 and hasattr(termios, "CSTOPB"):
-        attributes[2] |= termios.CSTOPB
-    termios.tcsetattr(descriptor, termios.TCSANOW, attributes)
-    return descriptor
+    try:
+        tty.setraw(descriptor)
+        attributes = termios.tcgetattr(descriptor)
+        speed = getattr(termios, f"B{baud}", None)
+        if speed is None:
+            raise RuntimeError(f"This platform does not expose a {baud} baud termios setting")
+        attributes[4] = speed
+        attributes[5] = speed
+        if stop_bits == 2 and hasattr(termios, "CSTOPB"):
+            attributes[2] |= termios.CSTOPB
+        termios.tcsetattr(descriptor, termios.TCSANOW, attributes)
+        return descriptor
+    except Exception:
+        close_serial(descriptor)
+        raise
 
 
 def serve_serial(port, baud, controller, delimiter, stop, fragment=False, log_io=False,
-                 stop_bits=1, consume_fn=None, dispatch_lock=None):
-    handle = open_serial(port, baud, stop_bits=stop_bits)
-    print(f"Serial simulator attached to {port} at {baud} baud", flush=True)
-    pending = b""
-    write_fn = handle.write if os.name == "nt" else (lambda data: os.write(handle, data))
+                 stop_bits=1, consume_fn=None, dispatch_lock=None, preopened_handle=None):
+    handle = preopened_handle if preopened_handle is not None else open_serial(port, baud, stop_bits=stop_bits)
     try:
+        print(f"Serial simulator attached to {port} at {baud} baud", flush=True)
+        pending = b""
+        write_fn = handle.write if os.name == "nt" else (lambda data: os.write(handle, data))
         while not stop.is_set():
             try:
                 if os.name == "nt":
@@ -600,10 +616,7 @@ def serve_serial(port, baud, controller, delimiter, stop, fragment=False, log_io
                     break
                 raise
     finally:
-        if os.name == "nt":
-            handle.close()
-        else:
-            os.close(handle)
+        close_serial(handle)
 
 
 def serve_pty(controller, delimiter, baud, stop, fragment=False, log_io=False, stop_bits=1, consume_fn=None):

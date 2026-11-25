@@ -212,6 +212,10 @@ void testTwoPointCalibNoDiskPassAndNg()
     CHECK(recPass.at("raw_saved") == false);
     CHECK(recPass.at("metrics").contains("lrnu_t1.low_std_dn"));
     CHECK(recPass.at("metrics").contains("blind.nonzero_count"));
+    CHECK(recPass.contains("step_records") && recPass.at("step_records").is_array());
+    CHECK(recPass.at("step_records").size() == 9);
+    CHECK(recPass.at("step_records")[0].at("id") == "cap_t0");
+    CHECK(recPass.at("step_records")[0].at("status") == "OK");
 
     // NG case
     const auto outNg = root.path() / "out_ng";
@@ -811,6 +815,69 @@ void testFft2dPipelineV2()
     CHECK(std::abs(res.at("metrics").at("mag_sum.max").at("value").get<double>() - 50.0) < 1e-9);
 }
 
+void testRunRecipeJsonExStepCallbacks()
+{
+    TempDirGuard root("run_ex_callbacks");
+    const auto fixture = root.path() / "fixture";
+    fs::create_directories(fixture);
+    buildDriftFixture(fixture, 2, 2, 2, 2, 0);
+
+    const std::string stJson = makeStation(fixture, 16).dump();
+    const Json okRecipe{
+        {"schema_version", 2},
+        {"recipe_id", "callbacks-ok"},
+        {"steps", Json::array({
+            {{"id", "cap"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}, {"output", "b"}},
+            {{"id", "tn"}, {"type", "analyze"}, {"method", "temporal_noise"}, {"input", "b"}}
+        })}
+    };
+
+    struct EventLog {
+        std::vector<std::pair<int32_t, std::string>> items;
+        int32_t lastFailedStatus{IR_OK};
+    } log;
+    auto cb = [](const IRRecipeStepEvent *ev, void *ud) {
+        auto *l = static_cast<EventLog *>(ud);
+        if (!ev) return;
+        l->items.emplace_back(ev->event_kind, ev->step_id_utf8 ? ev->step_id_utf8 : "");
+        if (ev->event_kind == IR_STEP_EVENT_FAILED)
+            l->lastFailedStatus = ev->status;
+    };
+    IRRecipeRunOptions opts{sizeof(IRRecipeRunOptions), 0, cb, &log};
+    IRRecipeResult rr{};
+    char err[1024]{};
+
+    const auto outOk = root.path() / "out_ok";
+    CHECK(IR_RunRecipeJsonEx(stJson.c_str(), okRecipe.dump().c_str(),
+                             utf8(outOk).c_str(), &opts, &rr, err, sizeof err) == IR_OK);
+    CHECK(log.items.size() == 4);
+    CHECK(log.items[0] == std::make_pair(int32_t(IR_STEP_EVENT_STARTED), std::string("cap")));
+    CHECK(log.items[1] == std::make_pair(int32_t(IR_STEP_EVENT_COMPLETED), std::string("cap")));
+    CHECK(log.items[2] == std::make_pair(int32_t(IR_STEP_EVENT_STARTED), std::string("tn")));
+    CHECK(log.items[3] == std::make_pair(int32_t(IR_STEP_EVENT_COMPLETED), std::string("tn")));
+
+    // Invalid options rejected cleanly
+    IRRecipeRunOptions badOpts{0, 0, cb, &log};
+    CHECK(IR_RunRecipeJsonEx(stJson.c_str(), okRecipe.dump().c_str(),
+                             utf8(root.path() / "out_bad").c_str(), &badOpts, &rr, err, sizeof err) == IR_BAD_ARGUMENT);
+
+    // Failed step triggers IR_STEP_EVENT_FAILED
+    log.items.clear();
+    const Json failRecipe{
+        {"schema_version", 2},
+        {"recipe_id", "callbacks-fail"},
+        {"steps", Json::array({
+            {{"id", "cap_too_many"}, {"type", "capture"}, {"frames", 99}, {"frame_timeout_ms", 0}, {"output", "b"}}
+        })}
+    };
+    CHECK(IR_RunRecipeJsonEx(stJson.c_str(), failRecipe.dump().c_str(),
+                             utf8(root.path() / "out_fail").c_str(), &opts, &rr, err, sizeof err) == IR_END_OF_STREAM);
+    CHECK(log.items.size() == 2);
+    CHECK(log.items[0] == std::make_pair(int32_t(IR_STEP_EVENT_STARTED), std::string("cap_too_many")));
+    CHECK(log.items[1] == std::make_pair(int32_t(IR_STEP_EVENT_FAILED), std::string("cap_too_many")));
+    CHECK(log.lastFailedStatus == IR_END_OF_STREAM);
+}
+
 } // namespace
 
 int main()
@@ -822,6 +889,7 @@ int main()
     testPreflightRejections();
     testGaussianFilterAndFlickerDetectV2();
     testFft2dPipelineV2();
+    testRunRecipeJsonExStepCallbacks();
     if (gFailures == 0)
         std::cout << "recipe_v2_test: ALL PASSED\n";
     return gFailures == 0 ? 0 : 1;

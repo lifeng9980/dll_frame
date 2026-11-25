@@ -45,6 +45,18 @@ def station_text(path):
         if not source.is_absolute():
             source = path.parent / source
         acquisition["source"] = str(source.resolve())
+    plugins = station.get("plugins")
+    if isinstance(plugins, list):
+        resolved_plugins = []
+        for entry in plugins:
+            if isinstance(entry, str) and entry:
+                p = Path(entry)
+                if not p.is_absolute():
+                    p = path.parent / p
+                resolved_plugins.append(str(p.resolve()))
+            else:
+                resolved_plugins.append(entry)
+        station["plugins"] = resolved_plugins
     return json.dumps(station, ensure_ascii=False, separators=(",", ":"))
 
 

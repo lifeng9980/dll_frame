@@ -294,9 +294,13 @@ foreach ($sym in @(
     "IR_SetDetectorRegister",
     "IR_MeasureDetectorCurrent",
     "IR_ReadCooler",
-    "IR_WaitPowerCurrentStable"
+    "IR_WaitPowerCurrentStable",
+    "IR_CheckRecipeJson",
+    "IR_RunRecipeJson",
+    "IR_RunRecipeJsonEx",
+    "IR_RequestStop"
 )) {
-    Assert-True ($stationExports -match "\b$sym\b") "IR_station.dll must export $sym"
+    Assert-True ($stationExports -match "(?m)^\s*\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+$([regex]::Escape($sym))(?:\s|$)") "IR_station.dll must export $sym"
 }
 $analysisExports = (Invoke-External -FilePath $dumpbinPath -Arguments @("/nologo", "/exports", $AnalysisDll)).StdOut
 foreach ($sym in @(
@@ -323,7 +327,7 @@ foreach ($sym in @(
     "IR_FlickerDetectU16",
     "IR_Fft2dMagnitudeF64"
 )) {
-    Assert-True ($analysisExports -match "\b$sym\b") "IR_analysis.dll must export $sym"
+    Assert-True ($analysisExports -match "(?m)^\s*\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+$([regex]::Escape($sym))(?:\s|$)") "IR_analysis.dll must export $sym"
 }
 
 Write-Step "5. Checking Windows VERSIONINFO FileVersion ($ExpectedFileVersion)"
@@ -403,6 +407,7 @@ foreach ($line in $manifestShaLines) {
 $actualExtractedFiles = @(Get-ChildItem -Path $PkgRoot -Recurse -File | Where-Object { $_.Name -ne "MANIFEST.sha256" }).Count
 Assert-True ($checkedManifestFiles -gt 0 -and $checkedManifestFiles -eq $actualExtractedFiles) `
     "MANIFEST file count mismatch: listed=$checkedManifestFiles extracted=$actualExtractedFiles"
+Assert-True (Test-Path (Join-Path $PkgRoot "include\IR_plugin_abi.h")) "Missing include\IR_plugin_abi.h in extracted package"
 Write-Host "  Extracted and verified $checkedManifestFiles files under: $PkgRoot"
 
 Write-Step "9. Building and running standalone C/C++ client examples from extracted package"
@@ -607,8 +612,21 @@ function Start-SimAndWait([string[]]$SimArgs, [string]$LogOut, [string]$LogErr) 
         }
         Start-Sleep -Milliseconds 50
     }
-    try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
+    try { & taskkill.exe /PID $proc.Id /T /F *> $null } catch {}
     throw "Timed out waiting for TCP simulator to start"
+}
+
+function Stop-SimProcess($Proc) {
+    if (-not $Proc) { return }
+    try {
+        if (-not $Proc.HasExited) {
+            Invoke-External -FilePath "taskkill.exe" -Arguments @("/PID", "$($Proc.Id)", "/T", "/F") -AllowedExitCodes @(0, 128) | Out-Null
+            $Proc.WaitForExit(3000) | Out-Null
+        }
+    } catch {
+    } finally {
+        try { $Proc.Dispose() } catch {}
+    }
 }
 
 $simPort = Get-FreeTcpPort
@@ -632,12 +650,9 @@ try {
         -Arguments @("--run", "--station", $SimStationPath, "--recipe", $BbRecipe, "--output", $TcpPassOut)
     Assert-True ($tcpPassRes.StdOut -match "(?m)^run_status=PASS\r?$") "TCP fault-injection recovery did not PASS (got: $($tcpPassRes.StdOut))"
 } finally {
-    if ($simProc -and -not $simProc.HasExited) {
-        Stop-Process -Id $simProc.Id -Force -ErrorAction SilentlyContinue
-        $simProc.WaitForExit(3000) | Out-Null
-    }
+    Stop-SimProcess $simProc
 }
-$simOutText = [System.IO.File]::ReadAllText($simLogOut, $Utf8NoBom)
+$simOutText = Read-TextShared $simLogOut
 Assert-True ($simOutText -match '\[DROP\]') "Simulator log did not record [DROP] fault injection"
 Assert-True ($simOutText -match '\[RX\]' -and $simOutText -match '\[TX\]') "Simulator log missing [RX]/[TX]"
 Write-Host "  TCP blackbody simulator (--drop-command 114 --drop-count 1 --fragment --log-io) recovered and PASSED."
@@ -667,10 +682,7 @@ try {
     Assert-True ($tcpFailRes.StdOut -match "(?m)^run_status=ERROR\r?$") "Unstable blackbody missing run_status=ERROR (got: $($tcpFailRes.StdOut))"
     Assert-True (-not (Test-Path $TcpFailOut)) "Unstable blackbody failure must not create output directory"
 } finally {
-    if ($simProc2 -and -not $simProc2.HasExited) {
-        Stop-Process -Id $simProc2.Id -Force -ErrorAction SilentlyContinue
-        $simProc2.WaitForExit(3000) | Out-Null
-    }
+    Stop-SimProcess $simProc2
 }
 Write-Host "  TCP blackbody simulator (--unstable) timeout failure verified (exit 7 + run_status=ERROR)."
 
@@ -737,10 +749,7 @@ print(json.dumps({
     Assert-True ($cancelJson.stderr -match "status=8" -and $cancelJson.stderr -match "cleanup_status=0") "CTRL_BREAK_EVENT stderr missing diagnostics: $($cancelJson.stderr)"
     Assert-True (-not (Test-Path $CancelOut)) "Cancelled CLI run must not create output directory"
 } finally {
-    if ($simProc3 -and -not $simProc3.HasExited) {
-        Stop-Process -Id $simProc3.Id -Force -ErrorAction SilentlyContinue
-        $simProc3.WaitForExit(3000) | Out-Null
-    }
+    Stop-SimProcess $simProc3
 }
 Write-Host "  Live CTRL_BREAK_EVENT cancellation verified (exit 8 + run_status=CANCELLED + cleanup_status=0)."
 
@@ -798,6 +807,10 @@ bad_stations = [
      "devices": {"cl": {"kind": "cooler-modbus", "connection": {"host": "127.0.0.1", "port": "COM9"}}}},
     {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
      "devices": {"cl": {"kind": "cooler-modbus", "connection": {"host": "127.0.0.1", "slave_address": 250}}}},
+    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
+     "plugins": [""]},
+    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
+     "plugins": "plugins"},
 ]
 for idx, s in enumerate(bad_stations):
     assert not sv.is_valid(s), f"bad station #{idx} unexpectedly validated"
@@ -824,6 +837,7 @@ good_stations_extra = [
             "dt": {"kind": "detector-serial", "connection": {"host": "127.0.0.1", "tcp_port": 2102}},
             "cl": {"kind": "cooler-modbus", "connection": {"host": "127.0.0.1", "tcp_port": 5020, "slave_address": 1}},
         },
+        "plugins": ["./plugins"],
     },
 ]
 for idx, s in enumerate(good_stations_extra):
@@ -853,6 +867,14 @@ good_recipes_v2_extra = [
         "limits": [
             {"metric": "dmm.value", "operator": "max", "value": 0.8, "unit": "V"},
             {"metric": "cooler.voltage_mv", "operator": "min", "value": 500.0, "unit": "mV"},
+        ],
+    },
+    {
+        "schema_version": 2,
+        "recipe_id": "v2-plugin-schema-check",
+        "steps": [
+            {"id": "c1", "type": "capture", "frames": 2, "frame_timeout_ms": 0, "output": "b0"},
+            {"id": "p1", "type": "analyze", "method": "plugin:test.pixel_span", "input": "b0", "outputs": {"span_map": "smap"}}
         ],
     }
 ]
@@ -923,6 +945,12 @@ bad_recipes_v2 = [
     {"schema_version": 2, "recipe_id": "bad-analyze-method", "steps": [
         {"id": "fft", "type": "analyze", "method": "fft3d", "input": "m0"}
     ]},
+    {"schema_version": 2, "recipe_id": "bad-plugin-method-caps", "steps": [
+        {"id": "p", "type": "analyze", "method": "plugin:Test.Bad", "input": "b0"}
+    ]},
+    {"schema_version": 2, "recipe_id": "bad-plugin-method-empty", "steps": [
+        {"id": "p", "type": "analyze", "method": "plugin:", "input": "b0"}
+    ]},
 ]
 for idx, r in enumerate(bad_recipes_v2):
     assert not rv2.is_valid(r), f"bad recipe v2 #{idx} unexpectedly validated"
@@ -954,7 +982,7 @@ foreach ($cand in $dotnetCandidates) {
     if (Test-Path $cand) {
         try {
             $sdkList = (& $cand --list-sdks 2>$null | Out-String)
-            if ($sdkList -match "(?m)^10\.") {
+            if ($sdkList -match "(?m)^(10|1[1-9])\.") {
                 $dotnetExe = $cand
                 break
             }
@@ -1018,7 +1046,7 @@ if ($RunCom0ComHil) {
     $hilArgs = @(
         "-B",
         (Join-Path $RepoRoot "tools\verify_com0com_hil.py"),
-        "--station-lib", $StationDll,
+        "--station-lib", (Join-Path $PkgRoot "windows-x64\bin\IR_station.dll"),
         "--cli", $PkgCli,
         "--serial-map", $hilMapPath,
         "--csharp-project", (Join-Path $PkgRoot "examples\csharp\IRSdkSample.csproj"),

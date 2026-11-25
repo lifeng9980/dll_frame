@@ -76,9 +76,20 @@
       "additionalProperties": {
         "$ref": "#/$defs/device"
       }
+    },
+    "plugins": {
+      "type": "array",
+      "description": "Optional metric plugin library or directory paths (relative to station JSON or absolute).",
+      "items": {
+        "$ref": "#/$defs/nonEmptyString"
+      }
     }
   },
   "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
     "device": {
       "oneOf": [
         {

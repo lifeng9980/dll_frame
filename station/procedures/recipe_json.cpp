@@ -7,6 +7,7 @@
 #include "station/instruments/device_lease.h"
 #include "station/version.h"
 #include <algorithm>
+#include <chrono>
 #include <exception>
 #include <filesystem>
 #include <optional>
@@ -16,6 +17,47 @@ using namespace ir::api;
 using namespace ir::procedures;
 using namespace ir::procedures::recipe;
 namespace fs = std::filesystem;
+
+void emitV1StepEvent(const IRRecipeRunOptions *options, int32_t kind, const StepRef &ref,
+                     int32_t stage, int32_t status, double durationMs,
+                     const char *stepType, const char *detail = "") noexcept
+{
+    if (!options || !options->on_step_event)
+        return;
+    IRRecipeStepEvent ev{};
+    ev.struct_size = sizeof(IRRecipeStepEvent);
+    ev.event_kind = kind;
+    ev.step_index = ref.index;
+    ev.stage = stage;
+    ev.status = status;
+    ev.reserved = 0;
+    ev.duration_ms = durationMs;
+    ev.step_id_utf8 = ref.id.c_str();
+    ev.step_type_utf8 = stepType ? stepType : "";
+    ev.detail_utf8 = detail ? detail : "";
+    try {
+        options->on_step_event(&ev, options->user_data);
+    } catch (...) {
+    }
+}
+
+double elapsedMsSince(std::chrono::steady_clock::time_point start) noexcept
+{
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+
+const char *v1ControlTypeName(const std::variant<BlackbodyStep, PowerStep> &control) noexcept
+{
+    if (std::holds_alternative<BlackbodyStep>(control))
+        return "blackbody_stabilize";
+    const auto &pw = std::get<PowerStep>(control);
+    switch (pw.operation) {
+    case PowerStep::Operation::set: return "power_set";
+    case PowerStep::Operation::output: return "power_output";
+    case PowerStep::Operation::read: return "power_read";
+    }
+    return "power";
+}
 
 struct Progress {
     IRRecipeResult &result;
@@ -56,7 +98,8 @@ struct CleanupFailure {
 fs::path outputPath(const char *path)
 {
     require(path && *path, IR_BAD_ARGUMENT, "Specify a new output directory");
-    return fs::path(reinterpret_cast<const char8_t *>(path));
+    const std::string text(path);
+    return fs::path(std::u8string(text.begin(), text.end()));
 }
 
 const char *backendName(int backend)
@@ -124,7 +167,8 @@ void executeControl(const ir::acquisition::Capture &, IRHandle handle, const Pow
 }
 
 void acquireBatch(ir::acquisition::Capture &capture, const StationConfig &station, const RecipeConfig &recipe,
-                  FrameBatch &batch, Readbacks &readbacks, Progress &progress)
+                  FrameBatch &batch, Readbacks &readbacks, Progress &progress,
+                  const IRRecipeRunOptions *options)
 {
     bool sourceOpen = false;
     std::map<std::string, IRHandle> devices;
@@ -173,17 +217,48 @@ void acquireBatch(ir::acquisition::Capture &capture, const StationConfig &statio
 
         for (const auto &control : recipe.controls) {
             std::visit([&](const auto &step) {
+                const char *typeName = v1ControlTypeName(control);
                 progress.enter(IR_RECIPE_STAGE_INSTRUMENT, &step.ref);
-                capture.checkStop();
-                executeControl(capture, devices.at(step.device), step, readbacks, powerToSwitchOff);
-                capture.checkStop();
+                emitV1StepEvent(options, IR_STEP_EVENT_STARTED, step.ref,
+                                IR_RECIPE_STAGE_INSTRUMENT, IR_OK, 0.0, typeName);
+                const auto t0 = std::chrono::steady_clock::now();
+                try {
+                    capture.checkStop();
+                    executeControl(capture, devices.at(step.device), step, readbacks, powerToSwitchOff);
+                    capture.checkStop();
+                    emitV1StepEvent(options, IR_STEP_EVENT_COMPLETED, step.ref,
+                                    IR_RECIPE_STAGE_INSTRUMENT, IR_OK, elapsedMsSince(t0), typeName);
+                } catch (const Error &e) {
+                    emitV1StepEvent(options, IR_STEP_EVENT_FAILED, step.ref,
+                                    IR_RECIPE_STAGE_INSTRUMENT, e.code, elapsedMsSince(t0), typeName, e.what());
+                    throw;
+                } catch (const std::exception &e) {
+                    emitV1StepEvent(options, IR_STEP_EVENT_FAILED, step.ref,
+                                    IR_RECIPE_STAGE_INSTRUMENT, IR_COMPUTATION_FAILED, elapsedMsSince(t0), typeName, e.what());
+                    throw;
+                }
             }, control);
         }
 
         progress.enter(IR_RECIPE_STAGE_CAPTURE, &recipe.capture.ref);
-        capture.start();
-        capture.read(recipe.capture.frames, recipe.capture.timeoutMs, batch.pixels.data(), elements,
-                     batch.stamps.data(), recipe.capture.frames, progress.result.completed_frames);
+        emitV1StepEvent(options, IR_STEP_EVENT_STARTED, recipe.capture.ref,
+                        IR_RECIPE_STAGE_CAPTURE, IR_OK, 0.0, "capture");
+        const auto capStart = std::chrono::steady_clock::now();
+        try {
+            capture.start();
+            capture.read(recipe.capture.frames, recipe.capture.timeoutMs, batch.pixels.data(), elements,
+                         batch.stamps.data(), recipe.capture.frames, progress.result.completed_frames);
+            emitV1StepEvent(options, IR_STEP_EVENT_COMPLETED, recipe.capture.ref,
+                            IR_RECIPE_STAGE_CAPTURE, IR_OK, elapsedMsSince(capStart), "capture");
+        } catch (const Error &e) {
+            emitV1StepEvent(options, IR_STEP_EVENT_FAILED, recipe.capture.ref,
+                            IR_RECIPE_STAGE_CAPTURE, e.code, elapsedMsSince(capStart), "capture", e.what());
+            throw;
+        } catch (const std::exception &e) {
+            emitV1StepEvent(options, IR_STEP_EVENT_FAILED, recipe.capture.ref,
+                            IR_RECIPE_STAGE_CAPTURE, IR_COMPUTATION_FAILED, elapsedMsSince(capStart), "capture", e.what());
+            throw;
+        }
     } catch (...) {
         failure = std::current_exception();
     }
@@ -219,20 +294,36 @@ void acquireBatch(ir::acquisition::Capture &capture, const StationConfig &statio
 }
 
 Json analyzeBatch(const FrameBatch &batch, const RecipeConfig &recipe,
-                  const ir::acquisition::Capture &capture, Progress &progress)
+                  const ir::acquisition::Capture &capture, Progress &progress,
+                  const IRRecipeRunOptions *options)
 {
     Json metrics = Json::object();
     for (const auto &step : recipe.analysis) {
         progress.enter(IR_RECIPE_STAGE_ANALYZE, &step.ref);
-        capture.checkStop();
-        const auto values = step.operations.calculate(batch);
-        capture.checkStop();
-        require(values.size() == step.outputs.size(), IR_COMPUTATION_FAILED,
-                "Metric returned a different number of values than declared");
-        for (size_t index = 0; index < values.size(); ++index) {
-            const auto &output = step.outputs[index];
-            metrics[step.name + output.suffix] = {{"value", values[index]}, {"unit", output.unit},
-                                                 {"method", output.method}, {"version", output.version}};
+        emitV1StepEvent(options, IR_STEP_EVENT_STARTED, step.ref,
+                        IR_RECIPE_STAGE_ANALYZE, IR_OK, 0.0, "analyze");
+        const auto t0 = std::chrono::steady_clock::now();
+        try {
+            capture.checkStop();
+            const auto values = step.operations.calculate(batch);
+            capture.checkStop();
+            require(values.size() == step.outputs.size(), IR_COMPUTATION_FAILED,
+                    "Metric returned a different number of values than declared");
+            for (size_t index = 0; index < values.size(); ++index) {
+                const auto &output = step.outputs[index];
+                metrics[step.name + output.suffix] = {{"value", values[index]}, {"unit", output.unit},
+                                                     {"method", output.method}, {"version", output.version}};
+            }
+            emitV1StepEvent(options, IR_STEP_EVENT_COMPLETED, step.ref,
+                            IR_RECIPE_STAGE_ANALYZE, IR_OK, elapsedMsSince(t0), "analyze");
+        } catch (const Error &e) {
+            emitV1StepEvent(options, IR_STEP_EVENT_FAILED, step.ref,
+                            IR_RECIPE_STAGE_ANALYZE, e.code, elapsedMsSince(t0), "analyze", e.what());
+            throw;
+        } catch (const std::exception &e) {
+            emitV1StepEvent(options, IR_STEP_EVENT_FAILED, step.ref,
+                            IR_RECIPE_STAGE_ANALYZE, IR_COMPUTATION_FAILED, elapsedMsSince(t0), "analyze", e.what());
+            throw;
         }
     }
     return metrics;
@@ -273,7 +364,7 @@ void archive(const StationConfig &station, const RecipeConfig &recipe, const Fra
 }
 
 void runRecipe(ir::acquisition::Capture &capture, const StationConfig &station, const RecipeConfig &recipe,
-               const char *directory, Progress &progress)
+               const char *directory, Progress &progress, const IRRecipeRunOptions *options)
 {
     const auto destination = outputPath(directory);
     checkDestination(destination);
@@ -282,10 +373,25 @@ void runRecipe(ir::acquisition::Capture &capture, const StationConfig &station, 
     FrameBatch batch;
     Readbacks readbacks;
     try {
-        acquireBatch(capture, station, recipe, batch, readbacks, progress);
-        auto metrics = analyzeBatch(batch, recipe, capture, progress);
+        acquireBatch(capture, station, recipe, batch, readbacks, progress, options);
+        auto metrics = analyzeBatch(batch, recipe, capture, progress, options);
         progress.enter(IR_RECIPE_STAGE_ARCHIVE, &recipe.archive);
-        archive(station, recipe, batch, readbacks, std::move(metrics), destination, capture, progress.result, startedUtc);
+        emitV1StepEvent(options, IR_STEP_EVENT_STARTED, recipe.archive,
+                        IR_RECIPE_STAGE_ARCHIVE, IR_OK, 0.0, "save_raw");
+        const auto archStart = std::chrono::steady_clock::now();
+        try {
+            archive(station, recipe, batch, readbacks, std::move(metrics), destination, capture, progress.result, startedUtc);
+            emitV1StepEvent(options, IR_STEP_EVENT_COMPLETED, recipe.archive,
+                            IR_RECIPE_STAGE_ARCHIVE, IR_OK, elapsedMsSince(archStart), "save_raw");
+        } catch (const Error &e) {
+            emitV1StepEvent(options, IR_STEP_EVENT_FAILED, recipe.archive,
+                            IR_RECIPE_STAGE_ARCHIVE, e.code, elapsedMsSince(archStart), "save_raw", e.what());
+            throw;
+        } catch (const std::exception &e) {
+            emitV1StepEvent(options, IR_STEP_EVENT_FAILED, recipe.archive,
+                            IR_RECIPE_STAGE_ARCHIVE, IR_COMPUTATION_FAILED, elapsedMsSince(archStart), "save_raw", e.what());
+            throw;
+        }
     } catch (const Error &error) {
         if (progress.step)
             throw Error(error.code, "Step '" + progress.step->id + "' failed: " + error.what());
@@ -308,12 +414,20 @@ extern "C" int32_t IR_CheckRecipeJson(const char *stationJson, const char *recip
     });
 }
 
-extern "C" int32_t IR_RunRecipeJson(const char *stationJson, const char *recipeJson,
-    const char *directory, IRRecipeResult *result, char *err, int32_t errBytes)
+extern "C" int32_t IR_RunRecipeJsonEx(const char *stationJson, const char *recipeJson,
+    const char *directory, const IRRecipeRunOptions *options,
+    IRRecipeResult *result, char *err, int32_t errBytes)
 {
-    IRRecipeResult report{0, IR_RECIPE_STAGE_RESERVE, -1, IR_OK};
+    IRRecipeResult report{0, IR_RECIPE_STAGE_VALIDATE, -1, IR_OK};
     Progress progress{report};
     const auto status = guarded(err, errBytes, [&] {
+        if (options != nullptr) {
+            require(options->struct_size == sizeof(IRRecipeRunOptions), IR_BAD_ARGUMENT,
+                    "Invalid IRRecipeRunOptions struct_size");
+            require(options->flags == 0, IR_BAD_ARGUMENT,
+                    "IRRecipeRunOptions.flags must be 0");
+        }
+        progress.enter(IR_RECIPE_STAGE_RESERVE);
         Measurement measurement;
         progress.enter(IR_RECIPE_STAGE_VALIDATE);
         const auto station = parseStation(stationJson);
@@ -323,13 +437,19 @@ extern "C" int32_t IR_RunRecipeJson(const char *stationJson, const char *recipeJ
         if (schemaVer == 2) {
             const auto recipe = parseRecipeV2(recipeJson, station);
             measurement.frames().checkStop();
-            runRecipeV2(measurement.frames(), station, recipe, directory, report);
+            runRecipeV2(measurement.frames(), station, recipe, directory, report, options);
         } else {
             const auto recipe = parseRecipe(recipeJson, station);
             measurement.frames().checkStop();
-            runRecipe(measurement.frames(), station, recipe, directory, progress);
+            runRecipe(measurement.frames(), station, recipe, directory, progress, options);
         }
     });
     if (result) *result = report;
     return status;
+}
+
+extern "C" int32_t IR_RunRecipeJson(const char *stationJson, const char *recipeJson,
+    const char *directory, IRRecipeResult *result, char *err, int32_t errBytes)
+{
+    return IR_RunRecipeJsonEx(stationJson, recipeJson, directory, nullptr, result, err, errBytes);
 }

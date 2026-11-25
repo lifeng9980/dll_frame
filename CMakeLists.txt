@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(IRSDK VERSION 1.7.0 LANGUAGES C CXX)
+project(IRSDK VERSION 1.8.0 LANGUAGES C CXX)
 include(CTest)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -99,13 +99,17 @@ if(WIN32)
         "${IR_STATION_RC}")
     target_link_libraries(IR_station PRIVATE strmiids ole32 oleaut32)
 endif()
-# 流程编排：协调仪器、采集和独立的 IR_analysis 指标库。
+# 流程编排与算子插件：协调仪器、采集和独立的 IR_analysis 指标库。
 target_sources(IR_station PRIVATE
+    station/plugins/plugin_manager.cpp
     station/procedures/measurement.cpp
     station/procedures/noise_run.cpp
     station/procedures/recipe_config.cpp
     station/procedures/recipe_json.cpp
     station/procedures/recipe_metrics.cpp
+    station/procedures/metrics_v2_basic.cpp
+    station/procedures/metrics_v2_standard.cpp
+    station/procedures/metrics_v2_spectral.cpp
     station/procedures/recipe_metrics_v2.cpp
     station/procedures/recipe_v2.cpp
     station/procedures/save_raw.cpp)
@@ -117,6 +121,9 @@ target_include_directories(IR_station PRIVATE "${IR_GENERATED_DIR}")
 target_include_directories(IR_station SYSTEM PRIVATE "${IR_ASIO_INCLUDE_DIR}")
 target_include_directories(IR_station SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party/nlohmann_json/include")
 target_link_libraries(IR_station PRIVATE IR_analysis Threads::Threads)
+if(NOT WIN32)
+    target_link_libraries(IR_station PRIVATE ${CMAKE_DL_LIBS})
+endif()
 if(WIN32)
     target_compile_definitions(IR_station PRIVATE _WIN32_WINNT=0x0A00)
     target_link_libraries(IR_station PRIVATE ws2_32 mswsock advapi32)
@@ -139,6 +146,21 @@ target_include_directories(ir_capture_accept SYSTEM PRIVATE
     "${PROJECT_SOURCE_DIR}/third_party/nlohmann_json/include")
 target_link_libraries(ir_capture_accept PRIVATE IR_station IR_analysis Threads::Threads)
 set_target_properties(ir_capture_accept PROPERTIES INSTALL_RPATH "$ORIGIN/../lib")
+
+function(ir_add_metric_plugin target_name)
+    add_library(${target_name} MODULE ${ARGN})
+    if(MSVC)
+        target_compile_options(${target_name} PRIVATE /utf-8)
+    endif()
+    target_include_directories(${target_name} PRIVATE "${PROJECT_SOURCE_DIR}/include")
+    target_compile_features(${target_name} PRIVATE cxx_std_20)
+    set_target_properties(${target_name} PROPERTIES
+        C_VISIBILITY_PRESET hidden
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN YES
+        LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin/plugins"
+        RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin/plugins")
+endfunction()
 
 if(BUILD_TESTING)
     add_executable(c_client sdk_tests/c_client.c)
@@ -197,7 +219,7 @@ if(BUILD_TESTING)
     add_executable(recipe_v2_test sdk_tests/recipe_v2_test.cpp)
     target_include_directories(recipe_v2_test SYSTEM PRIVATE
         "${PROJECT_SOURCE_DIR}/third_party/nlohmann_json/include")
-    target_link_libraries(recipe_v2_test PRIVATE IR_station IR_analysis)
+    target_link_libraries(recipe_v2_test PRIVATE IR_station IR_analysis Threads::Threads)
     add_test(NAME recipe_v2 COMMAND recipe_v2_test)
     add_executable(flicker_test sdk_tests/flicker_test.cpp)
     target_link_libraries(flicker_test PRIVATE IR_analysis)
@@ -207,6 +229,23 @@ if(BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/third_party/nlohmann_json/include")
     target_link_libraries(discovery_test PRIVATE IR_station)
     add_test(NAME discovery COMMAND discovery_test)
+    add_executable(plugin_abi_c_check sdk_tests/plugin_abi_c_check.c)
+    if(MSVC)
+        target_compile_options(plugin_abi_c_check PRIVATE /utf-8)
+    endif()
+    target_include_directories(plugin_abi_c_check PRIVATE "${PROJECT_SOURCE_DIR}/include")
+    add_test(NAME plugin_abi_c_check COMMAND plugin_abi_c_check)
+    ir_add_metric_plugin(ir_test_plugin_good sdk_tests/plugins/test_plugin_good.cpp)
+    ir_add_metric_plugin(ir_test_plugin_bad_abi sdk_tests/plugins/test_plugin_bad_abi.cpp)
+    add_executable(plugin_abi_test sdk_tests/plugin_abi_test.cpp)
+    if(MSVC)
+        target_compile_options(plugin_abi_test PRIVATE /utf-8)
+    endif()
+    target_include_directories(plugin_abi_test SYSTEM PRIVATE
+        "${PROJECT_SOURCE_DIR}/third_party/nlohmann_json/include")
+    target_link_libraries(plugin_abi_test PRIVATE IR_station Threads::Threads)
+    add_dependencies(plugin_abi_test ir_test_plugin_good ir_test_plugin_bad_abi)
+    add_test(NAME plugin_abi COMMAND plugin_abi_test "$<TARGET_FILE_DIR:ir_test_plugin_good>")
     add_test(NAME ir_run_recipe_offline_check COMMAND ir_run_recipe --check
         --station "${PROJECT_SOURCE_DIR}/examples/stations/offline.json"
         --recipe "${PROJECT_SOURCE_DIR}/examples/recipes/noise_roi.json"
