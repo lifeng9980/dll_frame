@@ -24,22 +24,22 @@ std::unique_ptr<ir::plugins::PluginMetricProvider> loadPluginProviderIfNeeded(
     return provider;
 }
 
-ExternalMetricResolver makeExternalResolver(const ir::plugins::PluginMetricProvider *provider,
-                                            ExternalMetricResolver &storage)
+ExternalMetricResolver makeExternalResolver(const ir::plugins::PluginMetricProvider *provider)
 {
+    ExternalMetricResolver resolver;
     if (!provider)
-        return {};
-    storage.handlesMethod = [provider](std::string_view method) {
+        return resolver;
+    resolver.handlesMethod = [provider](std::string_view method) {
         return provider->handlesMethod(method);
     };
-    storage.prepareMetric = [provider](StepRef ref, const std::string &stepName,
-                                       const std::string &method, int32_t reqVersion,
-                                       const Json &fields, const std::string &path,
-                                       std::map<std::string, SlotKind> &knownSlots) {
+    resolver.prepareMetric = [provider](StepRef ref, const std::string &stepName,
+                                        const std::string &method, int32_t reqVersion,
+                                        const Json &fields, const std::string &path,
+                                        std::map<std::string, SlotKind> &knownSlots) {
         return provider->prepareMetric(std::move(ref), stepName, method, reqVersion,
                                        fields, path, knownSlots);
     };
-    return storage;
+    return resolver;
 }
 } // namespace
 
@@ -49,11 +49,8 @@ extern "C" int32_t IR_CheckRecipeJson(const char *stationJson, const char *recip
     return guarded(err, errBytes, [&] {
         const auto station = parseStation(stationJson);
         const auto provider = loadPluginProviderIfNeeded(station);
-        ExternalMetricResolver resolver;
-        const auto *resolverPtr = provider
-            ? (resolver = makeExternalResolver(provider.get(), resolver), &resolver)
-            : nullptr;
-        (void)parseRecipe(recipeJson, station, resolverPtr);
+        const auto resolver = makeExternalResolver(provider.get());
+        (void)parseRecipe(recipeJson, station, provider ? &resolver : nullptr);
     });
 }
 
@@ -76,11 +73,8 @@ extern "C" int32_t IR_RunRecipeJson(const char *stationJson, const char *recipeJ
         const auto station = parseStation(stationJson);
         measurement.frames().checkStop();
         const auto provider = loadPluginProviderIfNeeded(station);
-        ExternalMetricResolver resolver;
-        const auto *resolverPtr = provider
-            ? (resolver = makeExternalResolver(provider.get(), resolver), &resolver)
-            : nullptr;
-        const auto recipe = parseRecipe(recipeJson, station, resolverPtr);
+        const auto resolver = makeExternalResolver(provider.get());
+        const auto recipe = parseRecipe(recipeJson, station, provider ? &resolver : nullptr);
         measurement.frames().checkStop();
         runRecipe(measurement.frames(), station, recipe, directory, report, options);
     });

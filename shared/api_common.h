@@ -20,7 +20,7 @@ struct Error : std::runtime_error
 inline void require(bool ok, int32_t code, const char *text)
 {
     if (!ok)
-        throw Error(code, text);
+        throw Error(code, text ? text : "");
 }
 inline void require(bool ok, int32_t code, const std::string &text)
 {
@@ -30,14 +30,15 @@ inline void require(bool ok, int32_t code, const std::string &text)
 inline void checkStatus(int32_t status, const char *detail)
 {
     if (status != IR_OK)
-        throw Error(status, detail);
+        throw Error(status, detail ? detail : "");
 }
 inline void copyText(char *out, int32_t count, const char *text) noexcept
 {
     if (!out || count <= 0)
         return;
-    const auto n = std::min(size_t(count - 1), std::strlen(text));
-    std::memcpy(out, text, n);
+    const char *src = text ? text : "";
+    const auto n = std::min(size_t(count - 1), std::strlen(src));
+    std::memcpy(out, src, n);
     out[n] = 0;
 }
 template <class Function> int32_t guarded(char *err, int32_t bytes, Function function) noexcept

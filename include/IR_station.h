@@ -19,12 +19,12 @@ extern "C" {
 /* 版本字符串为 UTF-8，由库持有，库卸载前有效。 */
 IR_STATION_API const char *IR_StationVersion(void);
 
-enum IRBackend {
+typedef enum IRBackend {
     IR_DIRECTSHOW = 1, /* Windows DirectShow device name, e.g. FX3. */
     IR_RAW_REPLAY = 2,
     IR_V4L2 = 3, /* Linux /dev/videoN, for the FX3 YUYV 16-bit raw stream. */
     IR_NI_IMAQ = 4 /* Reserved for future NI-IMAQ support; currently returns IR_UNSUPPORTED. */
-};
+} IRBackend;
 
 typedef struct IRCaptureStats {
     uint64_t frames_received;     /* 后端累计交付到 SDK 队列/采集层的帧数 */

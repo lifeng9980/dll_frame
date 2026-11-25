@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-enum IRDeviceKind {
+typedef enum IRDeviceKind {
     IR_PCN7LT = 2,
     IR_DCN1000 = 3,
     IR_IT6332A = 4,
@@ -13,7 +13,7 @@ enum IRDeviceKind {
     IR_DMM6500 = 6,
     IR_DETECTOR_SERIAL = 7,
     IR_COOLER_MODBUS = 8
-};
+} IRDeviceKind;
 
 typedef struct IRBlackbodyReading {
     double actual_c;    /* 实际温度，°C */
@@ -111,13 +111,13 @@ IR_STATION_API int32_t IR_ListCaptureDevices(int32_t backend, char *json_out, in
 
 /* ======================== 温箱 (GWS STEN) ======================== */
 
-enum IROvenMode {
+typedef enum IROvenMode {
     IR_OVEN_MODE_UNKNOWN = 0,
     IR_OVEN_MODE_STANDBY = 1,
     IR_OVEN_MODE_CONSTANT = 2,
     IR_OVEN_MODE_PROGRAM = 3,
     IR_OVEN_MODE_OTHER = 4
-};
+} IROvenMode;
 
 typedef struct IROvenReading {
     double actual_c;      /* 当前箱体温度，°C */
@@ -141,13 +141,13 @@ IR_STATION_API int32_t IR_WaitOvenStable(IRHandle handle, double target_c, doubl
 
 /* ======================== 万用表 (Keithley DMM6500 SCPI) ======================== */
 
-enum IRDmmMode {
+typedef enum IRDmmMode {
     IR_DMM_MODE_ANY = 0,
     IR_DMM_MODE_DCV = 1,
     IR_DMM_MODE_DCI = 2,
     IR_DMM_MODE_RES = 3,
     IR_DMM_MODE_DIODE = 4
-};
+} IRDmmMode;
 
 typedef struct IRDmmReading {
     double value;         /* 测量数值（V / A / Ohm，二极管模式为正向压降 V） */

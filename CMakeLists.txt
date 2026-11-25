@@ -129,7 +129,7 @@ foreach(target IR_station IR_analysis)
     target_include_directories(${target} PUBLIC "${PROJECT_SOURCE_DIR}/include"
         PRIVATE "${PROJECT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/shared")
     set_target_properties(${target} PROPERTIES INSTALL_RPATH "$ORIGIN"
-        CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES)
+        C_VISIBILITY_PRESET hidden CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES)
 endforeach()
 
 add_executable(ir_run_recipe examples/ir_recipe_cli.cpp)

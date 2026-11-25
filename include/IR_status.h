@@ -4,7 +4,7 @@
 /* IR SDK 公共返回码。err 可传 NULL 且 err_bytes=0 以省略错误文本。
  * 有缓冲区时 err_bytes 为字节数，错误文本为以 NUL 结束的 UTF-8。
  */
-enum IRStatus
+typedef enum IRStatus
 {
     IR_OK = 0,
     IR_NULL_POINTER = 1,
@@ -19,4 +19,4 @@ enum IRStatus
     IR_UNSUPPORTED = 10,
     IR_END_OF_STREAM = 11,
     IR_FRAME_GAP = 12
-};
+} IRStatus;

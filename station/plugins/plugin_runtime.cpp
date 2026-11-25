@@ -90,18 +90,32 @@ std::string formatWin32Error(DWORD code)
 }
 #endif
 
-std::shared_ptr<LibraryHandle> getOrLoadNativeLibrary(
+struct NativeLibraryCache {
+    std::mutex mutex;
+    std::unordered_map<std::string, std::shared_ptr<LibraryHandle>> handles;
+};
+
+NativeLibraryCache &nativeLibraryCache()
+{
+    // 进程级常驻缓存：避免进程退出时在 Loader Lock 内触发 FreeLibrary 死锁。
+    static auto *cache = new NativeLibraryCache();
+    return *cache;
+}
+
+std::shared_ptr<LibraryHandle> findCachedNativeLibrary(const std::string &targetUtf8)
+{
+    auto &cache = nativeLibraryCache();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    if (const auto it = cache.handles.find(targetUtf8); it != cache.handles.end())
+        return it->second;
+    return nullptr;
+}
+
+std::shared_ptr<LibraryHandle> openNativeLibrary(
     const std::filesystem::path &targetPath,
     const std::string &targetUtf8,
     std::string *errOut)
 {
-    static std::mutex cacheMutex;
-    static std::unordered_map<std::string, std::shared_ptr<LibraryHandle>> handleCache;
-
-    std::lock_guard<std::mutex> lock(cacheMutex);
-    if (const auto it = handleCache.find(targetUtf8); it != handleCache.end())
-        return it->second;
-
     auto handle = std::make_shared<LibraryHandle>();
     handle->utf8Path = targetUtf8;
 #if defined(_WIN32)
@@ -122,8 +136,17 @@ std::shared_ptr<LibraryHandle> getOrLoadNativeLibrary(
         return nullptr;
     }
 #endif
-    handleCache.emplace(targetUtf8, handle);
     return handle;
+}
+
+void cacheNativeLibrary(const std::string &targetUtf8,
+                        std::shared_ptr<LibraryHandle> &handle)
+{
+    auto &cache = nativeLibraryCache();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    const auto [it, inserted] = cache.handles.emplace(targetUtf8, handle);
+    if (!inserted)
+        handle = it->second;
 }
 
 bool isPluginFileExtension(const std::filesystem::path &p)
@@ -796,9 +819,13 @@ int32_t PluginMetricProvider::loadLibrary(const std::filesystem::path &libraryPa
         return IR_IO_ERROR;
     }
 
-    auto lib = getOrLoadNativeLibrary(targetPath, targetUtf8, errOut);
-    if (!lib)
-        return IR_IO_ERROR;
+    auto lib = findCachedNativeLibrary(targetUtf8);
+    const bool fromCache = (lib != nullptr);
+    if (!lib) {
+        lib = openNativeLibrary(targetPath, targetUtf8, errOut);
+        if (!lib)
+            return IR_IO_ERROR;
+    }
 
     IRPluginQueryFn queryFn = nullptr;
 #if defined(_WIN32)
@@ -863,8 +890,12 @@ int32_t PluginMetricProvider::loadLibrary(const std::filesystem::path &libraryPa
             return IR_BAD_ARGUMENT;
         }
     }
-    for (auto &entry : candidateEntries)
+    if (!fromCache)
+        cacheNativeLibrary(targetUtf8, lib);
+    for (auto &entry : candidateEntries) {
+        entry.library = lib;
         metrics_.emplace(entry.methodName, std::move(entry));
+    }
     return IR_OK;
 }
 

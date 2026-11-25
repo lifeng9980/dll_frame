@@ -11,7 +11,7 @@ extern "C" {
 IR_STATION_API int32_t IR_CheckRecipeJson(const char *station_json_utf8,
     const char *recipe_json_utf8, char *err, int32_t err_bytes);
 
-enum IRRecipeStage {
+typedef enum IRRecipeStage {
     IR_RECIPE_STAGE_NONE = 0,
     IR_RECIPE_STAGE_VALIDATE = 1,
     IR_RECIPE_STAGE_RESERVE = 2,
@@ -21,7 +21,7 @@ enum IRRecipeStage {
     IR_RECIPE_STAGE_ANALYZE = 6,
     IR_RECIPE_STAGE_ARCHIVE = 7,
     IR_RECIPE_STAGE_CLEANUP = 8
-};
+} IRRecipeStage;
 
 typedef struct IRRecipeResult {
     int32_t completed_frames;   /* 失败时也报告已连续交付的帧数。 */
@@ -30,11 +30,11 @@ typedef struct IRRecipeResult {
     int32_t cleanup_status;    /* 第一个收尾错误的 IRStatus；收尾成功或无需收尾时为 IR_OK。 */
 } IRRecipeResult;
 
-enum IRRecipeStepEventKind {
+typedef enum IRRecipeStepEventKind {
     IR_STEP_EVENT_STARTED = 1,
     IR_STEP_EVENT_COMPLETED = 2,
     IR_STEP_EVENT_FAILED = 3
-};
+} IRRecipeStepEventKind;
 
 typedef struct IRRecipeStepEvent {
     uint32_t struct_size;
