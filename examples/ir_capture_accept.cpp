@@ -40,7 +40,7 @@ std::string pathUtf8(const fs::path &path)
 fs::path pathFromUtf8(const std::string &value)
 {
 #ifdef _WIN32
-    return fs::u8path(value);
+    return fs::path(std::u8string(value.begin(), value.end()));
 #else
     return fs::path(value);
 #endif
@@ -459,7 +459,8 @@ int runAcceptMode(const Arguments &args)
     std::cout << "status=0\n"
               << "width=" << geom.width << " height=" << geom.height << " valid_bits=" << geom.valid_bits << '\n'
               << "cycles_completed=" << cyclesCompleted << " total_frames=" << totalFrames
-              << " elapsed_s=" << std::setprecision(6) << elapsedSec << '\n'
+              << " elapsed_s=" << std::setprecision(6) << elapsedSec
+              << " estimated_fps=" << std::setprecision(3) << stats.estimated_fps << '\n'
               << "frames_received=" << stats.frames_received
               << " frames_delivered=" << stats.frames_delivered
               << " frames_dropped=" << stats.frames_dropped
@@ -469,7 +470,7 @@ int runAcceptMode(const Arguments &args)
     if (hasMetrics) {
         std::cout << std::setprecision(15)
                   << "mean_dn=" << meanDn << '\n'
-                  << "std_dn=" << stdDn << '\n';
+                  << "pop_std_dn=" << stdDn << '\n';
     }
 
     if (!args.reportPath.empty()) {

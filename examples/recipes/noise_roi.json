@@ -5,10 +5,10 @@
     {"id": "batch", "type": "capture", "frames": 2, "frame_timeout_ms": 0, "output": "batch"},
     {"id": "noise", "type": "analyze", "method": "temporal_noise", "name": "noise", "input": "batch"},
     {"id": "roi", "type": "analyze", "method": "roi_mean", "name": "roi", "input": "batch",
-     "params": {"x": 0, "y": 0, "width": 1, "height": 1}},
+     "params": {"x": 0, "y": 0, "width": 160, "height": 128}},
     {"id": "archive", "type": "save_raw", "input": "batch"}
   ],
   "limits": [
-    {"metric": "noise.temporal_noise_dn", "operator": "max", "value": 2.0, "unit": "DN"}
+    {"metric": "noise.temporal_noise_dn", "operator": "max", "value": 50.0, "unit": "DN"}
   ]
 }

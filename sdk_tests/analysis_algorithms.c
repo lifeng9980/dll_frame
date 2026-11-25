@@ -330,6 +330,24 @@ int main(void)
     }
     const int fft2d_ok = 1;
 
+    const uint16_t roi_frames[] = {20, 40, 60, 80, 22, 42, 62, 82};
+    double roi_mean = 0.0;
+    status = IR_ROIMeanU16(roi_frames, 8, 2, 2, 2, 0, 0, 1, 2, &roi_mean, err, (int32_t)sizeof err);
+    if (status != IR_OK || fabs(roi_mean - 41.0) > 1e-12) {
+        fprintf(stderr, "IR_ROIMeanU16 left ROI failed: status=%d mean=%.17g err=%s\n", status, roi_mean, err);
+        return 1;
+    }
+    status = IR_ROIMeanU16(roi_frames, 8, 2, 2, 2, 0, 0, 2, 2, &roi_mean, err, (int32_t)sizeof err);
+    if (status != IR_OK || fabs(roi_mean - 51.0) > 1e-12) {
+        fprintf(stderr, "IR_ROIMeanU16 full image failed: status=%d mean=%.17g err=%s\n", status, roi_mean, err);
+        return 1;
+    }
+    status = IR_ROIMeanU16(roi_frames, 8, 2, 2, 2, 1, 0, 2, 1, &roi_mean, err, (int32_t)sizeof err);
+    if (status != IR_BAD_ARGUMENT) {
+        fprintf(stderr, "IR_ROIMeanU16 outside ROI should be rejected, got status=%d\n", status);
+        return 1;
+    }
+
     printf("analysis_version=%s\n", version);
     printf("gb_grade=%c\n", grade_char(gb.bad_pixels.chip_grade));
     printf("gjb_bad_count=%d\n", gjb.bad_pixels.total_bad_count);

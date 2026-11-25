@@ -1,13 +1,19 @@
 #pragma once
 
+#include "IR_device.h"
 #include "IR_recipe.h"
+#include "IR_station.h"
 #include "api_common.h"
 #include "recipe_config.h"
+#include "station/acquisition/frame_source.h"
 
 #include <chrono>
 #include <exception>
+#include <filesystem>
 #include <stdexcept>
+#include <string>
 #include <system_error>
+#include <vector>
 
 namespace ir::procedures::recipe {
 
@@ -90,6 +96,42 @@ inline const char *backendName(int backend) noexcept
     }
 }
 
+inline const char *statusName(int32_t status) noexcept
+{
+    switch (status) {
+    case IR_OK: return "IR_OK";
+    case IR_NULL_POINTER: return "IR_NULL_POINTER";
+    case IR_BAD_ARGUMENT: return "IR_BAD_ARGUMENT";
+    case IR_BUFFER_TOO_SMALL: return "IR_BUFFER_TOO_SMALL";
+    case IR_COMPUTATION_FAILED: return "IR_COMPUTATION_FAILED";
+    case IR_INVALID_HANDLE: return "IR_INVALID_HANDLE";
+    case IR_IO_ERROR: return "IR_IO_ERROR";
+    case IR_TIMEOUT: return "IR_TIMEOUT";
+    case IR_CANCELLED: return "IR_CANCELLED";
+    case IR_BUSY: return "IR_BUSY";
+    case IR_UNSUPPORTED: return "IR_UNSUPPORTED";
+    case IR_END_OF_STREAM: return "IR_END_OF_STREAM";
+    case IR_FRAME_GAP: return "IR_FRAME_GAP";
+    default: return "IR_UNKNOWN";
+    }
+}
+
+inline const char *stageName(int32_t stage) noexcept
+{
+    switch (stage) {
+    case IR_RECIPE_STAGE_NONE: return "none";
+    case IR_RECIPE_STAGE_VALIDATE: return "validate";
+    case IR_RECIPE_STAGE_RESERVE: return "reserve";
+    case IR_RECIPE_STAGE_PREPARE: return "prepare";
+    case IR_RECIPE_STAGE_INSTRUMENT: return "instrument";
+    case IR_RECIPE_STAGE_CAPTURE: return "capture";
+    case IR_RECIPE_STAGE_ANALYZE: return "analyze";
+    case IR_RECIPE_STAGE_ARCHIVE: return "archive";
+    case IR_RECIPE_STAGE_CLEANUP: return "cleanup";
+    default: return "unknown";
+    }
+}
+
 inline Json powerJson(const IRPowerReading &reading, int channel)
 {
     return {
@@ -102,4 +144,47 @@ inline Json powerJson(const IRPowerReading &reading, int channel)
     };
 }
 
+struct RecipeReadbacks {
+    Json conditions = Json::array();
+    Json instruments = Json::array();
+};
+
+void runControlBlackbody(const ir::acquisition::Capture &capture, IRHandle handle,
+                         const BlackbodyStep &step, RecipeReadbacks &readbacks);
+void runControlPower(IRHandle handle, const PowerStep &step, RecipeReadbacks &readbacks,
+                     std::vector<const PowerStep *> &powerToSwitchOff);
+void runControlPowerWaitStable(const ir::acquisition::Capture &capture, IRHandle handle,
+                               const PowerWaitStableStep &step, RecipeReadbacks &readbacks);
+void runControlOvenStabilize(const ir::acquisition::Capture &capture, IRHandle handle,
+                             const OvenStabilizeStep &step, RecipeReadbacks &readbacks,
+                             std::vector<std::string> &ovensToStandby);
+void runControlOvenStandby(IRHandle handle, const OvenStandbyStep &step, RecipeReadbacks &readbacks);
+void runControlDmmRead(IRHandle handle, const DmmReadStep &step, RecipeReadbacks &readbacks,
+                       ExecutionContext &ctx);
+void runControlDetectorTiming(IRHandle handle, const DetectorTimingStep &step, RecipeReadbacks &readbacks);
+void runControlDetectorGpol(IRHandle handle, const DetectorGpolStep &step, RecipeReadbacks &readbacks);
+void runControlDetectorRegister(IRHandle handle, const DetectorRegisterStep &step, RecipeReadbacks &readbacks);
+void runControlDetectorCurrent(IRHandle handle, const DetectorCurrentStep &step,
+                               RecipeReadbacks &readbacks, ExecutionContext &ctx);
+void runControlCoolerRead(IRHandle handle, const CoolerReadStep &step,
+                          RecipeReadbacks &readbacks, ExecutionContext &ctx);
+
 } // namespace ir::procedures::recipe
+
+namespace ir::procedures {
+
+struct SavedBatchRef {
+    std::string subdir;
+    IRGeometry geometry{};
+    const std::vector<uint16_t> *frames{};
+    const std::vector<IRFrameStamp> *stamps{};
+};
+
+void checkDestination(const std::filesystem::path &path);
+void writeFrameBatchFiles(const std::filesystem::path &directory, IRGeometry geometry,
+    const std::vector<uint16_t> &frames, const std::vector<IRFrameStamp> &stamps);
+void saveRecipeArtifacts(const std::filesystem::path &destination,
+    const std::vector<SavedBatchRef> &batches, const std::string &resultJson);
+void writeTextFileAtomicOrDirect(const std::filesystem::path &filePath, const std::string &content);
+
+} // namespace ir::procedures

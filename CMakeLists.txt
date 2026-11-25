@@ -4,6 +4,8 @@ include(CTest)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/lib")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/lib")
 if(MSVC)
     add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/utf-8>)
 endif()
@@ -56,13 +58,11 @@ if(NOT IR_ASIO_VERSION_LINE)
 endif()
 
 add_library(IR_analysis SHARED
-    analysis/frame_statistics.cpp
-    analysis/roi_mean.cpp
+    analysis/basic_stats.cpp
     analysis/noise3d_dn.cpp
     analysis/gb_gjb.cpp
     analysis/composable_ops.cpp
-    analysis/spectral_ops.cpp
-    analysis/flicker.cpp)
+    analysis/spectral_ops.cpp)
 add_dependencies(IR_analysis ir_build_info)
 target_compile_definitions(IR_analysis PRIVATE IR_ANALYSIS_BUILD
     IR_ANALYSIS_VERSION="${PROJECT_VERSION}")
@@ -76,42 +76,40 @@ target_sources(IR_station PRIVATE
     station/version.cpp
     station/instruments/device_api.cpp
     station/instruments/discovery.cpp
-    station/instruments/blackbody/doc058.cpp
-    station/instruments/power/it6332a.cpp
-    station/instruments/oven/gws_sten.cpp
-    station/instruments/dmm/dmm6500.cpp
-    station/instruments/detector/detector_serial.cpp
-    station/instruments/cooler/cooler_modbus.cpp
-    station/instruments/transport/asio_link.cpp)
+    station/instruments/doc058.cpp
+    station/instruments/it6332a.cpp
+    station/instruments/gws_sten.cpp
+    station/instruments/dmm6500.cpp
+    station/instruments/detector_serial.cpp
+    station/instruments/cooler_modbus.cpp
+    station/instruments/asio_link.cpp)
 
 # 采集：公共入口按来源创建 FrameSource，实时后端随目标平台编译。
 target_sources(IR_station PRIVATE
     station/acquisition/frame_source.cpp
     station/acquisition/frame_queue.cpp
-    station/acquisition/raw_replay/source.cpp
-    station/acquisition/raw_replay/RawConversionCore.cpp)
+    station/acquisition/raw_replay_source.cpp)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_sources(IR_station PRIVATE station/acquisition/v4l2/source.cpp)
+    target_sources(IR_station PRIVATE station/acquisition/v4l2_source.cpp)
 endif()
 if(WIN32)
     target_sources(IR_station PRIVATE
-        station/acquisition/directshow/source.cpp
+        station/acquisition/directshow_source.cpp
         "${IR_STATION_RC}")
     target_link_libraries(IR_station PRIVATE strmiids ole32 oleaut32)
 endif()
 # 流程编排与算子插件：协调仪器、采集和独立的 IR_analysis 指标库。
 target_sources(IR_station PRIVATE
+    station/plugins/plugin_host_adapter.cpp
     station/plugins/plugin_manager.cpp
-    station/plugins/plugin_metric_provider.cpp
     station/procedures/measurement.cpp
-    station/procedures/noise_run.cpp
-    station/procedures/recipe_config.cpp
     station/procedures/recipe_json.cpp
-    station/procedures/metrics_v2_basic.cpp
-    station/procedures/metrics_v2_standard.cpp
-    station/procedures/metrics_v2_spectral.cpp
-    station/procedures/recipe_metrics_v2.cpp
-    station/procedures/recipe_v2.cpp
+    station/procedures/metrics_basic.cpp
+    station/procedures/metrics_standard.cpp
+    station/procedures/recipe_metrics.cpp
+    station/procedures/recipe_parse.cpp
+    station/procedures/recipe_instruments.cpp
+    station/procedures/recipe_runner.cpp
     station/procedures/save_raw.cpp)
 target_compile_definitions(IR_station PRIVATE
     IR_STATION_BUILD
@@ -158,29 +156,28 @@ function(ir_add_metric_plugin target_name)
         C_VISIBILITY_PRESET hidden
         CXX_VISIBILITY_PRESET hidden
         VISIBILITY_INLINES_HIDDEN YES
+        ARCHIVE_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/lib/plugins"
         LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin/plugins"
         RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin/plugins")
 endfunction()
 
 if(BUILD_TESTING)
+    set(IR_TEST_TARGETS
+        c_client gb_gjb_test noise3d_test
+        analysis_algorithms_c composable_ops_test drift_nodisk_test
+        frame_queue_test replay_roundtrip recipe_test
+        flicker_test discovery_test plugin_abi_test)
+    set(IR_TEST_NAMES
+        c_client gb_gjb noise3d
+        analysis_algorithms_c composable_ops drift_nodisk frame_queue
+        replay_roundtrip recipe_flow flicker discovery
+        plugin_abi)
     add_executable(c_client sdk_tests/c_client.c)
     target_link_libraries(c_client PRIVATE IR_station IR_analysis)
-    add_executable(analysis_conditions sdk_tests/analysis_conditions.c)
-    target_link_libraries(analysis_conditions PRIVATE IR_analysis)
-    if(NOT WIN32)
-        target_link_libraries(analysis_conditions PRIVATE m)
-    endif()
     if(NOT WIN32)
         target_link_libraries(c_client PRIVATE m)
     endif()
     add_test(NAME c_client COMMAND c_client "${PROJECT_VERSION}")
-    add_test(NAME analysis_conditions COMMAND analysis_conditions)
-    add_executable(roi_mean sdk_tests/roi_mean.c)
-    target_link_libraries(roi_mean PRIVATE IR_analysis)
-    if(NOT WIN32)
-        target_link_libraries(roi_mean PRIVATE m)
-    endif()
-    add_test(NAME roi_mean COMMAND roi_mean)
     add_executable(gb_gjb_test sdk_tests/gb_gjb_test.cpp)
     target_link_libraries(gb_gjb_test PRIVATE IR_analysis)
     add_test(NAME gb_gjb COMMAND gb_gjb_test)
@@ -211,16 +208,11 @@ if(BUILD_TESTING)
     add_executable(replay_roundtrip sdk_tests/replay_roundtrip.cpp)
     target_link_libraries(replay_roundtrip PRIVATE IR_station)
     add_test(NAME replay_roundtrip COMMAND replay_roundtrip)
-    add_executable(recipe_json_test sdk_tests/recipe_json_test.cpp)
-    target_include_directories(recipe_json_test SYSTEM PRIVATE
+    add_executable(recipe_test sdk_tests/recipe_test.cpp)
+    target_include_directories(recipe_test SYSTEM PRIVATE
         "${PROJECT_SOURCE_DIR}/third_party/nlohmann_json/include")
-    target_link_libraries(recipe_json_test PRIVATE IR_station IR_analysis)
-    add_test(NAME recipe_json COMMAND recipe_json_test "${PROJECT_SOURCE_DIR}/examples")
-    add_executable(recipe_v2_test sdk_tests/recipe_v2_test.cpp)
-    target_include_directories(recipe_v2_test SYSTEM PRIVATE
-        "${PROJECT_SOURCE_DIR}/third_party/nlohmann_json/include")
-    target_link_libraries(recipe_v2_test PRIVATE IR_station IR_analysis Threads::Threads)
-    add_test(NAME recipe_v2 COMMAND recipe_v2_test)
+    target_link_libraries(recipe_test PRIVATE IR_station IR_analysis Threads::Threads)
+    add_test(NAME recipe_flow COMMAND recipe_test "${PROJECT_SOURCE_DIR}/examples")
     add_executable(flicker_test sdk_tests/flicker_test.cpp)
     target_link_libraries(flicker_test PRIVATE IR_analysis)
     add_test(NAME flicker COMMAND flicker_test)
@@ -229,18 +221,9 @@ if(BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/third_party/nlohmann_json/include")
     target_link_libraries(discovery_test PRIVATE IR_station)
     add_test(NAME discovery COMMAND discovery_test)
-    add_executable(plugin_abi_c_check sdk_tests/plugin_abi_c_check.c)
-    if(MSVC)
-        target_compile_options(plugin_abi_c_check PRIVATE /utf-8)
-    endif()
-    target_include_directories(plugin_abi_c_check PRIVATE "${PROJECT_SOURCE_DIR}/include")
-    add_test(NAME plugin_abi_c_check COMMAND plugin_abi_c_check)
     ir_add_metric_plugin(ir_test_plugin_good sdk_tests/plugins/test_plugin_good.cpp)
     ir_add_metric_plugin(ir_test_plugin_bad_abi sdk_tests/plugins/test_plugin_bad_abi.cpp)
     add_executable(plugin_abi_test sdk_tests/plugin_abi_test.cpp)
-    if(MSVC)
-        target_compile_options(plugin_abi_test PRIVATE /utf-8)
-    endif()
     target_include_directories(plugin_abi_test SYSTEM PRIVATE
         "${PROJECT_SOURCE_DIR}/third_party/nlohmann_json/include")
     target_link_libraries(plugin_abi_test PRIVATE IR_station Threads::Threads)
@@ -253,16 +236,20 @@ if(BUILD_TESTING)
     add_test(NAME ir_capture_accept_list COMMAND ir_capture_accept --list)
     add_test(NAME ir_capture_accept_soak COMMAND ir_capture_accept
         --backend raw_replay
-        --source "${PROJECT_SOURCE_DIR}/examples/data/roi_2x2"
+        --source "${PROJECT_SOURCE_DIR}/examples/data/tc002a_640"
         --frames 2 --cycles 3 --preview-ms 5
         --report "${PROJECT_BINARY_DIR}/capture_accept_smoke.json")
-    add_executable(noise_recipe sdk_tests/noise_recipe.c)
-    target_link_libraries(noise_recipe PRIVATE IR_station)
+    set_target_properties(${IR_TEST_TARGETS} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/tests/bin")
+    if(WIN32)
+        set_tests_properties(${IR_TEST_NAMES} PROPERTIES
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:IR_station>")
+    endif()
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
         add_test(NAME blackbody_tcp COMMAND "${Python3_EXECUTABLE}" -B
             "${PROJECT_SOURCE_DIR}/sdk_tests/blackbody_mock_test.py"
-            tcp "$<TARGET_FILE:IR_station>" --client "$<TARGET_FILE:noise_recipe>" --fixture-parent "${PROJECT_BINARY_DIR}")
+            tcp "$<TARGET_FILE:IR_station>" --fixture-parent "${PROJECT_BINARY_DIR}")
         set_tests_properties(blackbody_tcp PROPERTIES TIMEOUT 60)
 
         add_test(NAME instruments_mock COMMAND "${Python3_EXECUTABLE}" -B
@@ -282,7 +269,7 @@ if(BUILD_TESTING)
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             add_test(NAME blackbody_serial COMMAND "${Python3_EXECUTABLE}" -B
                 "${PROJECT_SOURCE_DIR}/sdk_tests/blackbody_mock_test.py"
-                serial "$<TARGET_FILE:IR_station>" --client "$<TARGET_FILE:noise_recipe>" --fixture-parent "${PROJECT_BINARY_DIR}")
+                serial "$<TARGET_FILE:IR_station>" --fixture-parent "${PROJECT_BINARY_DIR}")
             set_tests_properties(blackbody_serial PROPERTIES TIMEOUT 120)
             add_test(NAME power_serial COMMAND "${Python3_EXECUTABLE}" -B
                 "${PROJECT_SOURCE_DIR}/sdk_tests/power_mock_test.py" "$<TARGET_FILE:IR_station>"
@@ -297,14 +284,8 @@ install(TARGETS IR_station IR_analysis RUNTIME DESTINATION bin
 install(TARGETS ir_run_recipe ir_capture_accept RUNTIME DESTINATION bin)
 install(DIRECTORY include/ DESTINATION include)
 install(FILES SDK.md DESTINATION .)
-install(FILES
-    docs/客户接入说明.md
-    docs/测试人员配方指南.md
-    docs/设备支持矩阵.md
-    docs/第三方组件.md
-    DESTINATION docs)
-install(FILES sdk_tests/c_client.c sdk_tests/noise_recipe.c sdk_tests/analysis_conditions.c
-    sdk_tests/roi_mean.c sdk_tests/analysis_algorithms.c DESTINATION examples)
+install(FILES docs/客户接入说明.md DESTINATION docs)
+install(FILES sdk_tests/c_client.c sdk_tests/analysis_algorithms.c DESTINATION examples)
 install(DIRECTORY simulators/ DESTINATION simulators
     PATTERN "__pycache__" EXCLUDE
     PATTERN "*.pyc" EXCLUDE
@@ -316,7 +297,5 @@ install(DIRECTORY examples/ DESTINATION examples
     PATTERN "__pycache__" EXCLUDE
     PATTERN "*.pyc" EXCLUDE
     PATTERN "*.pyo" EXCLUDE
-    PATTERN "examples/csharp/bin" EXCLUDE
-    PATTERN "examples/csharp/obj" EXCLUDE)
-install(FILES examples/output/README.md DESTINATION examples/output)
+    REGEX "examples/csharp/(bin|obj)(/.*)?$" EXCLUDE)
 install(DIRECTORY third_party/nlohmann_json/ DESTINATION third_party/nlohmann_json)

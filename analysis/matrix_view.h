@@ -110,7 +110,7 @@ struct Matrix2D
     }
 };
 
-// Keep OpenCV cv::divide semantics: division by exact 0.0 yields 0.0 instead of Inf/NaN.
+// Safe elementwise division: division by exact 0.0 yields 0.0 instead of Inf/NaN.
 [[nodiscard]] inline double safeDivide(double num, double den) noexcept
 {
     return (den == 0.0) ? 0.0 : (num / den);

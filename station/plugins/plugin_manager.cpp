@@ -1,4 +1,5 @@
 #include "plugin_manager.h"
+#include "utf8_path.h"
 
 #include <algorithm>
 #include <array>
@@ -31,16 +32,8 @@ bool isNonEmptyCString(const char *s) noexcept
     return s != nullptr && s[0] != '\0';
 }
 
-std::string pathToUtf8(const std::filesystem::path &p)
-{
-    const auto u = p.u8string();
-    return {reinterpret_cast<const char *>(u.data()), u.size()};
-}
-
-std::filesystem::path pathFromUtf8(const std::string &utf8)
-{
-    return std::filesystem::path(std::u8string(utf8.begin(), utf8.end()));
-}
+using ir::utf8::pathFromUtf8;
+using ir::utf8::pathToUtf8;
 
 #if defined(_WIN32)
 std::string formatWin32Error(DWORD code)

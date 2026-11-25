@@ -138,7 +138,7 @@ $serialMapPath = Join-Path $WorkDir "serial_map.json"
 
 $sdkStationPath = Join-Path $WorkDir "sdk_station.json"
 $hostBbPath = Join-Path $ConfigDir "blackbody.json"
-$rawSource = Join-Path $RepoRoot "examples\data\raw16"
+$rawSource = Join-Path $RepoRoot "examples\data\tc002a_640"
 $simOutLog = Join-Path $WorkDir "virtual_station.stdout.log"
 $simErrLog = Join-Path $WorkDir "virtual_station.stderr.log"
 Remove-Item $simOutLog, $simErrLog -ErrorAction SilentlyContinue

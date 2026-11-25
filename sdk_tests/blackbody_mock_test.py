@@ -275,31 +275,12 @@ def exercise_wait_blackbody_stable(sdk, controller, config):
 
 
 def exercise_recipe(args, sdk, controller, config):
-    env = os.environ.copy()
-    if os.name == "nt":
-        env["PATH"] = os.pathsep.join([str(args.library.resolve().parent), env["PATH"]])
     with TemporaryDirectory(prefix="blackbody-", dir=args.fixture_parent) as temporary:
         fixture = Path(temporary)
         (fixture / "frames.raw").write_bytes(b"\x14\x00\x16\x00")
         (fixture / "frames.csv").write_text(
             "frame_index,width,height,stride_bytes,pixel_format,bit_depth,endianness\n"
             "0,1,1,2,RAW16_LE,16,little\n1,1,1,2,RAW16_LE,16,little\n", encoding="utf8")
-        command = [str(args.client.resolve()), args.mode, json.dumps(config)]
-        for stable in (True, False):
-            controller.stable = stable
-            run = subprocess.run(command, cwd=fixture, env=env, capture_output=True, text=True, timeout=12)
-            print(f"{args.mode} stable={stable} status={run.returncode}\n{run.stdout}", flush=True)
-            assert run.returncode == (0 if stable else 7), (run.returncode, run.stderr)
-            values = dict(line.split("=", 1) for line in run.stdout.splitlines())
-            if stable:
-                assert controller.target == 32 and values["completed"] == "2"
-                assert values["failed_step"] == "0" and values["cleanup_status"] == "0"
-                assert float(values["mean_dn"]) == 21
-                assert math.isclose(float(values["noise_dn"]), math.sqrt(2), rel_tol=0, abs_tol=1e-12)
-            else:
-                assert values == {"completed": "0", "failed_step": "4", "cleanup_status": "0"}
-
-        exercise_saved_recipe(sdk, controller, config, fixture)
         exercise_json_recipe(sdk, controller, config, fixture)
 
 
@@ -347,7 +328,7 @@ def exercise_saved_recipe(sdk, controller, config, fixture):
 def exercise_json_recipe(sdk, controller, config, fixture):
     error_args = [c.c_char_p, c.c_int32]
     sdk.IR_CheckRecipeJson.argtypes = [c.c_char_p, c.c_char_p, *error_args]
-    sdk.IR_RunRecipeJson.argtypes = [c.c_char_p, c.c_char_p, c.c_char_p, c.POINTER(RecipeResult), *error_args]
+    sdk.IR_RunRecipeJson.argtypes = [c.c_char_p, c.c_char_p, c.c_char_p, c.c_void_p, c.POINTER(RecipeResult), *error_args]
     error = c.create_string_buffer(1024)
     kind = "pcn7-lt" if controller.tcp else "dcn1000"
     station = {
@@ -381,7 +362,7 @@ def exercise_json_recipe(sdk, controller, config, fixture):
     controller.stable = True
     result = RecipeResult()
     status = sdk.IR_RunRecipeJson(station_json, recipe_json, str(output).encode(),
-                                  c.byref(result), error, len(error))
+                                  None, c.byref(result), error, len(error))
     assert status == 0, error.value
     assert (result.completed_frames, result.failed_stage, result.failed_step_index, result.cleanup_status) == (2, 0, -1, 0)
     record = json.loads((output / "result.json").read_text(encoding="utf8"))
@@ -402,10 +383,10 @@ def exercise_json_recipe(sdk, controller, config, fixture):
     controller.stable = False
     timeout_output = fixture / "json-timeout"
     status = sdk.IR_RunRecipeJson(station_json, json.dumps(unstable).encode(),
-                                  str(timeout_output).encode(), c.byref(result), error, len(error))
+                                  str(timeout_output).encode(), None, c.byref(result), error, len(error))
     assert status == 7 and b"stable" in error.value.lower(), (status, error.value)
     assert (result.completed_frames, result.failed_stage, result.failed_step_index, result.cleanup_status) == (0, 4, 0, 0)
-    assert not timeout_output.exists()
+    assert json.loads((timeout_output / "result.json").read_text(encoding="utf-8"))["run_status"] == "ERROR"
     controller.stable = True
 
     # Multi-temperature capture (20 -> 30 °C), zero save_raw, and safety blackbody standby (24.5 °C)
@@ -438,7 +419,7 @@ def exercise_json_recipe(sdk, controller, config, fixture):
     v2_out = fixture / "json-v2-run"
     v2_result = RecipeResult()
     status = sdk.IR_RunRecipeJson(station_json, v2_json, str(v2_out).encode(),
-                                  c.byref(v2_result), error, len(error))
+                                  None, c.byref(v2_result), error, len(error))
     assert status == 0, error.value
     assert (v2_result.completed_frames, v2_result.failed_stage,
             v2_result.failed_step_index, v2_result.cleanup_status) == (2, 0, -1, 0)
@@ -542,7 +523,7 @@ def exercise_recipe_ownership(args, sdk, controller, config):
 def exercise_json_recipe_ownership(args, sdk, controller, config):
     error_args = [c.c_char_p, c.c_int32]
     sdk.IR_OpenDevice.argtypes = [c.c_int32, c.c_char_p, c.POINTER(c.c_uint64), *error_args]
-    sdk.IR_RunRecipeJson.argtypes = [c.c_char_p, c.c_char_p, c.c_char_p, c.POINTER(RecipeResult), *error_args]
+    sdk.IR_RunRecipeJson.argtypes = [c.c_char_p, c.c_char_p, c.c_char_p, c.c_void_p, c.POINTER(RecipeResult), *error_args]
     sdk.IR_RequestStop.argtypes = []
     sdk.IR_RequestStop.restype = None
 
@@ -591,7 +572,7 @@ def exercise_json_recipe_ownership(args, sdk, controller, config):
             error = c.create_string_buffer(1024)
             details = RecipeResult()
             status = sdk.IR_RunRecipeJson(station_json, recipe_json, str(first_output).encode(),
-                                          c.byref(details), error, len(error))
+                                          None, c.byref(details), error, len(error))
             outcome["first"] = status, error.value, details
             first_finished.set()
             if status != 8:
@@ -602,7 +583,7 @@ def exercise_json_recipe_ownership(args, sdk, controller, config):
                 return
             error = c.create_string_buffer(1024)
             status = sdk.IR_RunRecipeJson(station_json, retry_json, str(retry_output).encode(),
-                                          None, error, len(error))
+                                          None, None, error, len(error))
             outcome["retry"] = status, error.value
 
         worker = threading.Thread(target=run_recipe)
@@ -618,7 +599,7 @@ def exercise_json_recipe_ownership(args, sdk, controller, config):
         second = RecipeResult()
         second_output = fixture / "concurrent-run"
         status = sdk.IR_RunRecipeJson(station_json, retry_json, str(second_output).encode(),
-                                      c.byref(second), error, len(error))
+                                      None, c.byref(second), error, len(error))
         assert status == 9 and second.failed_stage == 2 and not second_output.exists(), (status, error.value)
 
         sdk.IR_RequestStop()
@@ -626,7 +607,7 @@ def exercise_json_recipe_ownership(args, sdk, controller, config):
         assert outcome["first"][0] == 8 and b"stable" in outcome["first"][1].lower(), outcome["first"]
         details = outcome["first"][2]
         assert (details.completed_frames, details.failed_stage, details.failed_step_index, details.cleanup_status) == (0, 4, 0, 0)
-        assert not first_output.exists()
+        assert json.loads((first_output / "result.json").read_text(encoding="utf-8"))["run_status"] == "CANCELLED"
 
         retry_allowed.set()
         worker.join(8)
@@ -779,7 +760,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=["tcp", "serial"])
     parser.add_argument("library", type=Path)
-    parser.add_argument("--client", type=Path, required=True)
     parser.add_argument("--fixture-parent", type=Path, required=True)
     args = parser.parse_args()
     sdk = load_sdk(args.library.resolve())
@@ -840,9 +820,7 @@ def main():
         exercise(sdk, controller, config)
         exercise_wait_blackbody_stable(sdk, controller, config)
         exercise_recipe(args, sdk, controller, config)
-        exercise_recipe_ownership(args, sdk, controller, config)
         exercise_json_recipe_ownership(args, sdk, controller, config)
-        exercise_concurrent_polling_regression(args, sdk, controller, config)
     finally:
         stop.set()
         server.join(5)

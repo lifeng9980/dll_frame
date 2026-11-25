@@ -62,14 +62,7 @@ internal static class RecipeRunner
                 throw new InvalidOperationException("Output directory already exists.");
 
             var error = new byte[2048];
-            var status = IRStation.CheckRecipeJson(stationJson, recipeJson, error, error.Length);
-            if (status != 0)
-            {
-                Console.Error.WriteLine($"IR_CheckRecipeJson status={status}: {ErrorText(error)}");
-                return status;
-            }
-
-            status = IRStation.RunRecipeJson(stationJson, recipeJson, outputDirectory, out var run, error, error.Length);
+            var status = IRStation.RunRecipeJson(stationJson, recipeJson, outputDirectory, IntPtr.Zero, out var run, error, error.Length);
             if (status != 0)
             {
                 Console.Error.WriteLine($"IR_RunRecipeJson status={status} stage={run.FailedStage}" +

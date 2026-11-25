@@ -120,10 +120,68 @@ struct Arguments {
     fs::path output;
 };
 
+void printUsage()
+{
+    std::puts("Usage: ir_run_recipe --check|--run --station station.json --recipe recipe.json --output new-directory");
+}
+
+const char *statusName(int32_t status) noexcept
+{
+    switch (status) {
+    case IR_OK: return "IR_OK";
+    case IR_NULL_POINTER: return "IR_NULL_POINTER";
+    case IR_BAD_ARGUMENT: return "IR_BAD_ARGUMENT";
+    case IR_BUFFER_TOO_SMALL: return "IR_BUFFER_TOO_SMALL";
+    case IR_COMPUTATION_FAILED: return "IR_COMPUTATION_FAILED";
+    case IR_INVALID_HANDLE: return "IR_INVALID_HANDLE";
+    case IR_IO_ERROR: return "IR_IO_ERROR";
+    case IR_TIMEOUT: return "IR_TIMEOUT";
+    case IR_CANCELLED: return "IR_CANCELLED";
+    case IR_BUSY: return "IR_BUSY";
+    case IR_UNSUPPORTED: return "IR_UNSUPPORTED";
+    case IR_END_OF_STREAM: return "IR_END_OF_STREAM";
+    case IR_FRAME_GAP: return "IR_FRAME_GAP";
+    default: return "IR_UNKNOWN";
+    }
+}
+
+const char *stageName(int32_t stage) noexcept
+{
+    switch (stage) {
+    case IR_RECIPE_STAGE_NONE: return "none";
+    case IR_RECIPE_STAGE_VALIDATE: return "validate";
+    case IR_RECIPE_STAGE_RESERVE: return "reserve";
+    case IR_RECIPE_STAGE_PREPARE: return "prepare";
+    case IR_RECIPE_STAGE_INSTRUMENT: return "instrument";
+    case IR_RECIPE_STAGE_CAPTURE: return "capture";
+    case IR_RECIPE_STAGE_ANALYZE: return "analyze";
+    case IR_RECIPE_STAGE_ARCHIVE: return "archive";
+    case IR_RECIPE_STAGE_CLEANUP: return "cleanup";
+    default: return "unknown";
+    }
+}
+
+void onRecipeStepEvent(const IRRecipeStepEvent *ev, void *) noexcept
+{
+    if (!ev) return;
+    const char *id = ev->step_id_utf8 ? ev->step_id_utf8 : "";
+    const char *type = ev->step_type_utf8 ? ev->step_type_utf8 : "";
+    if (ev->event_kind == IR_STEP_EVENT_COMPLETED) {
+        std::fprintf(stderr, "[step #%d] %s (%s) ... OK (%.1f ms)\n",
+                     ev->step_index + 1, id, type, ev->duration_ms);
+    } else if (ev->event_kind == IR_STEP_EVENT_FAILED) {
+        std::fprintf(stderr, "[step #%d] %s (%s) ... FAILED [%s] %s\n",
+                     ev->step_index + 1, id, type, statusName(ev->status),
+                     ev->detail_utf8 ? ev->detail_utf8 : "");
+    }
+}
+
 Arguments parseArguments(const std::vector<std::string> &values)
 {
-    if (values.size() == 1 && values[0] == "--help")
-        throw std::runtime_error("Usage: ir_run_recipe --check|--run --station station.json --recipe recipe.json --output new-directory");
+    if (values.size() == 1 && values[0] == "--help") {
+        printUsage();
+        std::exit(0);
+    }
 
     Arguments arguments;
     for (size_t index = 0; index < values.size(); ++index) {
@@ -197,36 +255,42 @@ int execute(const std::vector<std::string> &values)
         const auto stationText = resolveStationSource(stationPath, readText(stationPath));
         const auto recipeText = readText(recipePath);
         char error[2048]{};
-        auto status = IR_CheckRecipeJson(stationText.c_str(), recipeText.c_str(), error, sizeof error);
-        if (status != IR_OK) {
-            if (isRunMode) {
-                statusPrinted = true;
-                std::cout << "run_status=ERROR\ncompleted_frames=0\n" << std::flush;
-            }
-            std::fprintf(stderr, "recipe check status=%d %s\n", status, error);
-            return status;
-        }
-        checkOutputDirectory(outputPath);
+        int32_t status = IR_OK;
         if (arguments.mode == "--check") {
+            status = IR_CheckRecipeJson(stationText.c_str(), recipeText.c_str(), error, sizeof error);
+            if (status != IR_OK) {
+                std::fprintf(stderr, "recipe check status=%d (%s) %s\n", status, statusName(status), error);
+                return status;
+            }
+            checkOutputDirectory(outputPath);
             std::puts("recipe=VALID");
             return 0;
         }
+        checkOutputDirectory(outputPath);
 
         const auto outputText = pathUtf8(outputPath);
+        IRRecipeRunOptions options{};
+        options.struct_size = sizeof(IRRecipeRunOptions);
+        options.flags = 0;
+        options.on_step_event = onRecipeStepEvent;
+        options.user_data = nullptr;
         IRRecipeResult run{};
         {
             StopSignalGuard stopGuard;
             status = IR_RunRecipeJson(stationText.c_str(), recipeText.c_str(), outputText.c_str(),
-                                      &run, error, sizeof error);
+                                      &options, &run, error, sizeof error);
         }
         if (status != IR_OK) {
             const char *runStatus = status == IR_CANCELLED ? "CANCELLED" : "ERROR";
             statusPrinted = true;
             std::cout << "run_status=" << runStatus << '\n'
                       << "completed_frames=" << run.completed_frames << '\n'
+                      << "output_dir=" << outputText << '\n'
                       << std::flush;
-            std::fprintf(stderr, "recipe run status=%d stage=%d step_index=%d completed_frames=%d cleanup_status=%d %s\n",
-                status, run.failed_stage, run.failed_step_index, run.completed_frames, run.cleanup_status, error);
+            std::fprintf(stderr, "recipe run status=%d (%s) stage=%d (%s) step_index=%d completed_frames=%d cleanup_status=%d (%s) %s\n",
+                status, statusName(status), run.failed_stage, stageName(run.failed_stage),
+                run.failed_step_index, run.completed_frames, run.cleanup_status,
+                statusName(run.cleanup_status), error);
             return status;
         }
 
@@ -235,10 +299,23 @@ int execute(const std::vector<std::string> &values)
         const auto completedFrames = record.at("completed_frames").get<int>();
         statusPrinted = true;
         std::cout << "run_status=" << runStatusText << '\n'
-                  << "completed_frames=" << completedFrames << '\n';
+                  << "completed_frames=" << completedFrames << '\n'
+                  << "output_dir=" << outputText << '\n';
+        if (record.contains("total_duration_ms"))
+            std::cout << "total_duration_ms=" << record.at("total_duration_ms") << '\n';
         for (auto metric = record.at("metrics").begin(); metric != record.at("metrics").end(); ++metric)
             std::cout << "metric." << metric.key() << '=' << metric.value().at("value")
                       << ' ' << metric.value().at("unit").get<std::string>() << '\n';
+        if (record.contains("limits") && record.at("limits").is_array()) {
+            for (const auto &lim : record.at("limits")) {
+                std::cout << "limit." << lim.at("metric").get<std::string>()
+                          << '=' << lim.at("result").get<std::string>()
+                          << " (actual=" << lim.at("actual")
+                          << ' ' << lim.at("operator").get<std::string>()
+                          << ' ' << lim.at("value")
+                          << ' ' << lim.at("unit").get<std::string>() << ")\n";
+            }
+        }
         if (runStatusText == "NG") return 20;
         return 0;
     } catch (const std::exception &error) {
@@ -256,7 +333,7 @@ int wmain(int argc, wchar_t **argv)
     std::vector<std::string> values;
     for (int index = 1; index < argc; ++index) values.push_back(wideToUtf8(argv[index]));
     if (values.size() == 1 && values.front() == "--help") {
-        std::puts("Usage: ir_run_recipe --check|--run --station station.json --recipe recipe.json --output new-directory");
+        printUsage();
         return 0;
     }
     return execute(values);
@@ -267,7 +344,7 @@ int main(int argc, char **argv)
     std::vector<std::string> values;
     for (int index = 1; index < argc; ++index) values.emplace_back(argv[index]);
     if (values.size() == 1 && values.front() == "--help") {
-        std::puts("Usage: ir_run_recipe --check|--run --station station.json --recipe recipe.json --output new-directory");
+        printUsage();
         return 0;
     }
     return execute(values);

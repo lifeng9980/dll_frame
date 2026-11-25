@@ -268,8 +268,9 @@ void Capture::start()
 void Capture::stop()
 {
     stopPump();
-    if (running) source->stop();
+    const bool wasRunning = running;
     running = false;
+    if (wasRunning) source->stop();
 }
 void Capture::read(int count, int timeoutMs, uint16_t *out, int64_t capacity,
                    IRFrameStamp *stamps, int stampCapacity, int &completed)
@@ -356,9 +357,16 @@ void Capture::flush(int32_t discardFrames, int32_t timeoutMs, int32_t &discarded
     checkStop();
     if (pumpActive_) {
         stopPump();
-        source->flush();
-        frameQueue_.resumeSession();
-        startPump();
+        try {
+            source->flush();
+            frameQueue_.resumeSession();
+            startPump();
+        } catch (...) {
+            running = false;
+            frameQueue_.markStopped();
+            frameQueue_.setRunning(false);
+            throw;
+        }
         if (discardFrames == 0)
             return;
 
@@ -485,7 +493,12 @@ extern "C" int32_t IR_StopFrames(char *err, int32_t size)
     return guarded(err, size, [&] {
         auto lock = lockCapture(); auto &c = capture();
         c.checkOwner();
-        c.stop();
+        try {
+            c.stop();
+        } catch (...) {
+            c.endOperation();
+            throw;
+        }
         c.endOperation();
     });
 }

@@ -92,25 +92,25 @@ def main():
         raise RuntimeError("IR_StationVersion returned an empty string")
     error_args = [c.c_char_p, c.c_int32]
     sdk.IR_CheckRecipeJson.argtypes = [c.c_char_p, c.c_char_p, *error_args]
-    sdk.IR_RunRecipeJson.argtypes = [c.c_char_p, c.c_char_p, c.c_char_p, c.POINTER(RecipeResult), *error_args]
+    sdk.IR_RunRecipeJson.argtypes = [c.c_char_p, c.c_char_p, c.c_char_p, c.c_void_p, c.POINTER(RecipeResult), *error_args]
     station_json = station_text(station_path).encode("utf-8")
     recipe_json = recipe_path.read_text(encoding="utf-8").encode("utf-8")
     error = c.create_string_buffer(2048)
 
-    status = sdk.IR_CheckRecipeJson(station_json, recipe_json, error, len(error))
-    if status != 0:
-        print(f"IR_CheckRecipeJson status={status}: {error.value.decode('utf-8', errors='replace')}", file=sys.stderr)
-        if dll_directory:
-            dll_directory.close()
-        return status
     if args.mode == "check":
+        status = sdk.IR_CheckRecipeJson(station_json, recipe_json, error, len(error))
+        if status != 0:
+            print(f"IR_CheckRecipeJson status={status}: {error.value.decode('utf-8', errors='replace')}", file=sys.stderr)
+            if dll_directory:
+                dll_directory.close()
+            return status
         print("recipe=VALID")
         if dll_directory:
             dll_directory.close()
         return 0
 
     run = RecipeResult()
-    status = sdk.IR_RunRecipeJson(station_json, recipe_json, os.fsencode(output), c.byref(run), error, len(error))
+    status = sdk.IR_RunRecipeJson(station_json, recipe_json, os.fsencode(output), None, c.byref(run), error, len(error))
     if status != 0:
         print(f"IR_RunRecipeJson status={status} stage={run.failed_stage} step_index={run.failed_step_index} "
               f"completed_frames={run.completed_frames} cleanup_status={run.cleanup_status} "

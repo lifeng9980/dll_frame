@@ -39,16 +39,24 @@ int main(int argc, char **argv)
         fprintf(stderr, "Unexpected IRCaptureStats ABI size: %zu\n", sizeof(IRCaptureStats));
         return 1;
     }
-    if (sizeof(IRRecipeStepEvent) != 56 || sizeof(IRRecipeRunOptions) != 24 || IR_PLUGIN_ABI_VERSION_1 != 1u) {
-        fprintf(stderr, "Unexpected recipe/plugin ABI size\n");
+    if (strcmp(IR_PLUGIN_QUERY_V1_SYMBOL, "ir_plugin_query_v1") != 0 ||
+        sizeof(IRRecipeStepEvent) != 56 ||
+        sizeof(IRRecipeRunOptions) != 24 ||
+        sizeof(IRPluginHeader) != 32 ||
+        sizeof(IRSlotView) != 48 ||
+        sizeof(IRPrepareCallbacksV1) != 40 ||
+        sizeof(IRHostCallbacksV1) != 72 ||
+        sizeof(IRMetricPluginV1) != 80 ||
+        IR_PLUGIN_ABI_VERSION_1 != 1u) {
+        fprintf(stderr, "Unexpected recipe/plugin ABI size or symbol\n");
         return 1;
     }
     {
         IRRecipeRunOptions bad_opts = {0, 0, NULL, NULL};
         IRRecipeResult rr = {0};
-        status = IR_RunRecipeJsonEx("{}", "{}", "out", &bad_opts, &rr, error, sizeof error);
+        status = IR_RunRecipeJson("{}", "{}", "out", &bad_opts, &rr, error, sizeof error);
         if (status != IR_BAD_ARGUMENT || rr.failed_stage != IR_RECIPE_STAGE_VALIDATE) {
-            fprintf(stderr, "RunRecipeJsonEx bad_opts: status=%d stage=%d err=%s\n",
+            fprintf(stderr, "RunRecipeJson bad_opts: status=%d stage=%d err=%s\n",
                 status, rr.failed_stage, error);
             return 1;
         }

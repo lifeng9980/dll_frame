@@ -70,53 +70,6 @@ void radix2Fft(std::vector<Complex> &data, bool inverse)
     }
 }
 
-std::vector<Complex> computeDftComplex(const std::vector<double> &input)
-{
-    const size_t n = input.size();
-    if (isPowerOfTwo(n))
-    {
-        std::vector<Complex> data(n);
-        for (size_t i = 0; i < n; ++i)
-            data[i] = Complex(input[i], 0.0);
-        radix2Fft(data, false);
-        return data;
-    }
-
-    // Bluestein chirp-z transform handles any arbitrary N >= 2 in O(N log N).
-    const size_t m = nextPowerOfTwo(2 * n - 1);
-    std::vector<Complex> a(m, Complex(0.0, 0.0));
-    std::vector<Complex> b(m, Complex(0.0, 0.0));
-    std::vector<Complex> chirp(n);
-
-    const int64_t twoN = 2 * static_cast<int64_t>(n);
-    for (size_t k = 0; k < n; ++k)
-    {
-        const int64_t kSqMod = (static_cast<int64_t>(k) * static_cast<int64_t>(k)) % twoN;
-        const double angle = kPi * static_cast<double>(kSqMod) / static_cast<double>(n);
-        chirp[k] = Complex(std::cos(angle), -std::sin(angle));
-        a[k] = Complex(input[k], 0.0) * chirp[k];
-    }
-
-    b[0] = Complex(1.0, 0.0);
-    for (size_t k = 1; k < n; ++k)
-    {
-        const Complex conjChirp = std::conj(chirp[k]);
-        b[k] = conjChirp;
-        b[m - k] = conjChirp;
-    }
-
-    radix2Fft(a, false);
-    radix2Fft(b, false);
-    for (size_t i = 0; i < m; ++i)
-        a[i] *= b[i];
-    radix2Fft(a, true);
-
-    std::vector<Complex> out(n);
-    for (size_t k = 0; k < n; ++k)
-        out[k] = a[k] * chirp[k];
-    return out;
-}
-
 struct ComplexFft1dPlan
 {
     size_t n{};
@@ -178,11 +131,11 @@ struct ComplexFft1dPlan
     }
 };
 
-std::vector<double> buildWindow1d(int32_t length, int32_t windowKind)
+std::vector<double> buildWindow1d(int32_t length, int32_t windowKind, bool fallbackShortToUnit = false)
 {
     std::vector<double> w(static_cast<size_t>(length), 1.0);
-    // 对称 Hann 在长度为 2 时两个端点均为零，短轴保留等权采样。
-    if (length <= 2 || windowKind == IR_WINDOW_RECTANGULAR)
+    // 2D FFT 短轴（length <= 2）保留等权采样；1D RFFT 对对称 Hann(length==2) 保持零权重校验。
+    if (windowKind == IR_WINDOW_RECTANGULAR || length <= 1 || (fallbackShortToUnit && length <= 2))
         return w;
     for (int32_t i = 0; i < length; ++i)
     {
@@ -212,24 +165,23 @@ void computeRfftCore(const double *signal,
         mean = sum / static_cast<double>(length);
     }
 
-    std::vector<double> windowed(static_cast<size_t>(length), 0.0);
+    const std::vector<double> win = buildWindow1d(length, windowKind);
+    std::vector<Complex> windowed(static_cast<size_t>(length));
     double windowSum = 0.0;
     double windowSqSum = 0.0;
     for (int32_t i = 0; i < length; ++i)
     {
-        double w = 1.0;
-        if (windowKind == IR_WINDOW_HANN)
-            w = 0.5 * (1.0 - std::cos(2.0 * kPi * i / static_cast<double>(length - 1)));
-        else if (windowKind == IR_WINDOW_HAMMING)
-            w = 0.54 - 0.46 * std::cos(2.0 * kPi * i / static_cast<double>(length - 1));
-        windowed[static_cast<size_t>(i)] = (signal[i] - mean) * w;
+        const double w = win[static_cast<size_t>(i)];
+        windowed[static_cast<size_t>(i)] = Complex((signal[i] - mean) * w, 0.0);
         windowSum += w;
         windowSqSum += w * w;
     }
     require(windowSum > 0.0 && windowSqSum > 0.0, IR_BAD_ARGUMENT,
             "Selected window yields zero weight for this signal length");
 
-    const std::vector<Complex> spectrum = computeDftComplex(windowed);
+    const ComplexFft1dPlan plan(static_cast<size_t>(length));
+    std::vector<Complex> spectrum(static_cast<size_t>(length));
+    plan.transform(windowed.data(), spectrum.data());
     const int32_t bins = length / 2 + 1;
     const double df = sampleRateHz / static_cast<double>(length);
 
@@ -462,8 +414,8 @@ extern "C" IR_ANALYSIS_API int32_t IR_Fft2dMagnitudeF64(
         require(validCount <= INT32_MAX, IR_COMPUTATION_FAILED, "valid_pixel_count exceeds INT32_MAX");
         const double validMean = sumValid / static_cast<double>(validCount);
 
-        const auto winRow = buildWindow1d(rows, window_kind);
-        const auto winCol = buildWindow1d(cols, window_kind);
+        const auto winRow = buildWindow1d(rows, window_kind, true);
+        const auto winCol = buildWindow1d(cols, window_kind, true);
         double rowWinSum = 0.0;
         double colWinSum = 0.0;
         for (double w : winRow)

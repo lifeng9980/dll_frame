@@ -163,10 +163,8 @@ def load_sdk(path: Path):
     sdk.IR_CloseFrames.argtypes = err_args
     sdk.IR_RequestStop.argtypes = []
     sdk.IR_RequestStop.restype = None
-    sdk.IR_RunNoise.argtypes = [c.POINTER(NoiseRecipe), c.c_char_p, c.POINTER(NoiseResult), *err_args]
-
     sdk.IR_CheckRecipeJson.argtypes = [c.c_char_p, c.c_char_p, *err_args]
-    sdk.IR_RunRecipeJson.argtypes = [c.c_char_p, c.c_char_p, c.c_char_p, c.POINTER(RecipeResult), *err_args]
+    sdk.IR_RunRecipeJson.argtypes = [c.c_char_p, c.c_char_p, c.c_char_p, c.c_void_p, c.POINTER(RecipeResult), *err_args]
     return sdk
 
 
@@ -422,27 +420,6 @@ def exercise_detector(sdk, det: DetectorController, det_port: int, fixture_dir: 
         det.bad_ack = True
         check(sdk.IR_MeasureDetectorCurrent, handle, 0, 0x0102, c.byref(curr), expected=IR_IO_ERROR)
         det.bad_ack = False
-
-        # IR_RunNoise with detector != 0
-        det.frames.clear()
-        geom = Geometry()
-        check(sdk.IR_OpenFrames, IR_RAW_REPLAY, str(fixture_dir).encode("utf-8"), 0, c.byref(geom))
-        frames_open = True
-        recipe = NoiseRecipe(
-            b"det-serial-noise", handle.value, 0,
-            1200, 50, 150,
-            25.0, 0.5, 50, 1000, 0,
-            2, 0,
-        )
-        nres = NoiseResult()
-        check(sdk.IR_RunNoise, c.byref(recipe), None, c.byref(nres))
-        assert nres.completed == 2
-        assert math.isclose(nres.mean_dn, 21.0, abs_tol=1e-9), nres.mean_dn
-        assert nres.failed_step == 0 and nres.cleanup_status == 0
-        assert det.frames == [
-            (0x50, (1200).to_bytes(3, "little")),
-            (0x51, (150).to_bytes(3, "little")),
-        ], det.frames
     finally:
         if frames_open:
             check(sdk.IR_CloseFrames)
@@ -556,7 +533,7 @@ def exercise_recipe_v2(sdk, oven: GwsStenOven, oven_port: int,
 
     pass_out = work_dir / "v2-pass-out"
     res = RecipeResult()
-    check(sdk.IR_RunRecipeJson, station_bytes, pass_bytes, str(pass_out).encode("utf-8"), c.byref(res))
+    check(sdk.IR_RunRecipeJson, station_bytes, pass_bytes, str(pass_out).encode("utf-8"), None, c.byref(res))
     assert res.cleanup_status == 0 and res.completed_frames == 2
 
     record = json.loads((pass_out / "result.json").read_text(encoding="utf-8"))
@@ -599,9 +576,9 @@ def exercise_recipe_v2(sdk, oven: GwsStenOven, oven_port: int,
     check(sdk.IR_CheckRecipeJson, station_bytes, burst_bytes)
     burst_out = work_dir / "v2-burst-out"
     res_burst = RecipeResult()
-    check(sdk.IR_RunRecipeJson, station_bytes, burst_bytes, str(burst_out).encode("utf-8"), c.byref(res_burst))
+    check(sdk.IR_RunRecipeJson, station_bytes, burst_bytes, str(burst_out).encode("utf-8"), None, c.byref(res_burst))
     csv_lines = (burst_out / "drift.csv").read_text(encoding="utf-8").strip().splitlines()
-    assert len(csv_lines) == 3 and csv_lines[0].endswith(",dmm.value"), csv_lines
+    assert len(csv_lines) == 3 and csv_lines[0].endswith(",dmm.value [V]"), csv_lines
 
     # Forced-failure case: DMM left in DIOD, recipe asserts expected DCV without set_mode;
     # oven_stabilize sets standby_after_run=True and must be returned to STANDBY in cleanup.
@@ -627,11 +604,11 @@ def exercise_recipe_v2(sdk, oven: GwsStenOven, oven_port: int,
     res_fail = RecipeResult()
     check(
         sdk.IR_RunRecipeJson,
-        station_bytes, fail_bytes, str(fail_out).encode("utf-8"), c.byref(res_fail),
+        station_bytes, fail_bytes, str(fail_out).encode("utf-8"), None, c.byref(res_fail),
         expected=IR_COMPUTATION_FAILED,
     )
     assert res_fail.cleanup_status == IR_OK
-    assert not fail_out.exists()
+    assert json.loads((fail_out / "result.json").read_text(encoding="utf-8"))["run_status"] == "ERROR"
     assert oven.mode == "STANDBY"
     assert "MODE, STANDBY" in oven.commands
 
@@ -644,6 +621,7 @@ def exercise_recipe_v2(sdk, oven: GwsStenOven, oven_port: int,
         json.dumps(missing_raw_station).encode("utf-8"),
         pass_bytes,
         str(work_dir / "v2-prepare-fail-out").encode("utf-8"),
+        None,
         c.byref(res_prepare_fail),
         err_buf,
         len(err_buf),
@@ -689,6 +667,7 @@ def exercise_recipe_v2(sdk, oven: GwsStenOven, oven_port: int,
         json.dumps(partial_reserve_station).encode("utf-8"),
         json.dumps(partial_reserve_recipe).encode("utf-8"),
         str(work_dir / "v2-reserve-fail-out").encode("utf-8"),
+        None,
         c.byref(res_reserve_fail),
         expected=IR_IO_ERROR,
     )

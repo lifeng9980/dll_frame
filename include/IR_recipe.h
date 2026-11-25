@@ -30,17 +30,6 @@ typedef struct IRRecipeResult {
     int32_t cleanup_status;    /* 第一个收尾错误的 IRStatus；收尾成功或无需收尾时为 IR_OK。 */
 } IRRecipeResult;
 
-/* 在当前线程执行一份有序流程。成功测量后在 new_output_directory 中写入 frames.raw、
- * frames.csv 和 result.json。路径必须是现存父目录下尚不存在的新目录，字符串使用 UTF-8。
- * IR_OK 表示测量完整完成；产品限值未满足时仍返回 IR_OK，result.json 的 run_status 为 NG。
- * 设备只在本配方引用时连接。同一进程一次只运行一条配方，其间其他采集调用返回 IR_BUSY。
- * 其他线程可以调用 IR_RequestStop。当前同步事务或计算结束后检查停止，由原线程完成收尾。
- * result 由调用方持有，可传 NULL。执行和收尾均失败时，返回执行错误，收尾状态单独写入 result。
- */
-IR_STATION_API int32_t IR_RunRecipeJson(const char *station_json_utf8,
-    const char *recipe_json_utf8, const char *new_output_directory_utf8,
-    IRRecipeResult *result, char *err, int32_t err_bytes);
-
 enum IRRecipeStepEventKind {
     IR_STEP_EVENT_STARTED = 1,
     IR_STEP_EVENT_COMPLETED = 2,
@@ -60,7 +49,7 @@ typedef struct IRRecipeStepEvent {
     const char *detail_utf8;   /* 失败详情或附加说明，仅在本次回调调用期间有效。 */
 } IRRecipeStepEvent;
 
-/* 在 IR_RunRecipeJsonEx 调用线程同步触发；严禁向 C ABI 边界外抛出 C++ 异常。 */
+/* 在 IR_RunRecipeJson 调用线程同步触发；严禁向 C ABI 边界外抛出 C++ 异常。 */
 typedef void (*IRRecipeStepCallback)(const IRRecipeStepEvent *event, void *user_data);
 
 typedef struct IRRecipeRunOptions {
@@ -70,8 +59,16 @@ typedef struct IRRecipeRunOptions {
     void *user_data;
 } IRRecipeRunOptions;
 
-/* 与 IR_RunRecipeJson 行为一致，额外支持通过 options 接收步骤级运行事件回调（可传 NULL）。 */
-IR_STATION_API int32_t IR_RunRecipeJsonEx(const char *station_json_utf8,
+/* 在当前线程执行一份有序流程。测量后在 new_output_directory 中写入 frames.raw、
+ * frames.csv（如有 save_raw）和 result.json（失败或取消时也会写入诊断 result.json）。
+ * 路径必须是现存父目录下尚不存在的新目录，字符串使用 UTF-8。
+ * options 可传 NULL；非 NULL 时可接收步骤级运行事件回调（IRRecipeStepCallback）。
+ * IR_OK 表示测量完整完成；产品限值未满足时仍返回 IR_OK，result.json 的 run_status 为 NG。
+ * 设备只在本配方引用时连接。同一进程一次只运行一条配方，其间其他采集调用返回 IR_BUSY。
+ * 其他线程可以调用 IR_RequestStop。当前同步事务或计算结束后检查停止，由原线程完成收尾。
+ * result 由调用方持有，可传 NULL。执行和收尾均失败时，返回执行错误，收尾状态单独写入 result。
+ */
+IR_STATION_API int32_t IR_RunRecipeJson(const char *station_json_utf8,
     const char *recipe_json_utf8, const char *new_output_directory_utf8,
     const IRRecipeRunOptions *options, IRRecipeResult *result, char *err, int32_t err_bytes);
 

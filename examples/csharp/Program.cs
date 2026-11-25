@@ -23,34 +23,6 @@ internal static class IRStation
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct NoiseRecipe
-    {
-        public IntPtr RecipeId;
-        public ulong Detector;
-        public ulong Blackbody;
-        public int IntegrationUs;
-        public int FrameHz;
-        public int EmptyUs;
-        public double TemperatureC;
-        public double ToleranceC;
-        public int StableWindowMs;
-        public int StableTimeoutMs;
-        public int RequireDeviceStable;
-        public int Frames;
-        public int FrameTimeoutMs;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    internal struct NoiseResult
-    {
-        public int Completed;
-        public double MeanDn;
-        public double TemporalNoiseDn;
-        public int FailedStep;
-        public int CleanupStatus;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
     internal struct RecipeResult
     {
         public int CompletedFrames;
@@ -164,6 +136,17 @@ internal static class IRStation
     internal static extern int OpenFrames(int backend, byte[] source, int validBits,
         out Geometry geometry, byte[] error, int errorBytes);
 
+    [DllImport("IR_station", EntryPoint = "IR_StartFrames", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int StartFrames(byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_ReadFrames", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ReadFrames(int frames, int timeoutMs,
+        ushort[] pixels, long pixelCapacity, [Out] FrameStamp[] stamps, int stampCapacity,
+        out int completed, byte[] error, int errorBytes);
+
+    [DllImport("IR_station", EntryPoint = "IR_StopFrames", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int StopFrames(byte[] error, int errorBytes);
+
     [DllImport("IR_station", EntryPoint = "IR_FlushFrames", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int FlushFrames(int discardFrames, int timeoutMs,
         out int discarded, byte[] error, int errorBytes);
@@ -183,10 +166,6 @@ internal static class IRStation
     internal static extern int WaitBlackbodyStable(ulong handle, double targetC, double toleranceC,
         int stableWindowMs, int timeoutMs, int requireDeviceStable,
         out BlackbodyReading reading, byte[] error, int errorBytes);
-
-    [DllImport("IR_station", EntryPoint = "IR_RunNoise", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int RunNoise(ref NoiseRecipe recipe, IntPtr outputDirectory,
-        out NoiseResult result, byte[] error, int errorBytes);
 
     [DllImport("IR_station", EntryPoint = "IR_CloseFrames", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int CloseFrames(byte[] error, int errorBytes);
@@ -288,7 +267,7 @@ internal static class IRStation
         [MarshalAs(UnmanagedType.LPUTF8Str)] string stationJson,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string recipeJson,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string outputDirectory,
-        out RecipeResult result, byte[] error, int errorBytes);
+        IntPtr options, out RecipeResult result, byte[] error, int errorBytes);
 
     internal static void ConfigureNativeLibraries(string directory)
     {
@@ -472,9 +451,7 @@ internal static class Program
                 Console.Error.WriteLine("Set IR_SDK_LIB_DIR to the platform library directory.");
                 return 2;
             }
-            if (Marshal.SizeOf<IRStation.NoiseRecipe>() != 80 ||
-                Marshal.SizeOf<IRStation.NoiseResult>() != 32 ||
-                Marshal.SizeOf<IRStation.BlackbodyReading>() != 24 ||
+            if (Marshal.SizeOf<IRStation.BlackbodyReading>() != 24 ||
                 Marshal.SizeOf<IRStation.OvenReading>() != 24 ||
                 Marshal.SizeOf<IRStation.DmmReading>() != 16 ||
                 Marshal.SizeOf<IRStation.PowerReading>() != 40 ||
@@ -513,48 +490,52 @@ internal static class Program
                 throw new InvalidOperationException($"Unexpected capture device JSON: {devJson}");
 
             var source = Utf8Z(Path.GetFullPath(args[0]));
-            var outputText = args.Length == 2 ? Path.GetFullPath(args[1]) : null;
-            var output = outputText is null ? IntPtr.Zero :
-                Marshal.StringToCoTaskMemUTF8(outputText);
             var error = new byte[1024];
             var geometry = new IRStation.Geometry();
             var status = IRStation.OpenFrames(2, source, 0, out geometry, error, error.Length);
             if (status != 0)
             {
                 Console.Error.WriteLine($"IR_OpenFrames status={status}: {ErrorText(error)}");
-                if (output != IntPtr.Zero) Marshal.FreeCoTaskMem(output);
                 return status;
             }
 
-            var recipeId = Marshal.StringToCoTaskMemUTF8("csharp-offline-noise-example-1");
             try
             {
-                var recipe = new IRStation.NoiseRecipe
+                status = IRStation.StartFrames(error, error.Length);
+                if (status != 0)
                 {
-                    RecipeId = recipeId,
-                    Frames = 2,
-                    FrameTimeoutMs = 0
-                };
-                status = IRStation.RunNoise(ref recipe, output, out var result, error, error.Length);
+                    Console.Error.WriteLine($"IR_StartFrames status={status}: {ErrorText(error)}");
+                    return status;
+                }
+                var pixels = new ushort[geometry.Width * geometry.Height * 2];
+                var stamps = new IRStation.FrameStamp[2];
+                status = IRStation.ReadFrames(2, 0, pixels, pixels.Length, stamps, stamps.Length, out var completed, error, error.Length);
+                if (status != 0)
+                {
+                    Console.Error.WriteLine($"IR_ReadFrames status={status}: {ErrorText(error)}");
+                    return status;
+                }
+                var pixelCount = (long)geometry.Height * geometry.Width;
+                var meanMap = new double[pixelCount];
+                var stdMap = new double[pixelCount];
+                var summary = new double[2];
+                status = IRAnalysis.FrameStatisticsU16(pixels, pixels.LongLength, 2, geometry.Height, geometry.Width, 1,
+                    meanMap, stdMap, pixelCount, summary, summary.Length, error, error.Length);
                 Console.WriteLine($"width={geometry.Width} height={geometry.Height} valid_bits={geometry.ValidBits}");
-                Console.WriteLine($"status={status} completed={result.Completed} failed_step={result.FailedStep} cleanup_status={result.CleanupStatus}");
+                Console.WriteLine($"status={status} completed={completed}");
                 if (status == 0)
                 {
-                    Console.WriteLine($"mean_dn={result.MeanDn:R}\ntemporal_noise_dn={result.TemporalNoiseDn:R}");
+                    Console.WriteLine($"mean_dn={summary[0]:R}");
+                    Console.WriteLine($"temporal_noise_dn={summary[1]:R}");
                     var statsStatus = IRStation.GetCaptureStats(out var stats, error, error.Length);
                     if (statsStatus != 0 || stats.FramesDelivered < 2 || stats.QueueCapacity <= 0)
                         throw new InvalidOperationException($"IR_GetCaptureStats failed status={statsStatus}: {ErrorText(error)}");
                     Console.WriteLine($"frames_delivered={stats.FramesDelivered} queue_capacity={stats.QueueCapacity}");
                 }
-                else
-                {
-                    Console.Error.WriteLine($"IR_RunNoise: {ErrorText(error)}");
-                }
+                _ = IRStation.StopFrames(error, error.Length);
             }
             finally
             {
-                Marshal.FreeCoTaskMem(recipeId);
-                if (output != IntPtr.Zero) Marshal.FreeCoTaskMem(output);
                 var closeStatus = IRStation.CloseFrames(error, error.Length);
                 if (status == 0 && closeStatus != 0)
                 {

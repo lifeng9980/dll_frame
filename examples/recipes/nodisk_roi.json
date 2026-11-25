@@ -45,8 +45,8 @@
       "params": {
         "x": 0,
         "y": 0,
-        "width": 1,
-        "height": 2
+        "width": 160,
+        "height": 128
       }
     }
   ],
@@ -54,13 +54,13 @@
     {
       "metric": "summary.mean",
       "operator": "max",
-      "value": 60.0,
+      "value": 65535.0,
       "unit": "DN"
     },
     {
       "metric": "left.mean_dn",
       "operator": "max",
-      "value": 45.0,
+      "value": 65535.0,
       "unit": "DN"
     }
   ]

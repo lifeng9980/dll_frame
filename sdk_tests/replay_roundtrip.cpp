@@ -1,4 +1,5 @@
 #include "IR_station.h"
+#include "IR_recipe.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -26,10 +27,21 @@ std::string utf8(const fs::path &path)
 fs::path pathFromUtf8(const std::string &value)
 {
 #ifdef _WIN32
-    return fs::u8path(value);
+    return fs::path(std::u8string(value.begin(), value.end()));
 #else
     return fs::path(value);
 #endif
+}
+
+std::string escapeJson(const std::string &value)
+{
+    std::string out;
+    out.reserve(value.size() + 8);
+    for (char ch : value) {
+        if (ch == '\\' || ch == '"') out.push_back('\\');
+        out.push_back(ch);
+    }
+    return out;
 }
 
 class TemporaryDirectory {
@@ -126,17 +138,22 @@ int main()
 
         open(inputPath);
         read();
-        IRNoiseRecipe recipe{};
-        recipe.recipe_id = "roundtrip";
-        recipe.frames = 2;
-        IRNoiseResult result{};
-        const auto outputPath = utf8(saved);
-        check(IR_RunNoise(&recipe, outputPath.c_str(), &result, error, sizeof error) == IR_OK, error);
-        check(result.completed == 2 &&
-              std::abs(result.temporal_noise_dn - 5 / std::sqrt(2.0)) < 1e-12, "sample noise");
-        check(IR_RunNoise(&recipe, outputPath.c_str(), &result, error, sizeof error) == IR_IO_ERROR,
-              "reject existing output");
         check(IR_CloseFrames(error, sizeof error) == IR_OK, error);
+
+        const std::string outputPath = utf8(saved);
+        const std::string stationJson = std::string("{\"schemav\":1,\"acquisition\":{\"backend\":\"raw_replay\",\"source\":\"") +
+            escapeJson(inputPath) + "\",\"valid_bits\":0}}";
+        const std::string recipeJson = R"({"schemav":1,"recipe_id":"roundtrip","steps":[)"
+            R"({"id":"cap","type":"capture","frames":2,"frame_timeout_ms":0,"output":"b"},)"
+            R"({"id":"noise","type":"analyze","method":"temporal_noise","name":"noise","input":"b"},)"
+            R"({"id":"save","type":"save_raw","input":"b"}]})";
+        IRRecipeResult rr{};
+        check(IR_RunRecipeJson(stationJson.c_str(), recipeJson.c_str(), outputPath.c_str(),
+                               nullptr, &rr, error, sizeof error) == IR_OK, error);
+        check(rr.completed_frames == 2, "roundtrip completed_frames");
+        check(IR_RunRecipeJson(stationJson.c_str(), recipeJson.c_str(), outputPath.c_str(),
+                               nullptr, &rr, error, sizeof error) == IR_IO_ERROR,
+              "reject existing output");
         open(outputPath);
         read();
         check(IR_CloseFrames(error, sizeof error) == IR_OK, error);
@@ -144,14 +161,13 @@ int main()
         const auto unknownPath = utf8(unknownBits);
         check(IR_OpenFrames(IR_RAW_REPLAY, unknownPath.c_str(), 0, &geometry, error, sizeof error) == IR_OK, error);
         check(geometry.valid_bits == 0, "unknown valid bits");
-        IRNoiseRecipe unknownRecipe{};
-        unknownRecipe.recipe_id = "unknown-valid-bits";
-        unknownRecipe.frames = 2;
-        IRNoiseResult unknownResult{};
-        const auto unknownSavedPath = utf8(unknownBitsSaved);
-        check(IR_RunNoise(&unknownRecipe, unknownSavedPath.c_str(), &unknownResult,
-                          error, sizeof error) == IR_OK, error);
         check(IR_CloseFrames(error, sizeof error) == IR_OK, error);
+
+        const std::string unknownStationJson = std::string("{\"schemav\":1,\"acquisition\":{\"backend\":\"raw_replay\",\"source\":\"") +
+            escapeJson(unknownPath) + "\",\"valid_bits\":0}}";
+        const auto unknownSavedPath = utf8(unknownBitsSaved);
+        check(IR_RunRecipeJson(unknownStationJson.c_str(), recipeJson.c_str(), unknownSavedPath.c_str(),
+                               nullptr, &rr, error, sizeof error) == IR_OK, error);
         check(IR_OpenFrames(IR_RAW_REPLAY, unknownSavedPath.c_str(), 0, &geometry,
                             error, sizeof error) == IR_OK, error);
         check(geometry.valid_bits == 0, "saved unknown valid bits");

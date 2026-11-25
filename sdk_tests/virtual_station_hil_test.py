@@ -127,7 +127,7 @@ def verify_serial_map_config_builders():
         "detector": {"port": "COM17", "client_port": "COM16", "baud_rate": 115200, "stop_bits": 1},
         "cooler": {"port": "COM19", "client_port": "COM18", "baud_rate": 9600, "stop_bits": 2},
     }
-    st = build_station_json(endpoints, REPO_ROOT / "examples/data/raw16")
+    st = build_station_json(endpoints, REPO_ROOT / "examples/data/tc002a_640")
     assert st["devices"]["bb"]["kind"] == "dcn1000"
     assert st["devices"]["bb"]["connection"]["port"] == "COM20"
     assert st["devices"]["supply"]["connection"]["port"] == "COM10"
@@ -164,7 +164,7 @@ def main():
         work = Path(tmp)
         station_path = work / "station.json"
         host_bb_path = work / "host_blackbody.json"
-        raw_dir = REPO_ROOT / "examples/data/raw16"
+        raw_dir = REPO_ROOT / "examples/data/tc002a_640"
         recipe_path = REPO_ROOT / "examples/recipes/virtual_station_hil.json"
 
         sim_cmd = [
@@ -300,9 +300,11 @@ def main():
             assert math.isclose(record["metrics"]["dmm.value"]["value"], 1.080, abs_tol=1e-6)
             assert math.isclose(record["metrics"]["cooler.voltage_mv"]["value"], 1080.0, abs_tol=1e-6)
             assert math.isclose(record["metrics"]["det_curr.current_ma"]["value"], 15.0, abs_tol=1e-2)
-            assert math.isclose(record["metrics"]["stats.mean_dn"]["value"], 21.0, abs_tol=1e-9)
-            assert math.isclose(record["metrics"]["spatial_fft.dc_magnitude"]["value"], 21.0, abs_tol=1e-9)
-            assert math.isclose(record["metrics"]["spatial_fft.peak_ac_magnitude"]["value"], 0.0, abs_tol=1e-9)
+            mean_dn = record["metrics"]["stats.mean_dn"]["value"]
+            dc_mag = record["metrics"]["spatial_fft.dc_magnitude"]["value"]
+            assert mean_dn > 1000.0
+            assert math.isclose(dc_mag, mean_dn, rel_tol=1e-6)
+            assert math.isfinite(record["metrics"]["spatial_fft.peak_ac_magnitude"]["value"])
             wait_rows = [
                 r for r in record.get("instrument_readings", [])
                 if r.get("step") == "pwr_ch1_wait" and r.get("operation") == "power_wait_stable"

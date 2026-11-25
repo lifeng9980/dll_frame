@@ -1,9 +1,6 @@
-#include "save_raw.h"
-#include "measurement.h"
-#include "IR_analysis.h"
+#include "recipe_runtime_common.h"
 #include "api_common.h"
-#include "station/version.h"
-#include <nlohmann/json.hpp>
+#include "utf8_path.h"
 #include <atomic>
 #include <bit>
 #include <cerrno>
@@ -19,7 +16,9 @@
 #include <Windows.h>
 #else
 #include <fcntl.h>
+#if defined(__linux__)
 #include <linux/fs.h>
+#endif
 #include <sys/syscall.h>
 #include <unistd.h>
 #endif
@@ -28,13 +27,14 @@ namespace ir::procedures {
 using namespace ir::api;
 namespace fs = std::filesystem;
 namespace {
-const char *backendName(int backend)
+const char *timeOriginName(int32_t origin) noexcept
 {
-    switch (backend) {
-    case IR_RAW_REPLAY: return "raw_replay";
-    case IR_DIRECTSHOW: return "directshow";
-    case IR_V4L2: return "v4l2";
-    default: return "unknown";
+    switch (origin) {
+    case IR_TIME_SOURCE: return "source";
+    case IR_TIME_HOST: return "host";
+    case IR_TIME_RECORDED_MONOTONIC: return "recorded_monotonic";
+    case IR_TIME_RECORDED_RELATIVE: return "recorded_relative";
+    default: return "none";
     }
 }
 
@@ -108,14 +108,20 @@ public:
             throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
                                     "Cannot publish capture directory");
 #else
+        bool published = false;
+#if defined(__linux__) && defined(SYS_renameat2) && defined(RENAME_NOREPLACE)
         if (::syscall(SYS_renameat2, AT_FDCWD, path_.c_str(), AT_FDCWD,
-                      destination.c_str(), RENAME_NOREPLACE) != 0) {
+                      destination.c_str(), RENAME_NOREPLACE) == 0) {
+            published = true;
+        } else {
             const auto renameError = errno;
             if (renameError != EINVAL && renameError != ENOSYS && renameError != EOPNOTSUPP)
                 throw std::system_error(renameError, std::system_category(),
                                         "Cannot publish capture directory");
-
-            // WSL's /mnt filesystems may not implement renameat2(RENAME_NOREPLACE).
+        }
+#endif
+        if (!published) {
+            // WSL's /mnt or non-Linux POSIX filesystems may not implement renameat2(RENAME_NOREPLACE).
             // Reserve the new name, then rename the complete staging directory over it.
             std::error_code createError;
             if (!fs::create_directory(destination, createError)) {
@@ -168,7 +174,7 @@ void writeFrameBatchFiles(const fs::path &directory, IRGeometry geometry,
     std::ostringstream csv;
     csv.imbue(std::locale::classic());
     csv << "frame_index,application_sequence,driver_frame_number,lost_frames,width,height,stride_bytes,pixel_format,bit_depth,endianness,"
-           "source_timestamp_ns,received_monotonic_ns,monotonic_ms,relative_time_ms,callback_sequence,pixels_inverted\n";
+           "source_timestamp_ns,received_monotonic_ns,monotonic_ms,relative_time_ms,callback_sequence,pixels_inverted,timestamp_ms,time_origin,delta_ms\n";
     for (size_t index = 0; index < stamps.size(); ++index) {
         const auto &stamp = stamps[index];
         const auto sourceTime = stamp.time_origin == IR_TIME_SOURCE ? integerText(stamp.timestamp_ns) : "";
@@ -177,6 +183,13 @@ void writeFrameBatchFiles(const fs::path &directory, IRGeometry geometry,
             ? decimalMilliseconds(stamp.timestamp_ns) : "";
         const auto relative = stamp.time_origin == IR_TIME_RECORDED_RELATIVE
             ? decimalMilliseconds(stamp.timestamp_ns) : "";
+        const auto timestampMs = stamp.time_origin != IR_TIME_UNKNOWN
+            ? decimalMilliseconds(stamp.timestamp_ns) : "";
+        std::string deltaMs;
+        if (index > 0 && stamp.time_origin != IR_TIME_UNKNOWN &&
+            stamps[index - 1].time_origin == stamp.time_origin) {
+            deltaMs = decimalMilliseconds(stamp.timestamp_ns - stamps[index - 1].timestamp_ns);
+        }
 
         csv << index << ','
             << (stamp.fields & IR_HAS_SEQUENCE ? integerText(stamp.sequence) : "") << ','
@@ -185,7 +198,8 @@ void writeFrameBatchFiles(const fs::path &directory, IRGeometry geometry,
             << geometry.width << ',' << geometry.height << ',' << geometry.width * 2 << ",RAW16_LE,"
             << geometry.valid_bits << ",little," << sourceTime << ',' << hostTime << ',' << monotonic << ','
             << relative << ',' << ((stamp.fields & IR_SEQUENCE_IS_CALLBACK) ? 1 : 0) << ','
-            << ((stamp.fields & IR_PIXELS_INVERTED) ? 1 : 0) << '\n';
+            << ((stamp.fields & IR_PIXELS_INVERTED) ? 1 : 0) << ','
+            << timestampMs << ',' << timeOriginName(stamp.time_origin) << ',' << deltaMs << '\n';
     }
     const auto csvText = csv.str();
     writeFile(directory / "frames.csv", csvText.data(), csvText.size());
@@ -202,7 +216,7 @@ void saveRecipeArtifacts(const fs::path &destination, const std::vector<SavedBat
         require(batch.frames != nullptr && batch.stamps != nullptr, IR_NULL_POINTER, "Missing batch buffer");
         const auto targetDir = batch.subdir.empty()
             ? stage.path()
-            : (stage.path() / fs::path(reinterpret_cast<const char8_t *>(batch.subdir.c_str())));
+            : (stage.path() / ir::utf8::pathFromUtf8(batch.subdir));
         writeFrameBatchFiles(targetDir, batch.geometry, *batch.frames, *batch.stamps);
     }
     writeFile(stage.path() / "result.json", resultJson.data(), resultJson.size());
@@ -233,56 +247,6 @@ void writeTextFileAtomicOrDirect(const fs::path &filePath, const std::string &co
         throw fs::filesystem_error("Cannot finalize output text file", filePath, ec);
     }
 #endif
-}
-
-void saveFrameBatch(const fs::path &path, IRGeometry geometry,
-    const std::vector<uint16_t> &frames, const std::vector<IRFrameStamp> &stamps,
-    const std::string &resultJson)
-{
-    saveRecipeArtifacts(path, {{"", geometry, &frames, &stamps}}, resultJson);
-}
-
-void saveNoiseRun(const fs::path &path, const IRNoiseRecipe &recipe, int backend,
-    const std::string &sourceName, IRGeometry geometry,
-    const std::vector<uint16_t> &frames, const std::vector<IRFrameStamp> &stamps,
-    const IRNoiseResult &result, double blackbodySetpointReadback,
-    const IRBlackbodyReading *blackbodyReading, const std::string &startedUtc)
-{
-    const auto finishedUtc = utcTimestampNow();
-    nlohmann::json record{
-        {"recipe_id", recipe.recipe_id},
-        {"station_version", IR_StationVersion()},
-        {"analysis_version", IR_AnalysisVersion()},
-        {"source_commit", ir::station::sourceCommit()},
-        {"started_utc", startedUtc},
-        {"finished_utc", finishedUtc},
-        {"backend", backendName(backend)},
-        {"source_name", sourceName},
-        {"width", geometry.width}, {"height", geometry.height},
-        {"valid_bits", geometry.valid_bits}, {"requested_frames", recipe.frames},
-        {"completed_frames", result.completed}, {"frame_timeout_ms", recipe.frame_timeout_ms},
-        {"mean_dn", result.mean_dn}, {"temporal_noise_dn", result.temporal_noise_dn},
-        {"estimator", "mean_pixel_sample_std"}, {"unit", "DN"}
-    };
-    if (recipe.detector) {
-        record["detector"] = {{"integration_us", recipe.integration_us},
-                              {"frame_hz", recipe.frame_hz}, {"empty_us", recipe.empty_us}};
-    }
-    if (recipe.blackbody) {
-        record["blackbody"] = {
-            {"temperature_c", recipe.temperature_c},
-            {"setpoint_readback_c", blackbodySetpointReadback},
-            {"actual_c", blackbodyReading->actual_c},
-            {"device_stable", bool(blackbodyReading->stable)},
-            {"tolerance_c", recipe.tolerance_c},
-            {"stable_window_ms", recipe.stable_window_ms},
-            {"stable_timeout_ms", recipe.stable_timeout_ms},
-            {"require_device_stable", bool(recipe.require_device_stable)}
-        };
-    }
-    auto jsonText = record.dump(2);
-    jsonText.push_back('\n');
-    saveFrameBatch(path, geometry, frames, stamps, jsonText);
 }
 
 }

@@ -230,8 +230,7 @@ int main(int argc, char **argv)
     // 3. End-to-end PASS + NG + plugin provenance + step_records
     const fs::path outPass = root.path() / "out_pass";
     IRRecipeResult rr{};
-    CHECK(IR_RunRecipeJson(stGood.c_str(), goodPassRecipe.dump().c_str(),
-                           utf8(outPass).c_str(), &rr, err, sizeof err) == IR_OK);
+    CHECK(IR_RunRecipeJson(stGood.c_str(), goodPassRecipe.dump().c_str(), utf8(outPass).c_str(), nullptr, &rr, err, sizeof err) == IR_OK);
     CHECK(rr.cleanup_status == IR_OK && rr.completed_frames == 2);
     const Json recPass = Json::parse(readText(outPass / "result.json"));
     CHECK(recPass.at("run_status") == "PASS");
@@ -250,8 +249,7 @@ int main(int argc, char **argv)
     Json ngRecipe = goodPassRecipe;
     ngRecipe["limits"][0]["value"] = 50.0;
     const fs::path outNg = root.path() / "out_ng";
-    CHECK(IR_RunRecipeJson(stGood.c_str(), ngRecipe.dump().c_str(),
-                           utf8(outNg).c_str(), &rr, err, sizeof err) == IR_OK);
+    CHECK(IR_RunRecipeJson(stGood.c_str(), ngRecipe.dump().c_str(), utf8(outNg).c_str(), nullptr, &rr, err, sizeof err) == IR_OK);
     CHECK(Json::parse(readText(outNg / "result.json")).at("run_status") == "NG");
 
     // 4. repeat_burst reusing span_map under tight max_inflight_bytes (must not double-charge)
@@ -275,8 +273,7 @@ int main(int argc, char **argv)
         })}
     };
     const fs::path outBurst = root.path() / "out_burst";
-    CHECK(IR_RunRecipeJson(tightStation.dump().c_str(), burstRecipe.dump().c_str(),
-                           utf8(outBurst).c_str(), &rr, err, sizeof err) == IR_OK);
+    CHECK(IR_RunRecipeJson(tightStation.dump().c_str(), burstRecipe.dump().c_str(), utf8(outBurst).c_str(), nullptr, &rr, err, sizeof err) == IR_OK);
     CHECK(rr.completed_frames == 6);
 
     // 5. Runtime over-budget plugin allocation inside execute() rejected at ANALYZE with IR_BAD_ARGUMENT
@@ -295,11 +292,10 @@ int main(int argc, char **argv)
         })}
     };
     const fs::path outBudget = root.path() / "out_budget";
-    CHECK(IR_RunRecipeJson(tinyStation.dump().c_str(), overBudgetRecipe.dump().c_str(),
-                           utf8(outBudget).c_str(), &rr, err, sizeof err) == IR_BAD_ARGUMENT);
+    CHECK(IR_RunRecipeJson(tinyStation.dump().c_str(), overBudgetRecipe.dump().c_str(), utf8(outBudget).c_str(), nullptr, &rr, err, sizeof err) == IR_BAD_ARGUMENT);
     CHECK(rr.failed_stage == IR_RECIPE_STAGE_ANALYZE);
     CHECK(rr.completed_frames == 2);
-    CHECK(!fs::exists(outBudget));
+    CHECK(Json::parse(readText(outBudget / "result.json")).at("run_status") == "ERROR");
 
     // 6. C++ exception isolation -> IR_COMPUTATION_FAILED
     const Json throwRecipe{
@@ -311,8 +307,7 @@ int main(int argc, char **argv)
         })}
     };
     const fs::path outThrow = root.path() / "out_throw";
-    CHECK(IR_RunRecipeJson(stGood.c_str(), throwRecipe.dump().c_str(),
-                           utf8(outThrow).c_str(), &rr, err, sizeof err) == IR_COMPUTATION_FAILED);
+    CHECK(IR_RunRecipeJson(stGood.c_str(), throwRecipe.dump().c_str(), utf8(outThrow).c_str(), nullptr, &rr, err, sizeof err) == IR_COMPUTATION_FAILED);
     CHECK(rr.failed_stage == IR_RECIPE_STAGE_ANALYZE);
     CHECK(rr.failed_step_index == 1);
     CHECK(rr.cleanup_status == IR_OK);
@@ -348,7 +343,7 @@ int main(int argc, char **argv)
     };
     IRRecipeRunOptions opts{sizeof(IRRecipeRunOptions), 0, onStep, &cancelCtx};
     const fs::path outCancel = root.path() / "out_cancel";
-    const int32_t cancelStatus = IR_RunRecipeJsonEx(
+    const int32_t cancelStatus = IR_RunRecipeJson(
         stGood.c_str(), slowRecipe.dump().c_str(), utf8(outCancel).c_str(),
         &opts, &rr, err, sizeof err);
     if (cancelCtx.stopper.joinable())
@@ -357,7 +352,7 @@ int main(int argc, char **argv)
     CHECK(rr.cleanup_status == IR_OK);
     CHECK(cancelCtx.sawSlowStart.load());
     CHECK(cancelCtx.sawSlowFailed.load());
-    CHECK(!fs::exists(outCancel));
+    CHECK(Json::parse(readText(outCancel / "result.json")).at("run_status") == "CANCELLED");
 
     // 8. Same-step input/output slot aliasing safety & duplicate output slot rejection
     const Json aliasRecipe{
@@ -372,8 +367,7 @@ int main(int argc, char **argv)
         })}
     };
     const fs::path outAlias = root.path() / "out_alias";
-    CHECK(IR_RunRecipeJson(stGood.c_str(), aliasRecipe.dump().c_str(),
-                           utf8(outAlias).c_str(), &rr, err, sizeof err) == IR_OK);
+    CHECK(IR_RunRecipeJson(stGood.c_str(), aliasRecipe.dump().c_str(), utf8(outAlias).c_str(), nullptr, &rr, err, sizeof err) == IR_OK);
     const Json recAlias = Json::parse(readText(outAlias / "result.json"));
     CHECK(std::abs(recAlias.at("metrics").at("add.mean_out").at("value").get<double>() - 12.0) < 1e-12);
 
@@ -399,9 +393,8 @@ int main(int argc, char **argv)
         })}
     };
     const fs::path outNan = root.path() / "out_nan";
-    CHECK(IR_RunRecipeJson(stGood.c_str(), nanRecipe.dump().c_str(),
-                           utf8(outNan).c_str(), &rr, err, sizeof err) == IR_COMPUTATION_FAILED);
-    CHECK(!fs::exists(outNan));
+    CHECK(IR_RunRecipeJson(stGood.c_str(), nanRecipe.dump().c_str(), utf8(outNan).c_str(), nullptr, &rr, err, sizeof err) == IR_COMPUTATION_FAILED);
+    CHECK(Json::parse(readText(outNan / "result.json")).at("run_status") == "ERROR");
 
     if (gFailures == 0)
         std::cout << "plugin_abi_test: ALL PASSED\n";

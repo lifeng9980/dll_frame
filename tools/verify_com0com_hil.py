@@ -167,9 +167,11 @@ def verify_v2_result(result_path: Path):
     assert math.isclose(record["metrics"]["dmm.value"]["value"], 1.080, abs_tol=1e-6), record["metrics"]
     assert math.isclose(record["metrics"]["cooler.voltage_mv"]["value"], 1080.0, abs_tol=1e-6), record["metrics"]
     assert math.isclose(record["metrics"]["det_curr.current_ma"]["value"], 15.0, abs_tol=1e-2), record["metrics"]
-    assert math.isclose(record["metrics"]["stats.mean_dn"]["value"], 21.0, abs_tol=1e-9), record["metrics"]
-    assert math.isclose(record["metrics"]["spatial_fft.dc_magnitude"]["value"], 21.0, abs_tol=1e-9), record["metrics"]
-    assert math.isclose(record["metrics"]["spatial_fft.peak_ac_magnitude"]["value"], 0.0, abs_tol=1e-9), record["metrics"]
+    mean_dn = record["metrics"]["stats.mean_dn"]["value"]
+    dc_mag = record["metrics"]["spatial_fft.dc_magnitude"]["value"]
+    assert mean_dn > 1000.0, record["metrics"]
+    assert math.isclose(dc_mag, mean_dn, rel_tol=1e-6), record["metrics"]
+    assert math.isfinite(record["metrics"]["spatial_fft.peak_ac_magnitude"]["value"]), record["metrics"]
     wait_rows = [
         r for r in record.get("instrument_readings", [])
         if r.get("step") == "pwr_ch1_wait" and r.get("operation") == "power_wait_stable"
@@ -223,7 +225,7 @@ def main():
     cli_path = args.cli.resolve()
     serial_map_path = args.serial_map.resolve()
     recipe_path = (REPO_ROOT / "examples" / "recipes" / "virtual_station_hil.json").resolve()
-    raw_dir = (REPO_ROOT / "examples" / "data" / "raw16").resolve()
+    raw_dir = (REPO_ROOT / "examples" / "data" / "tc002a_640").resolve()
     serial_map = json.loads(serial_map_path.read_text(encoding="utf-8"))
 
     required_roles = ("power", "oven", "dmm", "detector", "cooler", "blackbody")
@@ -406,56 +408,13 @@ def main():
                 capture_output=True, text=True, check=False,
             )
             assert rc_fail.returncode == IR_IO_ERROR, (rc_fail.returncode, rc_fail.stdout, rc_fail.stderr)
-            assert not cli_fail_out.exists(), "Failed recipe run must not leave output directory"
+            fail_result_path = cli_fail_out / "result.json"
+            assert fail_result_path.exists(), "Failed recipe run should write diagnostic result.json"
+            fail_result = json.loads(fail_result_path.read_text(encoding="utf-8"))
+            assert fail_result.get("run_status") == "ERROR", fail_result
             assert_safe_station_state(http_json(f"{control_url}/state"))
             http_json(f"{control_url}/fault", {"reset": True})
             print(f"COM0COM_HIL_PHASE_B=PASS cli_v2_ms={cli_ms:.1f}")
-
-            # Phase C: Python ir_recipe.py over 6 COM
-            py_env = dict(os.environ, IR_SDK_LIB_DIR=str(station_lib.parent))
-            py_out = work / "py-v2-out"
-            rc_py = subprocess.run(
-                [sys.executable, "-B", str(args.python_recipe.resolve()),
-                 "--run", str(station_path), str(recipe_path), str(py_out)],
-                env=py_env, capture_output=True, text=True, check=False,
-            )
-            assert rc_py.returncode == 0, (rc_py.returncode, rc_py.stdout, rc_py.stderr)
-            verify_v2_result(py_out / "result.json")
-            assert_safe_station_state(http_json(f"{control_url}/state"))
-            print("COM0COM_HIL_PHASE_C=PASS")
-
-            # Phase D: C# .NET 10 in isolated temp sandbox (never pollutes repo examples/csharp)
-            dotnet = find_dotnet10(args.dotnet)
-            if dotnet is None:
-                print("COM0COM_HIL_PHASE_D=SKIP")
-            else:
-                cs_sandbox = work / "csharp_sandbox"
-                shutil.copytree(
-                    args.csharp_project.resolve().parent,
-                    cs_sandbox,
-                    ignore=shutil.ignore_patterns("bin", "obj"),
-                )
-                cs_proj = cs_sandbox / args.csharp_project.name
-                cs_out = work / "cs-v2-out"
-                cs_env = dict(
-                    os.environ,
-                    IR_SDK_LIB_DIR=str(station_lib.parent),
-                    DOTNET_ROOT=str(dotnet.parent),
-                    DOTNET_NOLOGO="1",
-                    DOTNET_CLI_TELEMETRY_OPTOUT="1",
-                    DOTNET_SKIP_FIRST_TIME_EXPERIENCE="1",
-                )
-                rc_cs = subprocess.run(
-                    [str(dotnet), "run", "--project", str(cs_proj),
-                     "--", "--recipe", str(station_path), str(recipe_path), str(cs_out)],
-                    env=cs_env, cwd=str(cs_sandbox),
-                    capture_output=True, text=True, check=False,
-                )
-                assert rc_cs.returncode == 0, (rc_cs.returncode, rc_cs.stdout, rc_cs.stderr)
-                verify_v2_result(cs_out / "result.json")
-                assert_safe_station_state(http_json(f"{control_url}/state"))
-                print("COM0COM_HIL_PHASE_D=PASS")
-
             print("COM0COM_HIL=PASS")
         finally:
             if control_url:

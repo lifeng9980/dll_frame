@@ -2,7 +2,7 @@
   "schemav": 1,
   "acquisition": {
     "backend": "raw_replay",
-    "source": "../data/raw16",
+    "source": "../data/tc002a_640",
     "valid_bits": 16
   },
   "devices": {

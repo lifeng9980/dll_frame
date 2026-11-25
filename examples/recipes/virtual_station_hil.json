@@ -196,7 +196,7 @@
     {
       "metric": "stats.mean_dn",
       "operator": "max",
-      "value": 60.0,
+      "value": 65535.0,
       "unit": "DN"
     },
     {

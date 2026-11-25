@@ -1,12 +1,7 @@
 #include "IR_device.h"
 #include "api_common.h"
-#include "station/instruments/blackbody/doc058.h"
-#include "station/instruments/cooler/cooler_modbus.h"
-#include "station/instruments/detector/detector_serial.h"
-#include "station/instruments/device_lease.h"
-#include "station/instruments/dmm/dmm6500.h"
-#include "station/instruments/oven/gws_sten.h"
-#include "station/instruments/power/it6332a.h"
+#include "device_lease.h"
+#include "drivers.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cmath>

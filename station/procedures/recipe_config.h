@@ -9,13 +9,13 @@
 #include <cstdint>
 #include <limits>
 #include <map>
-#include <span>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
 namespace ir::procedures::recipe {
-class IMetricProviderV2;
 using Json = nlohmann::json;
 
 struct DeviceConfig {
@@ -128,14 +128,14 @@ struct FlushStep {
     int32_t timeoutMs{};
 };
 
-struct CaptureStepV2 {
+struct CaptureStep {
     StepRef ref;
     int32_t frames{};
     int32_t timeoutMs{};
     std::string outputSlot;
 };
 
-struct SaveRawStepV2 {
+struct SaveRawStep {
     StepRef ref;
     std::string inputSlot;
     std::string subdir;
@@ -210,42 +210,46 @@ struct PowerWaitStableStep {
     IRPowerCurrentStableSpec spec{};
 };
 
-struct MetricOutputV2 {
+struct PluginProvenance {
+    std::string id;
+    std::string version;
+    std::string file;
+    std::string sha256;
+};
+
+struct MetricOutput {
     std::string suffix;
     std::string unit;
     std::string method;
     int32_t version{1};
-    std::string pluginId;
-    std::string pluginVersion;
-    std::string pluginFile;
-    std::string pluginSha256;
+    std::optional<PluginProvenance> plugin;
 };
 
 struct AnalysisRunContext {
     ExecutionContext &ctx;
-    const ir::acquisition::Capture &capture;
+    std::function<bool()> isStopRequested;
     uint64_t inflightBaseBytes{0};
     uint64_t maxInflightBytes{0};
 };
 
-struct MetricV2Operations {
+struct MetricOperations {
     std::function<void(IRGeometry)> checkGeometry;
     std::function<void(AnalysisRunContext &)> execute;
 };
 
-struct AnalysisStepV2 {
+struct AnalysisStep {
     StepRef ref;
     std::string name;
     std::string method;
     int32_t version{1};
-    std::vector<MetricOutputV2> outputs;
-    MetricV2Operations operations;
+    std::vector<MetricOutput> outputs;
+    MetricOperations operations;
 };
 
-using InnerStepV2 = std::variant<
+using InnerStep = std::variant<
     BlackbodyStep, PowerStep, PowerWaitStableStep, OvenStabilizeStep, OvenStandbyStep, DmmReadStep,
     DetectorTimingStep, DetectorGpolStep, DetectorRegisterStep, DetectorCurrentStep,
-    CoolerReadStep, FlushStep, CaptureStepV2, AnalysisStepV2>;
+    CoolerReadStep, FlushStep, CaptureStep, AnalysisStep>;
 
 struct RepeatBurstStep {
     StepRef ref;
@@ -254,22 +258,23 @@ struct RepeatBurstStep {
     double intervalSec{0.0};
     std::string csvFile{"burst_summary.csv"};
     std::vector<std::string> recordMetrics;
-    std::vector<InnerStepV2> steps;
+    std::vector<InnerStep> steps;
 };
 
-using StepV2 = std::variant<
+using RecipeStep = std::variant<
     BlackbodyStep, PowerStep, PowerWaitStableStep, OvenStabilizeStep, OvenStandbyStep, DmmReadStep,
     DetectorTimingStep, DetectorGpolStep, DetectorRegisterStep, DetectorCurrentStep,
-    CoolerReadStep, FlushStep, CaptureStepV2, AnalysisStepV2, SaveRawStepV2,
+    CoolerReadStep, FlushStep, CaptureStep, AnalysisStep, SaveRawStep,
     RepeatBurstStep>;
 
-struct RecipeConfigV2 {
+struct RecipeConfig {
     std::string id;
-    std::vector<StepV2> steps;
+    std::vector<RecipeStep> steps;
     std::vector<Limit> limits;
     std::vector<std::string> deviceAliases;
     std::vector<StandbyBlackbody> standbyBlackbodies;
     std::vector<std::string> standbyOvens;
+    std::map<std::string, std::string> metricUnits;
     Json definition;
     bool hasRepeatBurst{false};
     size_t doubleMapSlotCount{};
@@ -277,12 +282,19 @@ struct RecipeConfigV2 {
     size_t driftContextSlotCount{};
 };
 
+struct ExternalMetricResolver {
+    std::function<bool(std::string_view)> handlesMethod;
+    std::function<AnalysisStep(StepRef, const std::string &, const std::string &, int32_t,
+                               const Json &, const std::string &,
+                               std::map<std::string, SlotKind> &)> prepareMetric;
+};
+
 StationConfig parseStation(const char *text);
-RecipeConfigV2 parseRecipeV2(const char *text, const StationConfig &station,
-                             const IMetricProviderV2 *externalMetrics = nullptr);
-void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station,
-                 const RecipeConfigV2 &recipe, const char *directory, IRRecipeResult &result,
-                 const IRRecipeRunOptions *options = nullptr);
+RecipeConfig parseRecipe(const char *text, const StationConfig &station,
+                         const ExternalMetricResolver *externalMetrics = nullptr);
+void runRecipe(ir::acquisition::Capture &capture, const StationConfig &station,
+               const RecipeConfig &recipe, const char *directory, IRRecipeResult &result,
+               const IRRecipeRunOptions *options = nullptr);
 
 uint64_t addBytes(uint64_t total, uint64_t additional);
 uint64_t multiplyBytes(uint64_t count, uint64_t itemBytes);
@@ -308,7 +320,7 @@ BlackbodyStep parseBlackbodyStep(StepRef ref, const Json &fields, const std::str
                                  const StationConfig &station);
 PowerStep parsePowerStep(StepRef ref, const std::string &type, const Json &fields,
                          const std::string &path, const StationConfig &station);
-AnalysisStepV2 prepareAnalysisV2(StepRef ref, const Json &fields, const std::string &path,
-                                 std::map<std::string, SlotKind> &knownSlots,
-                                 const IMetricProviderV2 *externalMetrics = nullptr);
+AnalysisStep prepareAnalysis(StepRef ref, const Json &fields, const std::string &path,
+                             std::map<std::string, SlotKind> &knownSlots,
+                             const ExternalMetricResolver *externalMetrics = nullptr);
 } // namespace ir::procedures::recipe

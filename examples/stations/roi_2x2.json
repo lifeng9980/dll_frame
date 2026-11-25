@@ -1,9 +1,0 @@
-{
-  "schemav": 1,
-  "acquisition": {
-    "backend": "raw_replay",
-    "source": "../data/roi_2x2",
-    "valid_bits": 16
-  },
-  "devices": {}
-}

@@ -409,13 +409,14 @@ void testPublicCApiConcurrentPreviewAndStats()
     CHECK(cancelledCompleted == 0);
     CHECK(IR_StopFrames(err, sizeof err) == IR_OK);
 
-    IRNoiseRecipe recipe{};
-    recipe.recipe_id = "frame-queue-replay";
-    recipe.frames = 20;
-    recipe.frame_timeout_ms = 0;
-    IRNoiseResult nr{};
-    CHECK(IR_RunNoise(&recipe, nullptr, &nr, err, sizeof err) == IR_OK);
-    CHECK(nr.completed == 20);
+    CHECK(IR_StartFrames(err, sizeof err) == IR_OK);
+    std::vector<uint16_t> batchBuf(20ULL * nPix);
+    std::vector<IRFrameStamp> batchStamps(20);
+    int32_t batchCompleted = 0;
+    CHECK(IR_ReadFrames(20, 0, batchBuf.data(), static_cast<int64_t>(batchBuf.size()),
+                        batchStamps.data(), 20, &batchCompleted, err, sizeof err) == IR_OK);
+    CHECK(batchCompleted == 20);
+    CHECK(IR_StopFrames(err, sizeof err) == IR_OK);
 
     stopPoll.store(true, std::memory_order_release);
     pollThread.join();

@@ -1,25 +1,15 @@
 #include "IR_recipe.h"
-#include "IR_analysis.h"
 #include "api_common.h"
 #include "recipe_config.h"
 #include "recipe_runtime_common.h"
-#include "save_raw.h"
 #include "station/acquisition/frame_source.h"
-#include "station/instruments/device_lease.h"
-#include "station/plugins/plugin_metric_provider.h"
-#include "station/version.h"
-#include <algorithm>
-#include <chrono>
-#include <exception>
-#include <filesystem>
+#include "station/plugins/plugin_host_adapter.h"
 #include <memory>
-#include <optional>
 
 namespace {
 using namespace ir::api;
 using namespace ir::procedures;
 using namespace ir::procedures::recipe;
-namespace fs = std::filesystem;
 
 std::unique_ptr<ir::plugins::PluginMetricProvider> loadPluginProviderIfNeeded(
     const StationConfig &station)
@@ -33,7 +23,25 @@ std::unique_ptr<ir::plugins::PluginMetricProvider> loadPluginProviderIfNeeded(
         throw Error(st, pluginErr);
     return provider;
 }
+
+ExternalMetricResolver makeExternalResolver(const ir::plugins::PluginMetricProvider *provider,
+                                            ExternalMetricResolver &storage)
+{
+    if (!provider)
+        return {};
+    storage.handlesMethod = [provider](std::string_view method) {
+        return provider->handlesMethod(method);
+    };
+    storage.prepareMetric = [provider](StepRef ref, const std::string &stepName,
+                                       const std::string &method, int32_t reqVersion,
+                                       const Json &fields, const std::string &path,
+                                       std::map<std::string, SlotKind> &knownSlots) {
+        return provider->prepareMetric(std::move(ref), stepName, method, reqVersion,
+                                       fields, path, knownSlots);
+    };
+    return storage;
 }
+} // namespace
 
 extern "C" int32_t IR_CheckRecipeJson(const char *stationJson, const char *recipeJson,
     char *err, int32_t errBytes)
@@ -41,11 +49,15 @@ extern "C" int32_t IR_CheckRecipeJson(const char *stationJson, const char *recip
     return guarded(err, errBytes, [&] {
         const auto station = parseStation(stationJson);
         const auto provider = loadPluginProviderIfNeeded(station);
-        (void)parseRecipeV2(recipeJson, station, provider.get());
+        ExternalMetricResolver resolver;
+        const auto *resolverPtr = provider
+            ? (resolver = makeExternalResolver(provider.get(), resolver), &resolver)
+            : nullptr;
+        (void)parseRecipe(recipeJson, station, resolverPtr);
     });
 }
 
-extern "C" int32_t IR_RunRecipeJsonEx(const char *stationJson, const char *recipeJson,
+extern "C" int32_t IR_RunRecipeJson(const char *stationJson, const char *recipeJson,
     const char *directory, const IRRecipeRunOptions *options,
     IRRecipeResult *result, char *err, int32_t errBytes)
 {
@@ -64,16 +76,14 @@ extern "C" int32_t IR_RunRecipeJsonEx(const char *stationJson, const char *recip
         const auto station = parseStation(stationJson);
         measurement.frames().checkStop();
         const auto provider = loadPluginProviderIfNeeded(station);
-        const auto recipe = parseRecipeV2(recipeJson, station, provider.get());
+        ExternalMetricResolver resolver;
+        const auto *resolverPtr = provider
+            ? (resolver = makeExternalResolver(provider.get(), resolver), &resolver)
+            : nullptr;
+        const auto recipe = parseRecipe(recipeJson, station, resolverPtr);
         measurement.frames().checkStop();
-        runRecipeV2(measurement.frames(), station, recipe, directory, report, options);
+        runRecipe(measurement.frames(), station, recipe, directory, report, options);
     });
     if (result) *result = report;
     return status;
-}
-
-extern "C" int32_t IR_RunRecipeJson(const char *stationJson, const char *recipeJson,
-    const char *directory, IRRecipeResult *result, char *err, int32_t errBytes)
-{
-    return IR_RunRecipeJsonEx(stationJson, recipeJson, directory, nullptr, result, err, errBytes);
 }

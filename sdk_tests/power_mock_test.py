@@ -62,7 +62,7 @@ def run_recipe(sdk, station, recipe, output):
     result = RecipeResult()
     error = c.create_string_buffer(1024)
     status = sdk.IR_RunRecipeJson(json.dumps(station).encode(), json.dumps(recipe).encode(),
-                                  os.fsencode(output), c.byref(result), error, len(error))
+                                  os.fsencode(output), None, c.byref(result), error, len(error))
     return (status, result.completed_frames, result.failed_stage,
             result.failed_step_index, result.cleanup_status), error.value
 
@@ -94,7 +94,7 @@ def main():
         c.c_uint64, c.c_int32, c.POINTER(PowerCurrentStableSpec), c.POINTER(Reading), *error_args
     ]
     sdk.IR_CheckRecipeJson.argtypes = [c.c_char_p, c.c_char_p, *error_args]
-    sdk.IR_RunRecipeJson.argtypes = [c.c_char_p, c.c_char_p, c.c_char_p, c.POINTER(RecipeResult), *error_args]
+    sdk.IR_RunRecipeJson.argtypes = [c.c_char_p, c.c_char_p, c.c_char_p, c.c_void_p, c.POINTER(RecipeResult), *error_args]
     sdk.IR_RequestStop.argtypes = []
     sdk.IR_RequestStop.restype = None
 
@@ -333,7 +333,7 @@ def main():
             failed_output = root / "failed-run"
             report, detail = run_recipe(sdk, station, read_failure_recipe, failed_output)
             assert report == (7, 0, 4, 0, 0) and b"read" in detail.lower(), (report, detail)
-            assert controller.drop_count == 0 and not failed_output.exists()
+            assert controller.drop_count == 0 and (failed_output / "result.json").is_file()
 
             recipe = {
                 "schemav": 1,
@@ -376,28 +376,28 @@ def main():
             commands.clear()
             report, detail = run_recipe(sdk, small_station, powered_recipe, root / "over-budget")
             assert report == (2, 0, 3, 1, 0) and b"max_batch_bytes" in detail, (report, detail)
-            assert not commands and not (root / "over-budget").exists()
+            assert not commands and (root / "over-budget" / "result.json").is_file()
 
             invalid_roi = {"id": "invalid_roi", "type": "analyze", "name": "roi", "method": "roi_mean",
                            "input": "batch", "params": {"x": 1, "y": 0, "width": 1, "height": 1}}
             roi_recipe = dict(recipe, steps=[*powered_recipe["steps"][:-1], invalid_roi, powered_recipe["steps"][-1]])
             report, detail = run_recipe(sdk, station, roi_recipe, root / "outside-image")
             assert report == (2, 0, 3, 3, 0) and b"ROI" in detail, (report, detail)
-            assert not commands and not (root / "outside-image").exists()
+            assert not commands and (root / "outside-image" / "result.json").is_file()
 
             read_then_enable = dict(recipe, steps=[recipe["steps"][1], *powered_recipe["steps"]])
             command_hook = (b"CHAN:OUTP?", sdk.IR_RequestStop)
             report, detail = run_recipe(sdk, station, read_then_enable, root / "cancelled-read")
             assert report == (8, 0, 4, 0, 0), (report, detail)
             assert not controller.output[0] and b"CHAN:OUTP ON" not in commands
-            assert not (root / "cancelled-read").exists()
+            assert (root / "cancelled-read" / "result.json").is_file()
 
             commands.clear()
             command_hook = (b"CHAN:OUTP?", sdk.IR_RequestStop)
             report, detail = run_recipe(sdk, station, powered_recipe, root / "cancelled-enable")
             assert report == (8, 0, 4, 0, 0), (report, detail)
             assert commands.count(b"CHAN:OUTP ON") == commands.count(b"CHAN:OUTP OFF") == 1
-            assert not controller.output[0] and not (root / "cancelled-enable").exists()
+            assert not controller.output[0] and (root / "cancelled-enable" / "result.json").is_file()
 
             short_recipe = copy.deepcopy(powered_recipe)
             short_recipe["steps"][1]["frames"] = 3
@@ -405,17 +405,17 @@ def main():
             report, detail = run_recipe(sdk, station, short_recipe, root / "failed-capture")
             assert report == (11, 2, 5, 1, 0) and b"batch" in detail, (report, detail)
             assert commands.count(b"CHAN:OUTP ON") == commands.count(b"CHAN:OUTP OFF") == 1
-            assert not controller.output[0] and not (root / "failed-capture").exists()
+            assert not controller.output[0] and (root / "failed-capture" / "result.json").is_file()
 
             controller.drop_command = "CHAN:OUTP OFF"
             controller.drop_count = 1
             report, detail = run_recipe(sdk, station, powered_recipe, root / "failed-cleanup")
             assert report == (6, 2, 8, 0, 6) and b"enable" in detail, (report, detail)
-            assert not (root / "failed-cleanup").exists()
+            assert (root / "failed-cleanup" / "result.json").is_file()
             controller.drop_count = 1
             report, detail = run_recipe(sdk, station, short_recipe, root / "two-failures")
             assert report == (11, 2, 5, 1, 6), (report, detail)
-            assert not (root / "two-failures").exists()
+            assert (root / "two-failures" / "result.json").is_file()
 
             blocked = []
             offline = dict(station, devices={})
