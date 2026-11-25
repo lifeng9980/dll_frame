@@ -20,11 +20,11 @@ SDK 提供两个库：`IR_station` 负责设备、RAW16 采集和流程，`IR_an
 
 - `stations/offline.json` + `recipes/noise_roi.json`：离线 RAW、时域噪声、ROI 均值和产品限值。
 - `stations/roi_2x2.json` + `recipes/noise_roi_2x2.json`：两帧 `2×2` 数据，整图均值 `51 DN`，左列 ROI 均值 `41 DN`。
-- `stations/roi_2x2.json` + `recipes/nodisk_roi_v2.json`：Schema v2 无存盘多指标配方示例（`capture -> frame_stats -> map_summary -> roi_mean`，`raw_saved=false`）。
+- `stations/roi_2x2.json` + `recipes/nodisk_roi.json`：`schemav` 无存盘多指标配方示例（`capture -> frame_stats -> map_summary -> roi_mean`，`raw_saved=false`）。
 - `stations/sim_tcp.json` + `recipes/noise_blackbody.json`：TCP 黑体设温等稳后采集。
 - `stations/sim_power_serial.json` + `recipes/power_serial_smoke.json`：IT6332A 串口设定/回读后采集，不打开输出。
 - `stations/sim_power_serial.json` + `recipes/power_serial_output_cycle.json`：在模拟工位练习打开输出，取帧后关闭并回读确认。
-- `stations/sim_virtual_station_tcp.json` + `recipes/virtual_station_hil_v2.json`：配合 `python .\simulators\ir_virtual_station.py --mode tcp`（或 `--mode serial-map`）一键跑通 6 类耦合设备（CH1/CH2 上电、`power_wait_stable` 电流等稳与自动下电、烘箱等稳/待机、黑体等稳/回位、探测器时序/GPOL/通用寄存器/ADC 电流、DMM、制冷机 Modbus RTU 与 `fft2d` 频谱分析）全闭环在环测试。
+- `stations/sim_virtual_station_tcp.json` + `recipes/virtual_station_hil.json`：配合 `python .\simulators\ir_virtual_station.py --mode tcp`（或 `--mode serial-map`）一键跑通 6 类耦合设备（CH1/CH2 上电、`power_wait_stable` 电流等稳与自动下电、烘箱等稳/待机、黑体等稳/回位、探测器时序/GPOL/通用寄存器/ADC 电流、DMM、制冷机 Modbus RTU 与 `fft2d` 频谱分析）全闭环在环测试。
 
 CLI 调用公开的 `IR_CheckRecipeJson` 与 `IR_RunRecipeJson`。C# 和 Python 的 `RecipeRunner` 示例也直接调用这两个入口，不需要自行实现设备和采集逻辑。输出目录需是新目录；结果的 `PASS`、`NG` 和 `COMPLETED` 含义见[测试人员指南](../docs/测试人员配方指南.md)。
 
@@ -77,7 +77,7 @@ python3 examples/python/ir_analysis.py
 
 通过 `IR_SDK_LIB_DIR` 可指定库目录。客户代码直接传 UTF-8 JSON 字符串给 C ABI，不需要自行链接 JSON 解析库。
 
-## Schema 校验与算法扩展
+## `schemav` 校验与算法扩展
 
-- `examples/schemas/station.schema.json`、`examples/schemas/recipe.schema.json` 与 `examples/schemas/recipe.v2.schema.json` 提供 JSON Schema（Draft 2020-12）定义（`1.8.0` 已覆盖 `it6332a` TCP/串口、`gws-sten`、`dmm6500`、`detector-serial`、`cooler-modbus`、`plugins` 工位配置及 `power_wait_stable`、`detector_register`、`detector_current`、`cooler_read`、`fft2d`、`plugin:<ns>.<name>` 外部插件算子校验），随包工位与配方模板已通过 `"$schema"` 引用，可在编辑器中直接校验字段；`simulators/ir_sim_devices.py` 提供单机多设备模拟，[`simulators/ir_virtual_station.py`](../simulators/ir_virtual_station.py) 提供统一组合式虚拟工位（支持 `--mode tcp` 与 Windows 虚拟 COM `--mode serial-map`）。
-- 源码级二次开发时，新增指标放在 `analysis/`，公共 C 函数放在 `include/IR_analysis.h`，小数据预期结果放在 `sdk_tests/`；Schema v1 方法登记在 `station/procedures/recipe_metrics.cpp`，Schema v2 内置算子按类别拆分为 `station/procedures/metrics_v2_*.cpp`，外部免重编算子可按 `include/IR_plugin_abi.h` 编译为独立动态库并通过 `station.plugins` 加载（详细开发与算法接入规范位于 SDK Git 源码仓库的 `docs/` 目录）。
+- 随包工位与配方模板均采用统一 `schemav` 格式（`schemav` 默认 `1`，可省略），`ir_run_recipe --check`（即 `IR_CheckRecipeJson`）提供权威静态预检；`simulators/ir_sim_devices.py` 提供单机多设备模拟，[`simulators/ir_virtual_station.py`](../simulators/ir_virtual_station.py) 提供统一组合式虚拟工位（支持 `--mode tcp` 与 Windows 虚拟 COM `--mode serial-map`）。
+- 源码级二次开发时，新增指标放在 `analysis/`，公共 C 函数放在 `include/IR_analysis.h`，小数据预期结果放在 `sdk_tests/`；`schemav` 内置算子按类别拆分为 `station/procedures/metrics_v2_*.cpp`，外部免重编算子可按 `include/IR_plugin_abi.h` 编译为独立动态库并通过 `station.plugins` 加载（详细开发与算法接入规范位于 SDK Git 源码仓库的 `docs/` 目录）。

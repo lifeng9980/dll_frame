@@ -223,7 +223,7 @@ Write-Host "python.exe : $pythonPath"
 Write-Host "SDK Version: $SdkVersion (FileVersion $ExpectedFileVersion)"
 Write-Host "WorkRoot   : $WorkRoot"
 
-Write-Step "2. Configuring and building Release via CMake windows preset"
+Write-Step "2. Configuring and building Debug via CMake windows preset"
 $res = Invoke-External -FilePath $cmakePath -WorkingDirectory $RepoRoot `
     -Arguments @("--preset", "windows", "-DPython3_EXECUTABLE=$pythonPath")
 Write-Host $res.StdOut.Trim()
@@ -407,14 +407,16 @@ foreach ($line in $manifestShaLines) {
 $actualExtractedFiles = @(Get-ChildItem -Path $PkgRoot -Recurse -File | Where-Object { $_.Name -ne "MANIFEST.sha256" }).Count
 Assert-True ($checkedManifestFiles -gt 0 -and $checkedManifestFiles -eq $actualExtractedFiles) `
     "MANIFEST file count mismatch: listed=$checkedManifestFiles extracted=$actualExtractedFiles"
+Assert-True (Test-Path (Join-Path $PkgRoot "include\IR_types.h")) "Missing include\IR_types.h in extracted package"
 Assert-True (Test-Path (Join-Path $PkgRoot "include\IR_plugin_abi.h")) "Missing include\IR_plugin_abi.h in extracted package"
+Assert-True (Test-Path (Join-Path $PkgRoot "include\IR_plugin_cxx.hpp")) "Missing include\IR_plugin_cxx.hpp in extracted package"
 Write-Host "  Extracted and verified $checkedManifestFiles files under: $PkgRoot"
 
 Write-Step "9. Building and running standalone C/C++ client examples from extracted package"
 $ClientBuildDir = Join-Path $WorkRoot "client-build"
 Invoke-External -FilePath $cmakePath -WorkingDirectory $PkgRoot `
     -Arguments @("-S", (Join-Path $PkgRoot "examples"), "-B", $ClientBuildDir,
-                 "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DIR_SDK_ROOT=$PkgRoot") | Out-Null
+                 "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DIR_SDK_ROOT=$PkgRoot") | Out-Null
 Invoke-External -FilePath $cmakePath -WorkingDirectory $PkgRoot `
     -Arguments @("--build", $ClientBuildDir) | Out-Null
 
@@ -473,21 +475,21 @@ $roiJson = [System.IO.File]::ReadAllText((Join-Path $RoiOut "result.json"), $Utf
 Assert-True ([math]::Abs([double]$roiJson.metrics.'left.mean_dn'.value - 41.0) -lt 1e-12) "ROI 2x2 left.mean_dn != 41"
 Assert-True ([math]::Abs([double]$roiJson.metrics.'noise.mean_dn'.value - 51.0) -lt 1e-12) "ROI 2x2 noise.mean_dn != 51"
 
-$V2NoDiskOut = Join-Path $WorkRoot "cli-v2-nodisk-out"
+$V2NoDiskOut = Join-Path $WorkRoot "cli-nodisk-out"
 $v2NoDiskRes = Invoke-External -FilePath $PkgCli -Arguments @(
     "--run",
     "--station", (Join-Path $PkgRoot "examples\stations\roi_2x2.json"),
-    "--recipe", (Join-Path $PkgRoot "examples\recipes\nodisk_roi_v2.json"),
+    "--recipe", (Join-Path $PkgRoot "examples\recipes\nodisk_roi.json"),
     "--output", $V2NoDiskOut
 )
-Assert-True ($v2NoDiskRes.StdOut -match "(?m)^run_status=PASS\r?$") "CLI Schema v2 no-disk failed (got: $($v2NoDiskRes.StdOut))"
+Assert-True ($v2NoDiskRes.StdOut -match "(?m)^run_status=PASS\r?$") "CLI no-disk failed (got: $($v2NoDiskRes.StdOut))"
 $v2NoDiskJson = [System.IO.File]::ReadAllText((Join-Path $V2NoDiskOut "result.json"), $Utf8NoBom) | ConvertFrom-Json
-Assert-True ($v2NoDiskJson.schema_version -eq 2) "CLI Schema v2 result schema_version != 2"
-Assert-True ($v2NoDiskJson.raw_saved -eq $false) "CLI Schema v2 raw_saved should be false"
-Assert-True ([math]::Abs([double]$v2NoDiskJson.metrics.'summary.mean'.value - 51.0) -lt 1e-12) "Schema v2 summary.mean != 51"
-Assert-True ([math]::Abs([double]$v2NoDiskJson.metrics.'left.mean_dn'.value - 41.0) -lt 1e-12) "Schema v2 left.mean_dn != 41"
+Assert-True ($v2NoDiskJson.schemav -eq 1) "CLI result schemav != 1"
+Assert-True ($v2NoDiskJson.raw_saved -eq $false) "CLI no-disk raw_saved should be false"
+Assert-True ([math]::Abs([double]$v2NoDiskJson.metrics.'summary.mean'.value - 51.0) -lt 1e-12) "summary.mean != 51"
+Assert-True ([math]::Abs([double]$v2NoDiskJson.metrics.'left.mean_dn'.value - 41.0) -lt 1e-12) "left.mean_dn != 41"
 $v2RawFiles = @(Get-ChildItem -Path $V2NoDiskOut -Recurse -Filter "*.raw")
-Assert-True ($v2RawFiles.Count -eq 0) "CLI Schema v2 no-disk must not save .raw files"
+Assert-True ($v2RawFiles.Count -eq 0) "CLI no-disk must not save .raw files"
 
 $TempRecipesDir = Join-Path $WorkRoot "temp-recipes"
 New-Item -ItemType Directory -Path $TempRecipesDir -Force | Out-Null
@@ -516,7 +518,7 @@ Assert-True ($errRes.StdErr -match "stage=5" -and $errRes.StdErr -match "cleanup
 Assert-True (-not (Test-Path $ErrOut)) "Failed CLI run must not create output directory"
 
 $BadRecipePath = Join-Path $TempRecipesDir "invalid_empty_steps.json"
-Write-Utf8File $BadRecipePath '{"schema_version":1,"recipe_id":"invalid","steps":[]}'
+Write-Utf8File $BadRecipePath '{"schemav":1,"recipe_id":"invalid","steps":[]}'
 $badCheckRunRes = Invoke-External -FilePath $PkgCli -Arguments @("--run", "--station", $OfflineStation, "--recipe", $BadRecipePath, "--output", (Join-Path $WorkRoot "cli-bad-recipe-out")) -AllowedExitCodes @(2)
 Assert-True ($badCheckRunRes.StdOut -match "(?m)^run_status=ERROR\r?$") "CLI bad-recipe --run missing run_status=ERROR"
 Assert-True ($badCheckRunRes.StdOut -match "(?m)^completed_frames=0\r?$") "CLI bad-recipe --run missing completed_frames=0"
@@ -753,215 +755,6 @@ print(json.dumps({
 }
 Write-Host "  Live CTRL_BREAK_EVENT cancellation verified (exit 8 + run_status=CANCELLED + cleanup_status=0)."
 
-Write-Step "12c. Validating JSON Schemas (Draft 2020-12) and bundled templates"
-$schemaCheckPy = @'
-import json, pathlib, sys
-pkg = pathlib.Path(sys.argv[1]).resolve()
-station_schema = json.loads((pkg / "examples/schemas/station.schema.json").read_text(encoding="utf-8"))
-recipe_schema = json.loads((pkg / "examples/schemas/recipe.schema.json").read_text(encoding="utf-8"))
-recipe_v2_schema = json.loads((pkg / "examples/schemas/recipe.v2.schema.json").read_text(encoding="utf-8"))
-stations = sorted((pkg / "examples/stations").glob("*.json"))
-recipes = sorted((pkg / "examples/recipes").glob("*.json"))
-assert len(stations) == 5 and len(recipes) == 7, (len(stations), len(recipes))
-for p in [*stations, *recipes]:
-    data = json.loads(p.read_text(encoding="utf-8"))
-    ref = (p.parent / data["$schema"]).resolve()
-    assert ref.is_relative_to(pkg) and ref.is_file(), (p, ref)
-try:
-    from jsonschema import Draft202012Validator, exceptions as jex
-except ImportError:
-    print("mode=json-parse-only (python jsonschema not installed)")
-    sys.exit(0)
-Draft202012Validator.check_schema(station_schema)
-Draft202012Validator.check_schema(recipe_schema)
-Draft202012Validator.check_schema(recipe_v2_schema)
-sv = Draft202012Validator(station_schema)
-rv = Draft202012Validator(recipe_schema)
-rv2 = Draft202012Validator(recipe_v2_schema)
-for p in stations:
-    sv.validate(json.loads(p.read_text(encoding="utf-8")))
-for p in recipes:
-    data = json.loads(p.read_text(encoding="utf-8"))
-    (rv2 if data["schema_version"] == 2 else rv).validate(data)
-
-# Negative boundary checks
-bad_stations = [
-    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
-     "devices": {"bb": {"kind": "pcn7-lt", "connection": {"host": "127.0.0.1", "expected_head_serial": "H"}}}},
-    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
-     "devices": {"bb": {"kind": "pcn7-lt", "connection": {"host": "127.0.0.1", "head": -1, "expected_head_serial": "H"}}}},
-    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16, "max_batch_bytes": 2**63}},
-    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16, "queue_capacity": 1}},
-    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16, "queue_capacity": 5000}},
-    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
-     "devices": {"ov": {"kind": "gws-sten", "connection": {"host": "127.0.0.1", "port": "COM3"}}}},
-    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
-     "devices": {"dm": {"kind": "dmm6500", "connection": {"host": "127.0.0.1", "port": "COM4"}}}},
-    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
-     "devices": {"dt": {"kind": "detector-serial", "connection": {"host": "127.0.0.1", "port": "COM5"}}}},
-    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
-     "devices": {"ov": {"kind": "gws-sten", "connection": {"host": "127.0.0.1", "delimiter": "tab"}}}},
-    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
-     "devices": {"pw": {"kind": "it6332a", "connection": {"host": "127.0.0.1", "port": "COM8"}}}},
-    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
-     "devices": {"cl": {"kind": "cooler-modbus", "connection": {"host": "127.0.0.1", "port": "COM9"}}}},
-    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
-     "devices": {"cl": {"kind": "cooler-modbus", "connection": {"host": "127.0.0.1", "slave_address": 250}}}},
-    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
-     "plugins": [""]},
-    {"schema_version": 1, "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
-     "plugins": "plugins"},
-]
-for idx, s in enumerate(bad_stations):
-    assert not sv.is_valid(s), f"bad station #{idx} unexpectedly validated"
-
-good_stations_extra = [
-    {
-        "schema_version": 1,
-        "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
-        "devices": {
-            "pw": {"kind": "it6332a", "connection": {"port": "COM8", "baud_rate": 115200}},
-            "ov": {"kind": "gws-sten", "connection": {"port": "COM3", "baud_rate": 9600, "data_bits": 8, "parity": "none", "stop_bits": 1, "address": 1, "delimiter": "crlf"}},
-            "dm": {"kind": "dmm6500", "connection": {"port": "COM4", "baud_rate": 115200}},
-            "dt": {"kind": "detector-serial", "connection": {"port": "COM5", "baud_rate": 115200, "inter_command_ms": 5}},
-            "cl": {"kind": "cooler-modbus", "connection": {"port": "COM9", "baud_rate": 9600, "stop_bits": 2, "slave_address": 1}},
-        },
-    },
-    {
-        "schema_version": 1,
-        "acquisition": {"backend": "raw_replay", "source": "x", "valid_bits": 16},
-        "devices": {
-            "pw": {"kind": "it6332a", "connection": {"host": "127.0.0.1", "tcp_port": 5026}},
-            "ov": {"kind": "gws-sten", "connection": {"host": "127.0.0.1", "tcp_port": 5000}},
-            "dm": {"kind": "dmm6500", "connection": {"host": "127.0.0.1", "tcp_port": 5025}},
-            "dt": {"kind": "detector-serial", "connection": {"host": "127.0.0.1", "tcp_port": 2102}},
-            "cl": {"kind": "cooler-modbus", "connection": {"host": "127.0.0.1", "tcp_port": 5020, "slave_address": 1}},
-        },
-        "plugins": ["./plugins"],
-    },
-]
-for idx, s in enumerate(good_stations_extra):
-    sv.validate(s)
-
-good_recipes_v2_extra = [
-    {
-        "schema_version": 2,
-        "recipe_id": "v2-instruments-schema-check",
-        "steps": [
-            {"id": "pw1", "type": "power_set", "device": "pw", "channel": 1, "voltage_v": 12.0, "current_limit_a": 2.0},
-            {"id": "pw2", "type": "power_output", "device": "pw", "channel": 1, "enabled": True, "off_after_run": True},
-            {"id": "pws", "type": "power_wait_stable", "device": "pw", "channel": 1, "expected_voltage_v": 12.0, "voltage_tolerance_v": 0.2, "max_current_a": 2.02, "startup_threshold_a": 0.3, "startup_required_samples": 3, "startup_timeout_ms": 5000, "stable_threshold_a": 0.3, "max_variation_a": 0.02, "stable_required_samples": 3, "sample_interval_ms": 10, "timeout_ms": 10000},
-            {"id": "ov1", "type": "oven_stabilize", "device": "ov", "target_c": 25.0, "tolerance_c": 0.5, "stable_window_ms": 100, "timeout_ms": 5000, "require_no_alarm": True, "standby_after_run": True},
-            {"id": "dt1", "type": "detector_timing", "device": "dt", "integration_us": 1000, "frame_hz": 50, "empty_us": 200},
-            {"id": "dg1", "type": "detector_gpol", "device": "dt", "gpol_v": 2.5},
-            {"id": "dr1", "type": "detector_register", "device": "dt", "command_code": 101, "payload_hex": "08"},
-            {"id": "dc1", "type": "detector_current", "device": "dt", "name": "dc", "gain_code": 0, "channel_code": 1},
-            {"id": "dm1", "type": "dmm_read", "device": "dm", "name": "dmm", "mode": "diode", "set_mode": True},
-            {"id": "cl1", "type": "cooler_read", "device": "cl", "name": "cooler"},
-            {"id": "c1", "type": "capture", "frames": 2, "frame_timeout_ms": 0, "output": "b0"},
-            {"id": "fs1", "type": "analyze", "method": "frame_stats", "input": "b0", "outputs": {"mean_map": "m0"}},
-            {"id": "fft1", "type": "analyze", "method": "fft2d", "input": "m0", "params": {"window": "rect", "detrend_mean": False, "shift_dc_center": True}},
-            {"id": "ov2", "type": "oven_standby", "device": "ov"},
-        ],
-        "safety": {"oven_standby": ["ov"]},
-        "limits": [
-            {"metric": "dmm.value", "operator": "max", "value": 0.8, "unit": "V"},
-            {"metric": "cooler.voltage_mv", "operator": "min", "value": 500.0, "unit": "mV"},
-        ],
-    },
-    {
-        "schema_version": 2,
-        "recipe_id": "v2-plugin-schema-check",
-        "steps": [
-            {"id": "c1", "type": "capture", "frames": 2, "frame_timeout_ms": 0, "output": "b0"},
-            {"id": "p1", "type": "analyze", "method": "plugin:test.pixel_span", "input": "b0", "outputs": {"span_map": "smap"}}
-        ],
-    }
-]
-for r in good_recipes_v2_extra:
-    rv2.validate(r)
-
-bad_recipes_v1 = [
-    {"schema_version": 1, "recipe_id": "bad", "steps": [
-        {"id": "s1", "type": "save_raw", "input": "b"},
-        {"id": "s2", "type": "save_raw", "input": "b"},
-        {"id": "s3", "type": "save_raw", "input": "b"},
-    ]},
-    {"schema_version": 1, "recipe_id": "bad", "steps": [
-        {"id": "b", "type": "capture", "frames": 3000000000, "frame_timeout_ms": 0},
-        {"id": "n", "type": "analyze", "method": "temporal_noise", "name": "n", "input": "b"},
-        {"id": "s", "type": "save_raw", "input": "b"},
-    ]},
-    {"schema_version": 1, "recipe_id": "bad", "steps": [
-        {"id": "p", "type": "power_output", "device": "supply", "channel": 1, "enabled": True},
-        {"id": "b", "type": "capture", "frames": 2, "frame_timeout_ms": 0},
-        {"id": "n", "type": "analyze", "method": "temporal_noise", "name": "n", "input": "b"},
-        {"id": "s", "type": "save_raw", "input": "b"},
-    ]},
-]
-for idx, r in enumerate(bad_recipes_v1):
-    assert not rv.is_valid(r), f"bad recipe v1 #{idx} unexpectedly validated"
-
-bad_recipes_v2 = [
-    {"schema_version": 2, "recipe_id": "bad-nested", "steps": [
-        {"id": "lp", "type": "repeat_burst", "max_iterations": 2, "steps": [
-            {"id": "lp2", "type": "repeat_burst", "max_iterations": 1, "steps": [
-                {"id": "c", "type": "capture", "frames": 2, "frame_timeout_ms": 0}
-            ]}
-        ]}
-    ]},
-    {"schema_version": 2, "recipe_id": "bad-subdir", "steps": [
-        {"id": "c", "type": "capture", "frames": 2, "frame_timeout_ms": 0},
-        {"id": "s", "type": "save_raw", "input": "c", "subdir": "a/b"}
-    ]},
-    {"schema_version": 2, "recipe_id": "bad-power", "steps": [
-        {"id": "p", "type": "power_output", "device": "supply", "channel": 1, "enabled": True},
-        {"id": "c", "type": "capture", "frames": 2, "frame_timeout_ms": 0}
-    ]},
-    {"schema_version": 2, "recipe_id": "bad-dmm-any-set", "steps": [
-        {"id": "dm", "type": "dmm_read", "device": "dm", "mode": "any", "set_mode": True}
-    ]},
-    {"schema_version": 2, "recipe_id": "bad-gpol-high", "steps": [
-        {"id": "dg", "type": "detector_gpol", "device": "dt", "gpol_v": 5.5}
-    ]},
-    {"schema_version": 2, "recipe_id": "bad-oven-missing-tol", "steps": [
-        {"id": "ov", "type": "oven_stabilize", "device": "ov", "target_c": 25.0, "stable_window_ms": 100, "timeout_ms": 1000}
-    ]},
-    {"schema_version": 2, "recipe_id": "bad-safety-oven", "steps": [
-        {"id": "c", "type": "capture", "frames": 2, "frame_timeout_ms": 0}
-    ], "safety": {"oven_standby": [123]}},
-    {"schema_version": 2, "recipe_id": "bad-reg-hex", "steps": [
-        {"id": "dr", "type": "detector_register", "device": "dt", "command_code": 101, "payload_hex": "0"}
-    ]},
-    {"schema_version": 2, "recipe_id": "bad-curr-gain", "steps": [
-        {"id": "dc", "type": "detector_current", "device": "dt", "gain_code": 8, "channel_code": 1}
-    ]},
-    {"schema_version": 2, "recipe_id": "bad-power-wait-zero-thresh", "steps": [
-        {"id": "pws", "type": "power_wait_stable", "device": "supply", "channel": 1, "stable_threshold_a": 0.0}
-    ]},
-    {"schema_version": 2, "recipe_id": "bad-power-wait-zero-timeout", "steps": [
-        {"id": "pws", "type": "power_wait_stable", "device": "supply", "channel": 1, "timeout_ms": 0}
-    ]},
-    {"schema_version": 2, "recipe_id": "bad-analyze-method", "steps": [
-        {"id": "fft", "type": "analyze", "method": "fft3d", "input": "m0"}
-    ]},
-    {"schema_version": 2, "recipe_id": "bad-plugin-method-caps", "steps": [
-        {"id": "p", "type": "analyze", "method": "plugin:Test.Bad", "input": "b0"}
-    ]},
-    {"schema_version": 2, "recipe_id": "bad-plugin-method-empty", "steps": [
-        {"id": "p", "type": "analyze", "method": "plugin:", "input": "b0"}
-    ]},
-]
-for idx, r in enumerate(bad_recipes_v2):
-    assert not rv2.is_valid(r), f"bad recipe v2 #{idx} unexpectedly validated"
-
-print(f"mode=Draft202012Validator stations={len(stations)+len(good_stations_extra)} recipes={len(recipes)+len(good_recipes_v2_extra)} negatives={len(bad_stations)+len(bad_recipes_v1)+len(bad_recipes_v2)}")
-'@
-$schemaPyPath = Join-Path $TempRecipesDir "check_schemas.py"
-Write-Utf8File $schemaPyPath $schemaCheckPy
-$schemaRes = Invoke-External -FilePath $pythonPath -Arguments @("-B", $schemaPyPath, $PkgRoot)
-Write-Host ("  JSON Schema check passed ({0})." -f $schemaRes.StdOut.Trim())
-
 Write-Step "13. Checking optional C# sample (dotnet)"
 $dotnetCandidates = New-Object System.Collections.Generic.List[string]
 $dotnetInPath = Get-Command dotnet -ErrorAction SilentlyContinue
@@ -1017,15 +810,15 @@ if (-not $dotnetExe) {
     Assert-True ($csRes.StdOut -match "(?m)^run_status=PASS\r?$") "C# v1 recipe sample failed (got: $($csRes.StdOut))"
     Assert-True ($csRes.StdOut -match "(?m)^completed_frames=2\r?$") "C# v1 recipe sample completed_frames!=2 (got: $($csRes.StdOut))"
 
-    $CsV2Out = Join-Path $WorkRoot "csharp-v2-nodisk-out"
+    $CsV2Out = Join-Path $WorkRoot "csharp-nodisk-out"
     $csV2Res = Invoke-External -FilePath $dotnetExe -WorkingDirectory $PkgRoot `
         -Environment $csEnv -Arguments @("run", "--no-build", "--project", $CsProj,
             "--", "--recipe", (Join-Path $PkgRoot "examples\stations\roi_2x2.json"),
-            (Join-Path $PkgRoot "examples\recipes\nodisk_roi_v2.json"), $CsV2Out)
-    Assert-True ($csV2Res.StdOut -match "(?m)^run_status=PASS\r?$") "C# v2 no-disk recipe sample failed (got: $($csV2Res.StdOut))"
-    Assert-True ($csV2Res.StdOut -match "(?m)^completed_frames=2\r?$") "C# v2 no-disk recipe completed_frames!=2 (got: $($csV2Res.StdOut))"
+            (Join-Path $PkgRoot "examples\recipes\nodisk_roi.json"), $CsV2Out)
+    Assert-True ($csV2Res.StdOut -match "(?m)^run_status=PASS\r?$") "C# no-disk recipe sample failed (got: $($csV2Res.StdOut))"
+    Assert-True ($csV2Res.StdOut -match "(?m)^completed_frames=2\r?$") "C# no-disk recipe completed_frames!=2 (got: $($csV2Res.StdOut))"
     $csV2RawFiles = @(Get-ChildItem -Path $CsV2Out -Recurse -Filter "*.raw")
-    Assert-True ($csV2RawFiles.Count -eq 0) "C# v2 no-disk sample must not save .raw files"
+    Assert-True ($csV2RawFiles.Count -eq 0) "C# no-disk sample must not save .raw files"
 
     $csAnalysisRes = Invoke-External -FilePath $dotnetExe -WorkingDirectory $PkgRoot `
         -Environment $csEnv -Arguments @("run", "--no-build", "--project", $CsProj, "--", "--analysis")

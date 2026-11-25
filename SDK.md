@@ -7,7 +7,7 @@ IR SDK 面向 Windows x64 与 Ubuntu 24.04 x86-64 使用同一份源码和公共
 | Station | `IR_station.dll` | `libIR_station.so` | 仪器控制、原始帧采集、JSON 测试流程与结果保存 |
 | Analysis | `IR_analysis.dll` | `libIR_analysis.so` | 帧均值、时域噪声、ROI 均值、Noise3D 两阶段与 GB/GJB 核心评价（零 Qt/OpenCV） |
 
-应用包含 `IR_station.h`、`IR_device.h`、`IR_recipe.h`、`IR_analysis.h` 或 `IR_plugin_abi.h`，以 `IR_*` 调用 C 接口。两个库分别提供 `IR_StationVersion()` 与 `IR_AnalysisVersion()` 运行期版本查询；Windows DLL 同时内嵌 `VERSIONINFO` 文件版本资源。公共状态码与 UTF-8 错误缓冲区约定见 `IR_status.h`。当前发行结构提供 C、C++、C#、Python 示例、JSON Schema 配置校验文件和 JSON 配方命令行。客户程序只需要两个 SDK 库及所用语言的运行环境。
+应用包含 `IR_station.h`、`IR_device.h`、`IR_recipe.h`、`IR_analysis.h` 或 `IR_plugin_abi.h`，以 `IR_*` 调用 C 接口。两个库分别提供 `IR_StationVersion()` 与 `IR_AnalysisVersion()` 运行期版本查询；Windows DLL 同时内嵌 `VERSIONINFO` 文件版本资源。公共状态码与 UTF-8 错误缓冲区约定见 `IR_status.h`。当前发行结构提供 C、C++、C#、Python 示例、统一 `schemav` 工位/配方模板和 JSON 配方命令行。客户程序只需要两个 SDK 库及所用语言的运行环境。
 
 ## 四层代码入口
 
@@ -16,7 +16,7 @@ IR SDK 面向 Windows x64 与 Ubuntu 24.04 x86-64 使用同一份源码和公共
 | 仪器控制 | `station/instruments/` 按设备型号接入，`transport/asio_link.cpp` 共用 Asio TCP 与串口 | `IR_OpenDevice` 接收型号和连接 JSON，黑体、IT6332A 电源（支持 `host` TCP / `port` 串口二选一，以及 `IR_WaitPowerCurrentStable` / `IRPowerCurrentStableSpec` 启动冲击确认与稳态电流保持等待）、GWS STEN 烘箱（`IR_OVEN_GWS_STEN`：`IR_SetOven`/`IR_ReadOven`/`IR_StopOven`/`IR_WaitOvenStable`）、Keithley DMM6500 SCPI（`IR_DMM6500`：`IR_SetDmmMode`/`IR_ReadDmm`）、探测器 `0xCC` 串口控制（`IR_DETECTOR_SERIAL`：`IR_SetDetectorTiming`/`IR_SetDetectorGpol`/`IR_SetDetectorRegister`/`IR_MeasureDetectorCurrent` 7 字节 ADC 电流读取）与制冷机 Modbus RTU（`IR_COOLER_MODBUS`：`IR_ReadCooler`，默认 `8N2`）；`IR_RunNoise` 支持 `recipe->detector != 0` 下发积分/空扫时间（`IR_NOISE_STEP_SET_DETECTOR`）；`IR_ListSerialPorts` 枚举可用串口 |
 | 原始采集 | `station/acquisition/frame_source.h`，具体来源在 `raw_replay/`、`directshow/`、`v4l2/` | `IR_ListCaptureDevices` 枚举相机；`IR_OpenFrames` 返回几何，`IR_ReadFrames` 输出紧密排列的 RAW16 像素；`IR_FlushFrames` 支撑不停流多 Burst 采集；`IR_TryReadLatestFrame` / `IR_GetCaptureStats` 提供无阻塞预览与有界 `FrameQueue` 诊断 |
 | 指标计算 | `analysis/`，可独立使用 `IR_analysis` | `IR_FrameStatisticsU16`、`IR_ROIMeanU16`、`IR_Noise3D*`、`IR_Gb*` / `IR_Gjb*`（含可配置短路/断路阈值）、`IR_FlickerDetectU16` 闪元检测，以及两点 NUC、无损 NUC 统计、`15×15` 空间高低频（盒式均值与掩码归一化高斯 `IR_SPATIAL_FILTER_GAUSSIAN`）、算术扣噪/阈值掩码、任意长 1D FFT、任意尺寸纯 C++20 2D FFT（`IR_Fft2dMagnitudeF64` / `IRFft2dSummary`）与 `IR_GjbEvaluateBurstMetrics` |
-| 流程编排 | `station/procedures/`、`station/plugins/` | `IR_RunRecipeJson` / `IR_RunRecipeJsonEx`（支持 `IRRecipeStepCallback` 步骤事件回调）同时支持 Schema v1 单批配方与 Schema v2（多温点/多条件、`power_wait_stable`、`oven_stabilize`/`oven_standby`/`dmm_read`/`detector_timing`/`detector_gpol`/`detector_register`/`detector_current`/`cooler_read`、中间图与掩码跨步引用、`flush_frames`、可选 `save_raw`、`repeat_burst` 周期无存盘温漂、开放 16 项内置算子及通过 `station.plugins` + `IR_plugin_abi.h` 加载的 `plugin:<ns>.<name>` 外部动态算子、`step_records` 逐步耗时记录及 `safety.blackbody_standby`/`safety.oven_standby` 安全待机收尾）；`IR_WaitBlackbodyStable`、`IR_WaitOvenStable` 与 `IR_WaitPowerCurrentStable` 提供独立等稳接口 |
+| 流程编排 | `station/procedures/`、`station/plugins/` | `IR_RunRecipeJson` / `IR_RunRecipeJsonEx`（支持 `IRRecipeStepCallback` 步骤事件回调）统一采用最新 `schemav` 流程格式（多温点/多条件、`power_wait_stable`、`oven_stabilize`/`oven_standby`/`dmm_read`/`detector_timing`/`detector_gpol`/`detector_register`/`detector_current`/`cooler_read`、中间图与掩码跨步引用、`flush_frames`、可选 `save_raw`、`repeat_burst` 周期无存盘温漂、开放 16 项内置算子及通过 `station.plugins` + `IR_plugin_abi.h` 加载的 `plugin:<ns>.<name>` 外部动态算子、`step_records` 逐步耗时记录及 `safety.blackbody_standby`/`safety.oven_standby` 安全待机收尾）；`IR_WaitBlackbodyStable`、`IR_WaitOvenStable` 与 `IR_WaitPowerCurrentStable` 提供独立等稳接口 |
 
 ## 线程和设备占用
 
@@ -24,11 +24,11 @@ IR SDK 面向 Windows x64 与 Ubuntu 24.04 x86-64 使用同一份源码和公共
 
 `IR_RunNoise` 在第一次设备命令前预约配方指定的仪器。预约期间，其他线程对这些句柄执行读、写或关闭都会得到 `IR_BUSY`。配方释放资源后即可再次操作。未被配方使用的仪器不需要打开。预约只约束当前 SDK 进程内的调用；其他进程的占用由设备或驱动决定。`IR_RequestStop` 可从其他线程调用，设备命令仍由工作线程收尾。实时取帧按最多 50 ms 的等待段检查取消，每帧仍遵守调用方指定的总超时。
 
-`IR_RunRecipeJson` 为 C/C# / Python 提供统一的 UTF-8 工位与流程 JSON 入口，同时兼容 `schema_version: 1` 与 `schema_version: 2`（见 [`examples/schemas/recipe.v2.schema.json`](examples/schemas/recipe.v2.schema.json)）。`IR_CheckRecipeJson` 做静态预检（v2 同时校验输入/输出槽位名称、类型与安全参数）。运行入口先按实际画幅检查全部捕获批次容量与所有指标 ROI/通道约束，准备成功后才打开并预约配方引用的仪器。Schema v2 支持多温点/多条件与采集交错编排、`save_raw` 可选（0 次即无存盘，或多次按 `subdir` 归档）、`repeat_burst` 周期流式追加 CSV 摘要（中断/取消时保留已刷盘数据），以及开放指标参数透传。一进程同时运行一条配方，每批 RAW 像素默认上限为 256 MiB（可在 `station.acquisition.max_batch_bytes` 调整，队列容量由 `station.acquisition.queue_capacity` 调整，默认 64）。
+`IR_RunRecipeJson` 为 C/C# / Python 提供统一的 UTF-8 工位与流程 JSON 入口，采用最新 `schemav` 格式（`schemav` 默认 `1`，可省略）。`IR_CheckRecipeJson` 做静态预检（校验设备别名、步骤顺序、输入/输出槽位名称、类型与安全参数）。运行入口先按实际画幅检查全部捕获批次容量与所有指标 ROI/通道约束，准备成功后才打开并预约配方引用的仪器。统一 `schemav` 流程支持多温点/多条件与采集交错编排、`save_raw` 可选（0 次即无存盘，或多次按 `subdir` 归档）、`repeat_burst` 周期流式追加 CSV 摘要（中断/取消时保留已刷盘数据），以及开放指标参数透传。一进程同时运行一条配方，每批 RAW 像素默认上限为 256 MiB（可在 `station.acquisition.max_batch_bytes` 调整，队列容量由 `station.acquisition.queue_capacity` 调整，默认 64）。
 
-跨线程停止作用于整次配方，由原工作线程在当前同步事务结束后检查并收尾。启用电源输出时，配方须同时声明 `off_after_run: true`；Schema v2 另可在 `safety.blackbody_standby` 声明结束/异常时统一恢复的黑体待机温度，并在 `safety.oven_standby`（或 `oven_stabilize` 步骤的 `standby_after_run: true`）声明结束后自动切回 `STANDBY` 的烘箱别名。`IRRecipeResult` 报告失败阶段、步骤下标、完成帧数和收尾状态。完整结果归档会保留实际配方、`raw_saved` / `saved_batches` / `burst_runs`、指标方法版本以及 `station_version`、`analysis_version`、`source_commit`、`started_utc`、`finished_utc` 追溯字段。详见[测试人员配方指南](docs/测试人员配方指南.md)。
+跨线程停止作用于整次配方，由原工作线程在当前同步事务结束后检查并收尾。启用电源输出时，配方须同时声明 `off_after_run: true`；`schemav` 另可在 `safety.blackbody_standby` 声明结束/异常时统一恢复的黑体待机温度，并在 `safety.oven_standby`（或 `oven_stabilize` 步骤的 `standby_after_run: true`）声明结束后自动切回 `STANDBY` 的烘箱别名。`IRRecipeResult` 报告失败阶段、步骤下标、完成帧数和收尾状态。完整结果归档会保留实际配方、`raw_saved` / `saved_batches` / `burst_runs`、指标方法版本以及 `station_version`、`analysis_version`、`source_commit`、`started_utc`、`finished_utc` 追溯字段。详见[测试人员配方指南](docs/测试人员配方指南.md)。
 
-DOC058 黑体连接中断或应答超时后最多重连三次，每次间隔 500 ms。重复读命令可在重新识别设备后执行。设温应答丢失时，只重连并读回目标温度，不重复发送设温命令。重试耗尽或设备身份不符时，流程停止并返回异常。流程失败时 `IRNoiseResult.completed` 保留连续完成帧数，`failed_step` 标明失败步骤，`cleanup_status` 报告采集停止结果。`IR_RunNoise` 固定流程保留配方黑体设定值，不擅自修改温度；需要自动恢复待机温度或烘箱待机时，使用 Schema v2 的 `safety.blackbody_standby` / `safety.oven_standby`。
+DOC058 黑体连接中断或应答超时后最多重连三次，每次间隔 500 ms。重复读命令可在重新识别设备后执行。设温应答丢失时，只重连并读回目标温度，不重复发送设温命令。重试耗尽或设备身份不符时，流程停止并返回异常。流程失败时 `IRNoiseResult.completed` 保留连续完成帧数，`failed_step` 标明失败步骤，`cleanup_status` 报告采集停止结果。`IR_RunNoise` 固定流程保留配方黑体设定值，不擅自修改温度；需要自动恢复待机温度或烘箱待机时，使用 `schemav` 配方的 `safety.blackbody_standby` / `safety.oven_standby`。
 
 安装包的 `examples/noise_recipe.c` 演示固定噪声 C API。`ir_run_recipe` 与 C#/Python 的配方例子通过 `IR_RunRecipeJson` 使用同一执行器，覆盖设备等稳、取帧、多个指标和归档。自动测试使用 RAW16 小数组、`simulators/ir_sim_devices.py` 单机模拟及 `simulators/ir_virtual_station.py` 组合式虚拟工位（覆盖全 6 类设备耦合 HIL 与 `CTRL_BREAK_EVENT` 取消收尾）。
 
@@ -51,7 +51,7 @@ ctest --preset linux
 cmake --install 实验/build-linux --prefix 实验/sdk-linux
 ```
 
-Windows 在 x64 MSVC 开发终端使用 `windows` preset。公共头文件和字符串参数使用 UTF-8；MSVC 编译 C/C++ 示例时启用 `/utf-8`。示例的独立编译和调用方法见 [`examples/README.zh-CN.md`](examples/README.zh-CN.md)。
+Windows 在 x64 MSVC 开发终端使用 `windows` Debug preset（`CMakePresets.json` 仅保留 Windows Debug 构建配置）。公共头文件和字符串参数使用 UTF-8；MSVC 编译 C/C++ 示例时启用 `/utf-8`。示例的独立编译和调用方法见 [`examples/README.zh-CN.md`](examples/README.zh-CN.md)。
 
 PCIe-1433 暂不编入 SDK。公开枚举保留 `IR_NI_IMAQ = 4`，当前调用 `IR_OpenFrames` 会返回 `IR_UNSUPPORTED`。后续确认目标 Windows 设备、NI-IMAQ 版本和接口配置后，可在该采集入口实现后端；这项 Windows API 兼容设计不代表 Linux/WSL 可使用相同驱动。Linux 支持要按具体板卡、驱动和 SDK 组合另行确认。
 

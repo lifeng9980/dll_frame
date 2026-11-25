@@ -1,4 +1,4 @@
-#include "IR_plugin_abi.h"
+#include "IR_plugin_cxx.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdint>

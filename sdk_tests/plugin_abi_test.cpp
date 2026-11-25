@@ -145,7 +145,7 @@ int main(int argc, char **argv)
     fs::copy_file(srcBad, badCopy, fs::copy_options::overwrite_existing);
 
     const Json stationGood{
-        {"schema_version", 1},
+        {"schemav", 1},
         {"acquisition", {
             {"backend", "raw_replay"},
             {"source", utf8(fixture)},
@@ -157,7 +157,7 @@ int main(int argc, char **argv)
     const std::string stGood = stationGood.dump();
 
     const Json stationBad{
-        {"schema_version", 1},
+        {"schemav", 1},
         {"acquisition", {
             {"backend", "raw_replay"},
             {"source", utf8(fixture)},
@@ -167,7 +167,7 @@ int main(int argc, char **argv)
     };
 
     const Json stationNoPlugins{
-        {"schema_version", 1},
+        {"schemav", 1},
         {"acquisition", {
             {"backend", "raw_replay"},
             {"source", utf8(fixture)},
@@ -179,7 +179,7 @@ int main(int argc, char **argv)
 
     // 1. ABI mismatch rejection
     const Json minPluginRecipe{
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "bad-abi-check"},
         {"steps", Json::array({
             {{"id", "cap"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}},
@@ -191,7 +191,7 @@ int main(int argc, char **argv)
 
     // 2. Missing station.plugins rejection & preflight checks
     const Json goodPassRecipe{
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "plugin-pixel-span-pass"},
         {"steps", Json::array({
             {{"id", "cap"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}, {"output", "b0"}},
@@ -261,7 +261,7 @@ int main(int argc, char **argv)
     tightStation["acquisition"]["queue_capacity"] = 2;
     tightStation["acquisition"]["max_inflight_bytes"] = 272;
     const Json burstRecipe{
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "plugin-burst-overwrite"},
         {"steps", Json::array({
             {{"id", "lp"}, {"type", "repeat_burst"}, {"max_iterations", 3},
@@ -284,7 +284,7 @@ int main(int argc, char **argv)
     tinyStation["acquisition"]["queue_capacity"] = 2;
     tinyStation["acquisition"]["max_inflight_bytes"] = 256; // 112+96+32=240 passes PREPARE & ps, staging in_place_add needs 272 > 256
     const Json overBudgetRecipe{
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "plugin-over-budget"},
         {"steps", Json::array({
             {{"id", "c"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}, {"output", "b"}},
@@ -303,7 +303,7 @@ int main(int argc, char **argv)
 
     // 6. C++ exception isolation -> IR_COMPUTATION_FAILED
     const Json throwRecipe{
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "plugin-throw-cxx"},
         {"steps", Json::array({
             {{"id", "c"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}, {"output", "b"}},
@@ -320,7 +320,7 @@ int main(int argc, char **argv)
 
     // 7. Cross-thread IR_RequestStop cancellation via IR_RunRecipeJsonEx event callback
     const Json slowRecipe{
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "plugin-slow-cancel"},
         {"steps", Json::array({
             {{"id", "c"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}, {"output", "b"}},
@@ -361,7 +361,7 @@ int main(int argc, char **argv)
 
     // 8. Same-step input/output slot aliasing safety & duplicate output slot rejection
     const Json aliasRecipe{
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "plugin-alias-safe"},
         {"steps", Json::array({
             {{"id", "cap"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}, {"output", "b0"}},
@@ -378,7 +378,7 @@ int main(int argc, char **argv)
     CHECK(std::abs(recAlias.at("metrics").at("add.mean_out").at("value").get<double>() - 12.0) < 1e-12);
 
     const Json dupOutputRecipe{
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "plugin-dup-out"},
         {"steps", Json::array({
             {{"id", "cap"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}, {"output", "b0"}},
@@ -391,7 +391,7 @@ int main(int argc, char **argv)
 
     // 9. Non-finite scalar emission rejected with IR_COMPUTATION_FAILED
     const Json nanRecipe{
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "plugin-emit-nan"},
         {"steps", Json::array({
             {{"id", "cap"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}, {"output", "b0"}},

@@ -119,7 +119,7 @@ void buildDriftFixture(const fs::path &dir, int32_t rows, int32_t cols,
 Json makeStation(const fs::path &sourceDir, int32_t queueCap = 64)
 {
     return {
-        {"schema_version", 1},
+        {"schemav", 1},
         {"acquisition", {
             {"backend", "raw_replay"},
             {"source", utf8(sourceDir)},
@@ -160,7 +160,7 @@ void testTwoPointCalibNoDiskPassAndNg()
     const Json station = makeStation(fixture, 32);
     auto makeCalibRecipe = [](double limitMaxStd) {
         return Json{
-            {"schema_version", 2},
+            {"schemav", 1},
             {"recipe_id", "two-point-calib-nodisk-v2"},
             {"steps", Json::array({
                 {{"id", "cap_t0"}, {"type", "capture"}, {"frames", 4}, {"frame_timeout_ms", 1000}, {"output", "t0"}},
@@ -205,7 +205,7 @@ void testTwoPointCalibNoDiskPassAndNg()
     CHECK(rr.cleanup_status == IR_OK && rr.completed_frames == 8);
     CHECK(countRawFiles(outPass) == 0);
     const auto recPass = Json::parse(readText(outPass / "result.json"));
-    CHECK(recPass.at("schema_version") == 2);
+    CHECK(recPass.at("schemav") == 1);
     CHECK(recPass.at("run_status") == "PASS");
     const double rnu = recPass.at("metrics").at("gjb_init.after_response_nonuniformity_pct").at("value").get<double>();
     CHECK(rnu > 9.0 && rnu < 9.5);
@@ -235,7 +235,7 @@ void testRepeatBurstNoDiskDrift()
 
     const Json station = makeStation(fixture, 64);
     const Json recipe = {
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "drift-3burst-nodisk-v2"},
         {"steps", Json::array({
             {{"id", "cap_t0"}, {"type", "capture"}, {"frames", 4}, {"frame_timeout_ms", 1000}, {"output", "t0"}},
@@ -352,7 +352,7 @@ void testMultiBatchSaveRawSubdirs()
     buildDriftFixture(fixture, 16, 16, 4, 8, 1);
 
     const Json recipe = {
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "multi-save-v2"},
         {"steps", Json::array({
             {{"id", "cap_t0"}, {"type", "capture"}, {"frames", 4}, {"frame_timeout_ms", 1000}, {"output", "b_t0"}},
@@ -385,7 +385,7 @@ void testRepeatBurstCancelPreservesFlushedCsv()
     buildDriftFixture(fixture, 16, 16, 4, 8, 5);
 
     const Json recipe = {
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "repeat-cancel-v2"},
         {"steps", Json::array({
             {{"id", "loop"}, {"type", "repeat_burst"}, {"max_iterations", 5}, {"interval_sec", 0.5},
@@ -445,7 +445,7 @@ void testPreflightRejections()
 
     // 1. Missing/future slot
     const Json rMissingSlot = {
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "bad-slot"},
         {"steps", Json::array({
             {{"id", "a"}, {"type", "analyze"}, {"method", "frame_stats"}, {"input", "missing"}}
@@ -455,7 +455,7 @@ void testPreflightRejections()
 
     // 2. Slot type mismatch (map passed where batch required)
     const Json rTypeMismatch = {
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "bad-type"},
         {"steps", Json::array({
             {{"id", "c"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}, {"output", "b"}},
@@ -468,7 +468,7 @@ void testPreflightRejections()
 
     // 3. save_raw inside repeat_burst
     const Json rSaveInsideLoop = {
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "bad-loop-save"},
         {"steps", Json::array({
             {{"id", "lp"}, {"type", "repeat_burst"}, {"max_iterations", 2},
@@ -482,7 +482,7 @@ void testPreflightRejections()
 
     // 4. Nested repeat_burst
     const Json rNestedLoop = {
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "bad-nested"},
         {"steps", Json::array({
             {{"id", "lp"}, {"type", "repeat_burst"}, {"max_iterations", 2},
@@ -496,7 +496,7 @@ void testPreflightRejections()
 
     // 5. Path traversal subdir / csv_file
     const Json rBadSubdir = {
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "bad-subdir"},
         {"steps", Json::array({
             {{"id", "c"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}},
@@ -506,7 +506,7 @@ void testPreflightRejections()
     CHECK(IR_CheckRecipeJson(stOk.c_str(), rBadSubdir.dump().c_str(), err, sizeof err) == IR_BAD_ARGUMENT);
 
     const Json rBadCsv = {
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "bad-csv"},
         {"steps", Json::array({
             {{"id", "lp"}, {"type", "repeat_burst"}, {"max_iterations", 1}, {"csv_file", "sub/out.csv"},
@@ -528,7 +528,7 @@ void testPreflightRejections()
         };
     };
     const auto checkInvalidOutputNames = [&](Json steps, const char *recipeId) {
-        const Json recipe{{"schema_version", 2}, {"recipe_id", recipeId}, {"steps", std::move(steps)}};
+        const Json recipe{{"schemav", 1}, {"recipe_id", recipeId}, {"steps", std::move(steps)}};
         return IR_CheckRecipeJson(stOk.c_str(), recipe.dump().c_str(), err, sizeof err);
     };
     CHECK(checkInvalidOutputNames(Json::array({repeatWithCsv("reserved", "result.json")}),
@@ -544,7 +544,7 @@ void testPreflightRejections()
         repeatWithCsv("loop", "Burst.CSV")}), "csv-directory-collision") == IR_BAD_ARGUMENT);
 
     const Json budgetRecipe{
-        {"schema_version", 2}, {"recipe_id", "storage-budget"},
+        {"schemav", 1}, {"recipe_id", "storage-budget"},
         {"steps", Json::array({
             {{"id", "capture"}, {"type", "capture"}, {"frames", 100},
              {"frame_timeout_ms", 0}}
@@ -572,7 +572,7 @@ void testPreflightRejections()
             csv << frame << ",4,4,8,RAW16_LE,16,little\n";
     }
     Json reusedSlotRecipe{
-        {"schema_version", 2}, {"recipe_id", "reused-capture-slot"},
+        {"schemav", 1}, {"recipe_id", "reused-capture-slot"},
         {"steps", Json::array()}
     };
     for (int index = 0; index < 10; ++index) {
@@ -593,7 +593,7 @@ void testPreflightRejections()
     CHECK(fs::is_regular_file(reuseOut / "frames.raw"));
 
     const Json archiveThenReuseRecipe{
-        {"schema_version", 2}, {"recipe_id", "archive-before-reuse"},
+        {"schemav", 1}, {"recipe_id", "archive-before-reuse"},
         {"steps", Json::array({
             {{"id", "capture_first"}, {"type", "capture"}, {"frames", 2},
              {"frame_timeout_ms", 0}, {"output", "same_batch"}},
@@ -634,7 +634,7 @@ void testPreflightRejections()
         marker << "preserve";
     }
     const Json oneFrameRecipe{
-        {"schema_version", 2}, {"recipe_id", "existing-output-check"},
+        {"schemav", 1}, {"recipe_id", "existing-output-check"},
         {"steps", Json::array({{{"id", "capture"}, {"type", "capture"},
                                  {"frames", 1}, {"frame_timeout_ms", 0}}})}
     };
@@ -644,7 +644,7 @@ void testPreflightRejections()
 
     // 6. Invalid station queue_capacity
     const Json rSimple = {
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "ok"},
         {"steps", Json::array({{{"id", "c"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}}})}
     };
@@ -671,7 +671,7 @@ void testPreflightRejections()
     CHECK(IR_CloseFrames(err, sizeof err) == IR_OK);
 
     const Json nestedCaptureFailure{
-        {"schema_version", 2}, {"recipe_id", "nested-failure-index"},
+        {"schemav", 1}, {"recipe_id", "nested-failure-index"},
         {"steps", Json::array({
             {{"id", "before"}, {"type", "capture"}, {"frames", 1},
              {"frame_timeout_ms", 0}},
@@ -714,7 +714,7 @@ void testGaussianFilterAndFlickerDetectV2()
     }
 
     const Json recipe = {
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "v2-gaussian-flicker"},
         {"steps", Json::array({
             {{"id", "cap"}, {"type", "capture"}, {"frames", 4}, {"frame_timeout_ms", 0}, {"output", "b"}},
@@ -780,7 +780,7 @@ void testFft2dPipelineV2()
     }
 
     const Json recipe = {
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "v2-fft2d"},
         {"steps", Json::array({
             {{"id", "cap"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}, {"output", "b"}},
@@ -824,7 +824,7 @@ void testRunRecipeJsonExStepCallbacks()
 
     const std::string stJson = makeStation(fixture, 16).dump();
     const Json okRecipe{
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "callbacks-ok"},
         {"steps", Json::array({
             {{"id", "cap"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}, {"output", "b"}},
@@ -856,15 +856,16 @@ void testRunRecipeJsonExStepCallbacks()
     CHECK(log.items[2] == std::make_pair(int32_t(IR_STEP_EVENT_STARTED), std::string("tn")));
     CHECK(log.items[3] == std::make_pair(int32_t(IR_STEP_EVENT_COMPLETED), std::string("tn")));
 
-    // Invalid options rejected cleanly
+    // Invalid options rejected cleanly with VALIDATE stage
     IRRecipeRunOptions badOpts{0, 0, cb, &log};
     CHECK(IR_RunRecipeJsonEx(stJson.c_str(), okRecipe.dump().c_str(),
                              utf8(root.path() / "out_bad").c_str(), &badOpts, &rr, err, sizeof err) == IR_BAD_ARGUMENT);
+    CHECK(rr.failed_stage == IR_RECIPE_STAGE_VALIDATE);
 
     // Failed step triggers IR_STEP_EVENT_FAILED
     log.items.clear();
     const Json failRecipe{
-        {"schema_version", 2},
+        {"schemav", 1},
         {"recipe_id", "callbacks-fail"},
         {"steps", Json::array({
             {{"id", "cap_too_many"}, {"type", "capture"}, {"frames", 99}, {"frame_timeout_ms", 0}, {"output", "b"}}

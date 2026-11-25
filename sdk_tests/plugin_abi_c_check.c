@@ -1,6 +1,5 @@
 #include "IR_plugin_abi.h"
 #include "IR_recipe.h"
-#include "IR_station.h"
 #include "IR_status.h"
 #include <stdio.h>
 #include <string.h>
@@ -15,12 +14,17 @@ int main(void)
         fprintf(stderr, "Unexpected query symbol: %s\n", IR_PLUGIN_QUERY_V1_SYMBOL);
         return 1;
     }
-    if (sizeof(IRRecipeStepEvent) != 56) {
-        fprintf(stderr, "Unexpected IRRecipeStepEvent size: %zu\n", sizeof(IRRecipeStepEvent));
-        return 1;
-    }
-    if (sizeof(IRRecipeRunOptions) != 24) {
-        fprintf(stderr, "Unexpected IRRecipeRunOptions size: %zu\n", sizeof(IRRecipeRunOptions));
+    if (sizeof(IRRecipeStepEvent) != 56 ||
+        sizeof(IRRecipeRunOptions) != 24 ||
+        sizeof(IRPluginHeader) != 32 ||
+        sizeof(IRSlotView) != 48 ||
+        sizeof(IRPrepareCallbacksV1) != 40 ||
+        sizeof(IRHostCallbacksV1) != 72 ||
+        sizeof(IRMetricPluginV1) != 80) {
+        fprintf(stderr, "Unexpected ABI struct size: step=%zu opts=%zu hdr=%zu slot=%zu prep=%zu host=%zu desc=%zu\n",
+                sizeof(IRRecipeStepEvent), sizeof(IRRecipeRunOptions),
+                sizeof(IRPluginHeader), sizeof(IRSlotView),
+                sizeof(IRPrepareCallbacksV1), sizeof(IRHostCallbacksV1), sizeof(IRMetricPluginV1));
         return 1;
     }
 

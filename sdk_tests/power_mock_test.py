@@ -310,16 +310,16 @@ def main():
                 "frame_index,width,height,stride_bytes,pixel_format,bit_depth,endianness\n"
                 "0,1,1,2,RAW16_LE,16,little\n1,1,1,2,RAW16_LE,16,little\n", encoding="utf-8")
             station = {
-                "schema_version": 1,
+                "schemav": 1,
                 "acquisition": {"backend": "raw_replay", "source": str(raw), "valid_bits": 16},
                 "devices": {"supply": {"kind": "it6332a", "connection": json.loads(config)}},
             }
             read_failure_recipe = {
-                "schema_version": 1,
+                "schemav": 1,
                 "recipe_id": "serial-power-reconnect-exhausted",
                 "steps": [
                     {"id": "read", "type": "power_read", "device": "supply", "channel": 1},
-                    {"id": "batch", "type": "capture", "frames": 2, "frame_timeout_ms": 0},
+                    {"id": "batch", "type": "capture", "frames": 2, "frame_timeout_ms": 0, "output": "batch"},
                     {"id": "noise", "type": "analyze", "method": "temporal_noise",
                      "name": "noise", "input": "batch"},
                     {"id": "archive", "type": "save_raw", "input": "batch"},
@@ -336,13 +336,13 @@ def main():
             assert controller.drop_count == 0 and not failed_output.exists()
 
             recipe = {
-                "schema_version": 1,
+                "schemav": 1,
                 "recipe_id": "serial-power-recipe",
                 "steps": [
                     {"id": "set", "type": "power_set", "device": "supply", "channel": 1,
                      "voltage_v": 12.0, "current_limit_a": 2.0},
                     {"id": "read", "type": "power_read", "device": "supply", "channel": 1},
-                    {"id": "batch", "type": "capture", "frames": 2, "frame_timeout_ms": 0},
+                    {"id": "batch", "type": "capture", "frames": 2, "frame_timeout_ms": 0, "output": "batch"},
                     {"id": "noise", "type": "analyze", "method": "temporal_noise",
                      "name": "noise", "input": "batch"},
                     {"id": "archive", "type": "save_raw", "input": "batch"},
@@ -379,7 +379,7 @@ def main():
             assert not commands and not (root / "over-budget").exists()
 
             invalid_roi = {"id": "invalid_roi", "type": "analyze", "name": "roi", "method": "roi_mean",
-                           "input": "batch", "x": 1, "y": 0, "width": 1, "height": 1}
+                           "input": "batch", "params": {"x": 1, "y": 0, "width": 1, "height": 1}}
             roi_recipe = dict(recipe, steps=[*powered_recipe["steps"][:-1], invalid_roi, powered_recipe["steps"][-1]])
             report, detail = run_recipe(sdk, station, roi_recipe, root / "outside-image")
             assert report == (2, 0, 3, 3, 0) and b"ROI" in detail, (report, detail)

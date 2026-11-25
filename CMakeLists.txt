@@ -102,11 +102,11 @@ endif()
 # 流程编排与算子插件：协调仪器、采集和独立的 IR_analysis 指标库。
 target_sources(IR_station PRIVATE
     station/plugins/plugin_manager.cpp
+    station/plugins/plugin_metric_provider.cpp
     station/procedures/measurement.cpp
     station/procedures/noise_run.cpp
     station/procedures/recipe_config.cpp
     station/procedures/recipe_json.cpp
-    station/procedures/recipe_metrics.cpp
     station/procedures/metrics_v2_basic.cpp
     station/procedures/metrics_v2_standard.cpp
     station/procedures/metrics_v2_spectral.cpp
@@ -311,6 +311,8 @@ install(DIRECTORY simulators/ DESTINATION simulators
     PATTERN "*.pyo" EXCLUDE)
 install(DIRECTORY examples/ DESTINATION examples
     PATTERN "output" EXCLUDE
+    PATTERN "tc002a_640" EXCLUDE
+    PATTERN "s07_1280" EXCLUDE
     PATTERN "__pycache__" EXCLUDE
     PATTERN "*.pyc" EXCLUDE
     PATTERN "*.pyo" EXCLUDE

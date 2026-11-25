@@ -86,15 +86,15 @@ void writeRaw(const fs::path &path)
 Json makeRecipe(double noiseLimit)
 {
     return {
-        {"$schema", "../schemas/recipe.schema.json"},
-        {"schema_version", 1},
-        {"recipe_id", "roi-and-noise-test-v1"},
+        {"schemav", 1},
+        {"recipe_id", "roi-and-noise-test"},
         {"steps", Json::array({
-            {{"id", "batch"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}},
+            {{"id", "batch"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}, {"output", "batch"}},
             {{"id", "noise"}, {"type", "analyze"}, {"method", "temporal_noise"},
              {"name", "noise"}, {"input", "batch"}},
             {{"id", "left"}, {"type", "analyze"}, {"method", "roi_mean"},
-             {"name", "left"}, {"input", "batch"}, {"x", 0}, {"y", 0}, {"width", 1}, {"height", 2}},
+             {"name", "left"}, {"input", "batch"},
+             {"params", {{"x", 0}, {"y", 0}, {"width", 1}, {"height", 2}}}},
             {{"id", "archive"}, {"type", "save_raw"}, {"input", "batch"}}
         })},
         {"limits", Json::array({{{"metric", "noise.temporal_noise_dn"}, {"operator", "max"},
@@ -109,11 +109,11 @@ void checkBundledTemplates(const fs::path &examplesDir)
     const std::vector<std::pair<std::string, std::string>> pairs{
         {"offline.json", "noise_roi.json"},
         {"roi_2x2.json", "noise_roi_2x2.json"},
-        {"roi_2x2.json", "nodisk_roi_v2.json"},
+        {"roi_2x2.json", "nodisk_roi.json"},
         {"sim_tcp.json", "noise_blackbody.json"},
         {"sim_power_serial.json", "power_serial_smoke.json"},
         {"sim_power_serial.json", "power_serial_output_cycle.json"},
-        {"sim_virtual_station_tcp.json", "virtual_station_hil_v2.json"},
+        {"sim_virtual_station_tcp.json", "virtual_station_hil.json"},
     };
 
     std::set<std::string> checkedStations;
@@ -127,16 +127,10 @@ void checkBundledTemplates(const fs::path &examplesDir)
 
         const auto stationJson = Json::parse(stationText);
         const auto recipeJson = Json::parse(recipeText);
-        check(stationJson.contains("$schema") && stationJson.at("$schema").is_string(),
-              "bundled station template must declare string $schema");
-        check(recipeJson.contains("$schema") && recipeJson.at("$schema").is_string(),
-              "bundled recipe template must declare string $schema");
-        const auto stationSchemaPath =
-            (stationPath.parent_path() / fs::path(stationJson.at("$schema").get<std::string>())).lexically_normal();
-        const auto recipeSchemaPath =
-            (recipePath.parent_path() / fs::path(recipeJson.at("$schema").get<std::string>())).lexically_normal();
-        check(fs::is_regular_file(stationSchemaPath), "station $schema target must exist");
-        check(fs::is_regular_file(recipeSchemaPath), "recipe $schema target must exist");
+        check(!stationJson.contains("$schema") && !recipeJson.contains("$schema"),
+              "bundled templates must not declare $schema");
+        check(!stationJson.contains("schema_version") && !recipeJson.contains("schema_version"),
+              "bundled templates must not declare legacy schema_version");
 
         const auto status = IR_CheckRecipeJson(stationText.c_str(), recipeText.c_str(), error, sizeof error);
         if (status != IR_OK) {
@@ -173,8 +167,7 @@ int main(int argc, char **argv)
         writeRaw(rawPath);
 
         Json station{
-            {"$schema", "../schemas/station.schema.json"},
-            {"schema_version", 1},
+            {"schemav", 1},
             {"acquisition", {{"backend", "raw_replay"}, {"source", pathUtf8(rawPath)},
                               {"valid_bits", 16}, {"max_batch_bytes", 64}}},
             {"devices", Json::object()}
@@ -186,29 +179,35 @@ int main(int argc, char **argv)
         check(IR_CheckRecipeJson(stationText.c_str(), recipeText.c_str(), error, sizeof error) == IR_OK,
               error);
 
+        // Omitting schemav defaults cleanly to 1
+        auto defaultStation = station;
+        defaultStation.erase("schemav");
+        auto defaultRecipe = recipe;
+        defaultRecipe.erase("schemav");
+        check(IR_CheckRecipeJson(defaultStation.dump().c_str(), defaultRecipe.dump().c_str(),
+                                 error, sizeof error) == IR_OK,
+              "omitting schemav must succeed by default");
+
+        // Legacy $schema and schema_version must be rejected
         auto badStationSchema = station;
-        badStationSchema["$schema"] = 123;
-        const auto badStationSchemaText = badStationSchema.dump();
-        check(IR_CheckRecipeJson(badStationSchemaText.c_str(), recipeText.c_str(), error, sizeof error) == IR_BAD_ARGUMENT,
-              "non-string station $schema must be rejected");
+        badStationSchema["$schema"] = "../schemas/station.schema.json";
+        check(IR_CheckRecipeJson(badStationSchema.dump().c_str(), recipeText.c_str(), error, sizeof error) == IR_BAD_ARGUMENT,
+              "legacy station $schema must be rejected");
 
         auto badRecipeSchema = recipe;
-        badRecipeSchema["$schema"] = nullptr;
-        const auto badRecipeSchemaText = badRecipeSchema.dump();
-        check(IR_CheckRecipeJson(stationText.c_str(), badRecipeSchemaText.c_str(), error, sizeof error) == IR_BAD_ARGUMENT,
-              "non-string recipe $schema must be rejected");
+        badRecipeSchema["$schema"] = "../schemas/recipe.schema.json";
+        check(IR_CheckRecipeJson(stationText.c_str(), badRecipeSchema.dump().c_str(), error, sizeof error) == IR_BAD_ARGUMENT,
+              "legacy recipe $schema must be rejected");
 
-        auto nestedStationSchema = station;
-        nestedStationSchema["acquisition"]["$schema"] = "../schemas/station.schema.json";
-        const auto nestedStationSchemaText = nestedStationSchema.dump();
-        check(IR_CheckRecipeJson(nestedStationSchemaText.c_str(), recipeText.c_str(), error, sizeof error) == IR_BAD_ARGUMENT,
-              "nested station $schema must be rejected");
+        auto legacyStationVer = defaultStation;
+        legacyStationVer["schema_version"] = 1;
+        check(IR_CheckRecipeJson(legacyStationVer.dump().c_str(), recipeText.c_str(), error, sizeof error) == IR_BAD_ARGUMENT,
+              "legacy station schema_version must be rejected");
 
-        auto nestedRecipeSchema = recipe;
-        nestedRecipeSchema["steps"][0]["$schema"] = "../schemas/recipe.schema.json";
-        const auto nestedRecipeSchemaText = nestedRecipeSchema.dump();
-        check(IR_CheckRecipeJson(stationText.c_str(), nestedRecipeSchemaText.c_str(), error, sizeof error) == IR_BAD_ARGUMENT,
-              "nested recipe $schema must be rejected");
+        auto legacyRecipeVer = defaultRecipe;
+        legacyRecipeVer["schema_version"] = 2;
+        check(IR_CheckRecipeJson(stationText.c_str(), legacyRecipeVer.dump().c_str(), error, sizeof error) == IR_BAD_ARGUMENT,
+              "legacy recipe schema_version must be rejected");
 
         auto malformed = recipe;
         malformed["steps"][1]["not_a_field"] = true;

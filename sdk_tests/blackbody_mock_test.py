@@ -351,22 +351,22 @@ def exercise_json_recipe(sdk, controller, config, fixture):
     error = c.create_string_buffer(1024)
     kind = "pcn7-lt" if controller.tcp else "dcn1000"
     station = {
-        "schema_version": 1,
+        "schemav": 1,
         "acquisition": {"backend": "raw_replay", "source": str(fixture), "valid_bits": 16},
         "devices": {"bb": {"kind": kind, "connection": config}},
     }
     recipe = {
-        "schema_version": 1,
+        "schemav": 1,
         "recipe_id": "mock-json-blackbody-noise",
         "steps": [
             {"id": "stable", "type": "blackbody_stabilize", "device": "bb",
              "target_c": 32.0, "tolerance_c": 0.01, "stable_window_ms": 0,
              "timeout_ms": 1500, "require_device_stable": True},
-            {"id": "batch", "type": "capture", "frames": 2, "frame_timeout_ms": 0},
+            {"id": "batch", "type": "capture", "frames": 2, "frame_timeout_ms": 0, "output": "batch"},
             {"id": "noise", "type": "analyze", "method": "temporal_noise",
              "name": "noise", "input": "batch"},
             {"id": "roi", "type": "analyze", "method": "roi_mean", "name": "roi",
-             "input": "batch", "x": 0, "y": 0, "width": 1, "height": 1},
+             "input": "batch", "params": {"x": 0, "y": 0, "width": 1, "height": 1}},
             {"id": "archive", "type": "save_raw", "input": "batch"},
         ],
         "limits": [{"metric": "noise.temporal_noise_dn", "operator": "max",
@@ -408,10 +408,10 @@ def exercise_json_recipe(sdk, controller, config, fixture):
     assert not timeout_output.exists()
     controller.stable = True
 
-    # Schema v2: multi-temperature capture (20 -> 30 °C), zero save_raw, and safety blackbody standby (24.5 °C)
+    # Multi-temperature capture (20 -> 30 °C), zero save_raw, and safety blackbody standby (24.5 °C)
     recipe_v2 = {
-        "schema_version": 2,
-        "recipe_id": "mock-v2-multitemp-standby",
+        "schemav": 1,
+        "recipe_id": "mock-multitemp-standby",
         "steps": [
             {"id": "bb_cold", "type": "blackbody_stabilize", "device": "bb",
              "target_c": 20.0, "tolerance_c": 0.05, "stable_window_ms": 0,
@@ -445,7 +445,7 @@ def exercise_json_recipe(sdk, controller, config, fixture):
     assert controller.target == 24.5, controller.target
     assert not list(v2_out.rglob("*.raw"))
     v2_rec = json.loads((v2_out / "result.json").read_text(encoding="utf8"))
-    assert v2_rec["schema_version"] == 2 and v2_rec["run_status"] == "PASS" and v2_rec["raw_saved"] is False
+    assert v2_rec["schemav"] == 1 and v2_rec["run_status"] == "PASS" and v2_rec["raw_saved"] is False
     assert [c_row["target_c"] for c_row in v2_rec["conditions"]] == [20.0, 30.0]
     assert v2_rec["metrics"]["hot.mean_dn"]["value"] == 22.0
 
@@ -555,18 +555,18 @@ def exercise_json_recipe_ownership(args, sdk, controller, config):
 
         kind = "pcn7-lt" if controller.tcp else "dcn1000"
         station = {
-            "schema_version": 1,
+            "schemav": 1,
             "acquisition": {"backend": "raw_replay", "source": str(fixture), "valid_bits": 16},
             "devices": {"bb": {"kind": kind, "connection": config}},
         }
         recipe = {
-            "schema_version": 1,
+            "schemav": 1,
             "recipe_id": "json-cancel-and-retry",
             "steps": [
                 {"id": "stable", "type": "blackbody_stabilize", "device": "bb",
                  "target_c": 32.0, "tolerance_c": 0.01, "stable_window_ms": 3000,
                  "timeout_ms": 5000, "require_device_stable": True},
-                {"id": "batch", "type": "capture", "frames": 2, "frame_timeout_ms": 0},
+                {"id": "batch", "type": "capture", "frames": 2, "frame_timeout_ms": 0, "output": "batch"},
                 {"id": "noise", "type": "analyze", "method": "temporal_noise",
                  "name": "noise", "input": "batch"},
                 {"id": "archive", "type": "save_raw", "input": "batch"},

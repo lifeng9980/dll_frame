@@ -2,15 +2,20 @@
 #define IR_PLUGIN_ABI_H
 
 /*
- * Pure C plugin ABI for external metric operators loaded by IR_station.
+ * Pure C99/C11 plugin ABI for external metric operators loaded by IR_station.
  * All strings are UTF-8. All C ABI status returns use int32_t values from IRStatus.
- * C++ plugins must catch exceptions inside extern "C" callbacks (see ir_plugin_guard).
+ * C++ plugins must catch exceptions inside extern "C" callbacks (see IR_plugin_cxx.hpp).
+ *
+ * Lifetimes:
+ * - out_list and IRMetricPluginV1 descriptor strings must remain valid until library unload.
+ * - IRPrepareCallbacksV1, IRHostCallbacksV1, and params_json are valid only during the call.
+ * - IRSlotView::data, stamps, and alloc_* pointers are valid only during execute().
  */
 
 #include <stddef.h>
 #include <stdint.h>
 #include "IR_status.h"
-#include "IR_station.h"
+#include "IR_types.h"
 
 #if defined(_WIN32) || defined(__CYGWIN__)
 #define IR_PLUGIN_EXPORT __declspec(dllexport)
@@ -27,6 +32,13 @@
 extern "C" {
 #endif
 
+/*
+ * Slot payload types returned in IRSlotView::data:
+ * - IR_PLUGIN_SLOT_BATCH:         const uint16_t* [frames * height * width], stamps != NULL
+ * - IR_PLUGIN_SLOT_DOUBLE_MAP:    const double*   [height * width]
+ * - IR_PLUGIN_SLOT_BYTE_MASK:     const uint8_t*  [height * width]
+ * - IR_PLUGIN_SLOT_DRIFT_CONTEXT: const IRGjbDriftContext* (see IR_analysis.h)
+ */
 typedef enum IRPluginSlotKind {
     IR_PLUGIN_SLOT_BATCH = 1,
     IR_PLUGIN_SLOT_DOUBLE_MAP = 2,
@@ -63,6 +75,7 @@ typedef struct IRSlotView {
 
 typedef struct IRPrepareCallbacksV1 {
     uint32_t struct_size;
+    uint32_t reserved;
     void *prepare_ctx;
     int32_t (*require_input_slot)(void *prepare_ctx, const char *input_key,
                                   int32_t expected_slot_kind, int32_t required,
@@ -76,6 +89,7 @@ typedef struct IRPrepareCallbacksV1 {
 
 typedef struct IRHostCallbacksV1 {
     uint32_t struct_size;
+    uint32_t reserved;
     void *host_ctx;
     int32_t (*has_slot)(void *host_ctx, const char *io_key);
     int32_t (*get_slot)(void *host_ctx, const char *input_key, IRSlotView *out_view);
@@ -106,41 +120,6 @@ typedef int32_t (*IRPluginQueryV1Fn)(const IRMetricPluginV1 **out_list,
                                      uint32_t *out_count);
 
 #ifdef __cplusplus
-}
-#endif
-
-#ifdef __cplusplus
-#include <cstring>
-#include <exception>
-
-/*
- * Helper for C++ plugin implementations so exceptions never unwind across
- * the extern "C" ABI boundary.
- */
-template <class Fn>
-inline int32_t ir_plugin_guard(char *err, int32_t err_bytes, Fn &&fn) noexcept
-{
-    if (err && err_bytes > 0)
-        err[0] = '\0';
-    auto copy_err = [err, err_bytes](const char *msg) noexcept {
-        if (!err || err_bytes <= 0 || !msg)
-            return;
-        size_t len = std::strlen(msg);
-        const size_t max_len = static_cast<size_t>(err_bytes - 1);
-        if (len > max_len)
-            len = max_len;
-        std::memcpy(err, msg, len);
-        err[len] = '\0';
-    };
-    try {
-        return fn();
-    } catch (const std::exception &e) {
-        copy_err(e.what());
-        return IR_COMPUTATION_FAILED;
-    } catch (...) {
-        copy_err("Unhandled C++ exception in plugin");
-        return IR_COMPUTATION_FAILED;
-    }
 }
 #endif
 

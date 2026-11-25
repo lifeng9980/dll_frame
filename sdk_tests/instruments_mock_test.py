@@ -492,7 +492,7 @@ def exercise_recipe_v2(sdk, oven: GwsStenOven, oven_port: int,
                        cooler: CoolerModbus, cooler_port: int,
                        fixture_dir: Path, work_dir: Path):
     station = {
-        "schema_version": 1,
+        "schemav": 1,
         "acquisition": {
             "backend": "raw_replay",
             "source": str(fixture_dir),
@@ -518,8 +518,8 @@ def exercise_recipe_v2(sdk, oven: GwsStenOven, oven_port: int,
         },
     }
     pass_recipe = {
-        "schema_version": 2,
-        "recipe_id": "multi-instrument-v2-pass",
+        "schemav": 1,
+        "recipe_id": "multi-instrument-pass",
         "steps": [
             {
                 "id": "ov1", "type": "oven_stabilize", "device": "oven",
@@ -578,10 +578,10 @@ def exercise_recipe_v2(sdk, oven: GwsStenOven, oven_port: int,
         (0x41, b"\x03"),
     ], det.frames
 
-    # Repeat-burst v2 check emitting dmm.value in CSV
+    # Repeat-burst check emitting dmm.value in CSV
     burst_recipe = {
-        "schema_version": 2,
-        "recipe_id": "multi-instrument-v2-burst",
+        "schemav": 1,
+        "recipe_id": "multi-instrument-burst",
         "steps": [
             {
                 "id": "loop",
@@ -606,8 +606,8 @@ def exercise_recipe_v2(sdk, oven: GwsStenOven, oven_port: int,
     # Forced-failure case: DMM left in DIOD, recipe asserts expected DCV without set_mode;
     # oven_stabilize sets standby_after_run=True and must be returned to STANDBY in cleanup.
     fail_recipe = {
-        "schema_version": 2,
-        "recipe_id": "multi-instrument-v2-cleanup",
+        "schemav": 1,
+        "recipe_id": "multi-instrument-cleanup",
         "steps": [
             {
                 "id": "ov_fail", "type": "oven_stabilize", "device": "oven",
@@ -653,7 +653,7 @@ def exercise_recipe_v2(sdk, oven: GwsStenOven, oven_port: int,
 
     nonexistent_com = "COM250" if os.name == "nt" else "/dev/ir_sdk_nonexistent_tty"
     partial_reserve_station = {
-        "schema_version": 1,
+        "schemav": 1,
         "acquisition": {
             "backend": "raw_replay",
             "source": str(fixture_dir),
@@ -671,7 +671,7 @@ def exercise_recipe_v2(sdk, oven: GwsStenOven, oven_port: int,
         },
     }
     partial_reserve_recipe = {
-        "schema_version": 2,
+        "schemav": 1,
         "recipe_id": "partial-reserve-fail",
         "steps": [
             {

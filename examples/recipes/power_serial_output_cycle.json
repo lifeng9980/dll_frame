@@ -1,13 +1,12 @@
 {
-  "$schema": "../schemas/recipe.schema.json",
-  "schema_version": 1,
-  "recipe_id": "sim-power-output-cycle-v1",
+  "schemav": 1,
+  "recipe_id": "sim-power-output-cycle",
   "steps": [
     {"id": "set_ch1", "type": "power_set", "device": "supply", "channel": 1,
      "voltage_v": 12.0, "current_limit_a": 2.0},
     {"id": "enable_ch1", "type": "power_output", "device": "supply", "channel": 1,
      "enabled": true, "off_after_run": true},
-    {"id": "batch", "type": "capture", "frames": 2, "frame_timeout_ms": 0},
+    {"id": "batch", "type": "capture", "frames": 2, "frame_timeout_ms": 0, "output": "batch"},
     {"id": "noise", "type": "analyze", "method": "temporal_noise", "name": "noise", "input": "batch"},
     {"id": "archive", "type": "save_raw", "input": "batch"}
   ]

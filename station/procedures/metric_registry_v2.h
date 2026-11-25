@@ -62,6 +62,8 @@ inline void recordScalarOutputs(ExecutionContext &ctx, const std::string &name,
 IRCalcParameters parseCalcParams(const Json &params, const std::string &path);
 int32_t parseNoiseSubtractMode(const std::string &text, const std::string &path);
 int32_t parseWindowKind(const std::string &text, const std::string &path);
+Json normalizeInputsObject(const Json &fields, const char *defaultInputKey,
+                           const std::string &method, const std::string &path);
 
 std::span<const MetricSpecV2> basicMetricsV2() noexcept;
 std::span<const MetricSpecV2> standardMetricsV2() noexcept;

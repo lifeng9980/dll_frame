@@ -165,7 +165,7 @@ def main():
         station_path = work / "station.json"
         host_bb_path = work / "host_blackbody.json"
         raw_dir = REPO_ROOT / "examples/data/raw16"
-        recipe_path = REPO_ROOT / "examples/recipes/virtual_station_hil_v2.json"
+        recipe_path = REPO_ROOT / "examples/recipes/virtual_station_hil.json"
 
         sim_cmd = [
             sys.executable, "-B",

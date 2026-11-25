@@ -14,11 +14,8 @@
 #include <variant>
 #include <vector>
 
-namespace ir::plugins {
-class PluginManager;
-}
-
 namespace ir::procedures::recipe {
+class IMetricProviderV2;
 using Json = nlohmann::json;
 
 struct DeviceConfig {
@@ -60,36 +57,11 @@ struct PowerStep {
     bool offAfterRun{};
 };
 
-struct CaptureStep {
-    StepRef ref;
-    int32_t frames{};
-    int32_t timeoutMs{};
-};
-
 // 只有采集写入像素。指标和归档都以 const 引用使用完整批次。
 struct FrameBatch {
     IRGeometry geometry{};
     std::vector<uint16_t> pixels;
     std::vector<IRFrameStamp> stamps;
-};
-
-struct MetricOutput {
-    const char *suffix;
-    const char *unit;
-    const char *method;
-    int32_t version;
-};
-
-struct MetricOperations {
-    std::function<void(IRGeometry)> checkGeometry;
-    std::function<std::vector<double>(const FrameBatch &)> calculate;
-};
-
-struct AnalysisStep {
-    StepRef ref;
-    std::string name;
-    std::span<const MetricOutput> outputs;
-    MetricOperations operations;
 };
 
 struct Limit {
@@ -99,18 +71,7 @@ struct Limit {
     double threshold;
 };
 
-struct RecipeConfig {
-    std::string id;
-    std::vector<std::variant<BlackbodyStep, PowerStep>> controls;
-    CaptureStep capture;
-    std::vector<AnalysisStep> analysis;
-    StepRef archive;
-    std::vector<Limit> limits;
-    std::vector<std::string> deviceAliases;
-    Json definition;  // 已通过预检的配方内容，用于保存实际计算参数。
-};
-
-// ======================== Schema v2 数据流与可组合算子模型 ========================
+// ======================== 统一配方数据流与可组合算子模型 (schemav) ========================
 
 enum class SlotKind { batch, double_map, byte_mask, drift_context };
 
@@ -317,9 +278,8 @@ struct RecipeConfigV2 {
 };
 
 StationConfig parseStation(const char *text);
-RecipeConfig parseRecipe(const char *text, const StationConfig &station);
-int detectRecipeSchemaVersion(const char *text);
-RecipeConfigV2 parseRecipeV2(const char *text, const StationConfig &station);
+RecipeConfigV2 parseRecipeV2(const char *text, const StationConfig &station,
+                             const IMetricProviderV2 *externalMetrics = nullptr);
 void runRecipeV2(ir::acquisition::Capture &capture, const StationConfig &station,
                  const RecipeConfigV2 &recipe, const char *directory, IRRecipeResult &result,
                  const IRRecipeRunOptions *options = nullptr);
@@ -348,8 +308,7 @@ BlackbodyStep parseBlackbodyStep(StepRef ref, const Json &fields, const std::str
                                  const StationConfig &station);
 PowerStep parsePowerStep(StepRef ref, const std::string &type, const Json &fields,
                          const std::string &path, const StationConfig &station);
-AnalysisStep prepareAnalysis(StepRef ref, const Json &fields, const std::string &path, int32_t frames);
 AnalysisStepV2 prepareAnalysisV2(StepRef ref, const Json &fields, const std::string &path,
                                  std::map<std::string, SlotKind> &knownSlots,
-                                 const ir::plugins::PluginManager *plugins = nullptr);
+                                 const IMetricProviderV2 *externalMetrics = nullptr);
 } // namespace ir::procedures::recipe

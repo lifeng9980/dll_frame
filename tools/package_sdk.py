@@ -17,15 +17,14 @@ import zipfile
 
 COMMON_ITEMS = ("include", "docs", "examples", "simulators", "third_party", "SDK.md")
 REQUIRED_CUSTOMER_FILES = (
+    "include/IR_types.h",
     "include/IR_plugin_abi.h",
+    "include/IR_plugin_cxx.hpp",
     "SDK.md",
     "docs/客户接入说明.md",
     "docs/测试人员配方指南.md",
     "docs/设备支持矩阵.md",
     "docs/第三方组件.md",
-    "examples/schemas/station.schema.json",
-    "examples/schemas/recipe.schema.json",
-    "examples/schemas/recipe.v2.schema.json",
 )
 FORBIDDEN_PACKAGE_FILES = (
     "实施计划.md",
@@ -175,13 +174,6 @@ def scan_package_hygiene(stage):
                 continue
             if not isinstance(data, dict):
                 continue
-            schema_ref = data.get("$schema")
-            if isinstance(schema_ref, str) and not schema_ref.startswith(("http://", "https://")):
-                resolved_schema = (path.parent / schema_ref).resolve()
-                if not resolved_schema.is_relative_to(stage):
-                    violations.append(f"{relative}: out-of-package $schema path: {schema_ref}")
-                elif not resolved_schema.is_file():
-                    violations.append(f"{relative}: missing $schema target: {schema_ref}")
             if rel_parts[1] == "stations":
                 acquisition = data.get("acquisition")
                 if isinstance(acquisition, dict) and acquisition.get("backend") == "raw_replay":

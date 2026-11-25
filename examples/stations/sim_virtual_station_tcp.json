@@ -1,6 +1,5 @@
 {
-  "$schema": "../schemas/station.schema.json",
-  "schema_version": 1,
+  "schemav": 1,
   "acquisition": {
     "backend": "raw_replay",
     "source": "../data/raw16",

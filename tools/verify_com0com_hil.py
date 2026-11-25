@@ -222,7 +222,7 @@ def main():
     station_lib = args.station_lib.resolve()
     cli_path = args.cli.resolve()
     serial_map_path = args.serial_map.resolve()
-    recipe_path = (REPO_ROOT / "examples" / "recipes" / "virtual_station_hil_v2.json").resolve()
+    recipe_path = (REPO_ROOT / "examples" / "recipes" / "virtual_station_hil.json").resolve()
     raw_dir = (REPO_ROOT / "examples" / "data" / "raw16").resolve()
     serial_map = json.loads(serial_map_path.read_text(encoding="utf-8"))
 

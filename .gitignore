@@ -1,3 +1,6 @@
 /实验/
 /CMakeUserPresets.json
+/.vscode/
 __pycache__/
+/examples/data/tc002a_640/
+/examples/data/s07_1280/

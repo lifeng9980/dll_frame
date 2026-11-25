@@ -334,7 +334,7 @@ def build_station_json(endpoints, raw_source):
                   "stop_bits": ep.get("stop_bits", 2), "slave_address": 1, "register_address": 31314, "timeout_ms": 1500}
         devices["cooler"] = {"kind": "cooler-modbus", "connection": conn}
     return {
-        "schema_version": 1,
+        "schemav": 1,
         "acquisition": {
             "backend": "raw_replay",
             "source": str(raw_source),

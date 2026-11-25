@@ -1,7 +1,6 @@
 {
-  "$schema": "../schemas/recipe.v2.schema.json",
-  "schema_version": 2,
-  "recipe_id": "virtual-station-hil-v2",
+  "schemav": 1,
+  "recipe_id": "virtual-station-hil",
   "steps": [
     {
       "id": "pwr_ch1_cfg",

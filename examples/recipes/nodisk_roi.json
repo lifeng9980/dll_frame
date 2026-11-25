@@ -1,7 +1,6 @@
 {
-  "$schema": "../schemas/recipe.v2.schema.json",
-  "schema_version": 2,
-  "recipe_id": "example-nodisk-roi-v2",
+  "schemav": 1,
+  "recipe_id": "example-nodisk-roi",
   "steps": [
     {
       "id": "b0",

@@ -160,10 +160,8 @@ StationConfig parseStation(const char *text)
 {
     const auto root = parseJson(text, "station JSON");
     require(root.is_object(), IR_BAD_ARGUMENT, "station JSON must contain an object");
-    allowFields(root, {"$schema", "schema_version", "acquisition", "devices", "plugins"}, "station");
-    (void)optionalString(root, "$schema", "", "station");
-    require(integerField(root, "schema_version", 1, 1, "station") == 1,
-            IR_BAD_ARGUMENT, "station.schema_version is unsupported");
+    allowFields(root, {"schemav", "acquisition", "devices", "plugins"}, "station");
+    (void)optionalInteger(root, "schemav", 1, 1, 1, "station");
 
     const auto &acquisition = objectField(root, "acquisition", "station");
     allowFields(acquisition, {"backend", "source", "valid_bits", "max_batch_bytes", "max_inflight_bytes", "queue_capacity"},
@@ -355,106 +353,5 @@ PowerStep parsePowerStep(StepRef ref, const std::string &type, const Json &field
         step.operation = PowerStep::Operation::read;
     }
     return step;
-}
-
-int detectRecipeSchemaVersion(const char *text)
-{
-    const auto root = parseJson(text, "recipe JSON");
-    require(root.is_object(), IR_BAD_ARGUMENT, "recipe JSON must contain an object");
-    return integerField(root, "schema_version", 1, 2, "recipe");
-}
-
-RecipeConfig parseRecipe(const char *text, const StationConfig &station)
-{
-    auto root = parseJson(text, "recipe JSON");
-    require(root.is_object(), IR_BAD_ARGUMENT, "recipe JSON must contain an object");
-    allowFields(root, {"$schema", "schema_version", "recipe_id", "steps", "limits"}, "recipe");
-    (void)optionalString(root, "$schema", "", "recipe");
-    (void)integerField(root, "schema_version", 1, 1, "recipe");
-
-    RecipeConfig recipe;
-    recipe.id = stringField(root, "recipe_id", "recipe");
-    const auto steps = root.find("steps");
-    require(steps != root.end() && steps->is_array() && !steps->empty() && steps->size() <= INT32_MAX,
-            IR_BAD_ARGUMENT, "recipe.steps must be a nonempty array");
-
-    std::set<std::string> ids;
-    std::set<std::string> analysisNames;
-    std::set<std::string> usedDevices;
-    std::map<std::string, std::string> metricUnits;
-    for (size_t index = 0; index < steps->size(); ++index) {
-        const auto &fields = (*steps)[index];
-        const auto path = "recipe.steps[" + std::to_string(index) + "]";
-        require(fields.is_object(), IR_BAD_ARGUMENT, path + " must be an object");
-        StepRef ref{static_cast<int32_t>(index), stringField(fields, "id", path)};
-        require(ids.insert(ref.id).second, IR_BAD_ARGUMENT, path + ".id is duplicated");
-        const auto type = stringField(fields, "type", path);
-        const bool captureSeen = recipe.capture.ref.index >= 0;
-        const bool saveSeen = recipe.archive.index >= 0;
-
-        if (type == "blackbody_stabilize") {
-            require(!captureSeen, IR_BAD_ARGUMENT, path + " must precede capture");
-            auto step = parseBlackbodyStep(std::move(ref), fields, path, station);
-            usedDevices.insert(step.device);
-            recipe.controls.emplace_back(std::move(step));
-        } else if (type == "power_set" || type == "power_output" || type == "power_read") {
-            require(!captureSeen, IR_BAD_ARGUMENT, path + " must precede capture");
-            auto step = parsePowerStep(std::move(ref), type, fields, path, station);
-            usedDevices.insert(step.device);
-            recipe.controls.emplace_back(std::move(step));
-        } else if (type == "capture") {
-            allowFields(fields, {"id", "type", "frames", "frame_timeout_ms"}, path);
-            require(!captureSeen, IR_BAD_ARGUMENT, "recipe must contain exactly one capture before analysis");
-            recipe.capture = {std::move(ref), integerField(fields, "frames", 1, INT32_MAX, path),
-                              integerField(fields, "frame_timeout_ms", 0, 86400000, path)};
-        } else if (type == "analyze") {
-            require(captureSeen && !saveSeen, IR_BAD_ARGUMENT, path + " must follow capture and precede save_raw");
-            require(stringField(fields, "input", path) == recipe.capture.ref.id,
-                    IR_BAD_ARGUMENT, path + ".input must name the captured batch");
-            auto step = prepareAnalysis(std::move(ref), fields, path, recipe.capture.frames);
-            require(analysisNames.insert(step.name).second, IR_BAD_ARGUMENT, path + ".name is duplicated");
-            for (const auto &output : step.outputs) {
-                require(metricUnits.emplace(step.name + output.suffix, output.unit).second,
-                        IR_BAD_ARGUMENT, path + " produces a duplicate metric name");
-            }
-            recipe.analysis.push_back(std::move(step));
-        } else if (type == "save_raw") {
-            allowFields(fields, {"id", "type", "input"}, path);
-            require(captureSeen && !saveSeen && index == steps->size() - 1,
-                    IR_BAD_ARGUMENT, path + " must be the final step after capture");
-            require(stringField(fields, "input", path) == recipe.capture.ref.id,
-                    IR_BAD_ARGUMENT, path + ".input must name the captured batch");
-            recipe.archive = std::move(ref);
-        } else {
-            throw Error(IR_BAD_ARGUMENT, path + ".type is unsupported: " + type);
-        }
-    }
-    require(recipe.capture.ref.index >= 0 && recipe.archive.index >= 0, IR_BAD_ARGUMENT,
-            "recipe needs one capture step and one final save_raw step");
-    require(!recipe.analysis.empty(), IR_BAD_ARGUMENT, "recipe needs at least one analyze step");
-
-    if (const auto limits = root.find("limits"); limits != root.end()) {
-        require(limits->is_array(), IR_BAD_ARGUMENT, "recipe.limits must be an array");
-        for (size_t index = 0; index < limits->size(); ++index) {
-            const auto &limit = (*limits)[index];
-            const auto path = "recipe.limits[" + std::to_string(index) + "]";
-            require(limit.is_object(), IR_BAD_ARGUMENT, path + " must be an object");
-            allowFields(limit, {"metric", "operator", "value", "unit"}, path);
-            auto metric = stringField(limit, "metric", path);
-            const auto found = metricUnits.find(metric);
-            require(found != metricUnits.end(), IR_BAD_ARGUMENT, path + ".metric is not produced by an analyze step");
-            const auto operation = stringField(limit, "operator", path);
-            require(operation == "max" || operation == "min", IR_BAD_ARGUMENT,
-                    path + ".operator must be max or min");
-            auto unit = stringField(limit, "unit", path);
-            require(unit == found->second, IR_BAD_ARGUMENT, path + ".unit does not match the metric unit");
-            recipe.limits.push_back({std::move(metric), std::move(unit), operation == "max",
-                                     numberField(limit, "value", path)});
-        }
-    }
-
-    recipe.deviceAliases.assign(usedDevices.begin(), usedDevices.end());
-    recipe.definition = std::move(root);
-    return recipe;
 }
 }

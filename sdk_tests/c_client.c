@@ -43,6 +43,16 @@ int main(int argc, char **argv)
         fprintf(stderr, "Unexpected recipe/plugin ABI size\n");
         return 1;
     }
+    {
+        IRRecipeRunOptions bad_opts = {0, 0, NULL, NULL};
+        IRRecipeResult rr = {0};
+        status = IR_RunRecipeJsonEx("{}", "{}", "out", &bad_opts, &rr, error, sizeof error);
+        if (status != IR_BAD_ARGUMENT || rr.failed_stage != IR_RECIPE_STAGE_VALIDATE) {
+            fprintf(stderr, "RunRecipeJsonEx bad_opts: status=%d stage=%d err=%s\n",
+                status, rr.failed_stage, error);
+            return 1;
+        }
+    }
     IRCaptureStats stats = {0};
     int32_t has_frame = -1;
     uint16_t dummy_px = 0;
