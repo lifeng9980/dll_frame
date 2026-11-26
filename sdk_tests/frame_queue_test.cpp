@@ -374,6 +374,44 @@ void testConcurrentLiveProducerAndSlowPreview()
     CHECK(stats.estimated_fps > 0.0);
 }
 
+void testPreviewCopiesOnlyWhilePolled()
+{
+    FrameQueue fq;
+    const IRGeometry geom{4, 4, 16};
+    fq.resetSession(geom, IR_TYPE_U16, 8, true);
+    std::vector<uint16_t> frame(16, 7);
+    IRFrameStamp st{};
+    st.sequence = 1;
+    st.fields = IR_HAS_SEQUENCE;
+    std::vector<uint16_t> prevBuf(16, 0);
+    IRFrameStamp ps{};
+    auto poll = [&] {
+        auto view = makeU16Batch(prevBuf.data(), prevBuf.size() * sizeof(uint16_t), 4, 4, 1, &ps, 1);
+        fq.tryReadLatest(view);
+        return view.pixels.frames;
+    };
+
+    fq.push(frame.data(), st);
+    CHECK(fq.stats().preview_frames == 0);
+    CHECK(fq.stats().frames_received == 1);
+    CHECK(poll() == 0);
+
+    // 一次轮询最多触发一次实时预览拷贝。
+    st.sequence = 2;
+    fq.push(frame.data(), st);
+    CHECK(poll() == 1 && ps.sequence == 2 && prevBuf[0] == 7);
+    st.sequence = 3;
+    fq.push(frame.data(), st);
+    st.sequence = 4;
+    fq.push(frame.data(), st);
+    CHECK(fq.stats().preview_frames == 2);
+    // 慢轮询仍能读到上次请求的快照，即使期间又来了未请求的帧。
+    CHECK(poll() == 1 && ps.sequence == 3);
+    st.sequence = 5;
+    fq.push(frame.data(), st);
+    CHECK(poll() == 1 && ps.sequence == 5);
+}
+
 void testOverflowPrefixAndGapRecovery()
 {
     FrameQueue fq;
@@ -381,8 +419,12 @@ void testOverflowPrefixAndGapRecovery()
     fq.configure(geom, IR_TYPE_U16, 8);
     fq.resetSession(geom, IR_TYPE_U16, 8, true);
 
+    std::vector<uint16_t> prevBuf(16, 0);
+    IRFrameStamp ps{};
+    auto preview = makeU16Batch(prevBuf.data(), prevBuf.size() * sizeof(uint16_t), 4, 4, 1, &ps, 1);
     std::vector<uint16_t> frame(16, 0);
     for (uint64_t seq = 1; seq <= 20; ++seq) {
+        if (seq == 20) fq.tryReadLatest(preview);
         std::fill(frame.begin(), frame.end(), static_cast<uint16_t>(seq));
         IRFrameStamp st{};
         st.sequence = seq;
@@ -390,10 +432,8 @@ void testOverflowPrefixAndGapRecovery()
         fq.push(frame.data(), st);
     }
 
-    // Non-blocking preview sees latest frame 20 immediately despite ring overflow.
-    std::vector<uint16_t> prevBuf(16, 0);
-    IRFrameStamp ps{};
-    auto preview = makeU16Batch(prevBuf.data(), prevBuf.size() * sizeof(uint16_t), 4, 4, 1, &ps, 1);
+    // A preview request sees frame 20 even though the measurement queue discarded it.
+    preview.pixels.frames = 1;
     fq.tryReadLatest(preview);
     CHECK(preview.pixels.frames == 1);
     CHECK(ps.sequence == 20 && prevBuf[0] == 20);
@@ -688,6 +728,7 @@ int main(int argc, char **argv)
     (void)argv;
 #endif
     testTerminalErrorFollowsQueuedFrames();
+    testPreviewCopiesOnlyWhilePolled();
     testPreviewContentionDoesNotBlockMeasurementQueue();
     testConcurrentLiveProducerAndSlowPreview();
     testOverflowPrefixAndGapRecovery();

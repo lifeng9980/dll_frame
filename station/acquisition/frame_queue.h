@@ -49,7 +49,7 @@ public:
 
 private:
     friend struct FrameQueueTestAccess;
-    void recordPreviewLocked(const void *pixels, const IRFrameStamp &stamp, int64_t pxCount);
+    void recordPreviewLocked(const void *pixels, const IRFrameStamp &stamp, bool snapshotRequested);
 
     // Strictly separate leaf locks: never acquire queueMutex_ and previewMutex_ simultaneously.
     std::mutex queueMutex_;
@@ -69,7 +69,6 @@ private:
     std::mutex previewMutex_;
     IRGeometry previewGeometry_{};
     int32_t previewDataType_{IR_TYPE_U16};
-    int64_t previewPixelCount_{0};
     uint64_t previewFrameBytes_{0};
     bool hasLatest_{false};
     std::vector<uint8_t> latestPixels_;
@@ -78,6 +77,7 @@ private:
     std::atomic<uint64_t> framesDelivered_{0};
     std::atomic<uint64_t> framesDropped_{0};
     std::atomic<uint64_t> previewFrames_{0};
+    std::atomic<bool> previewRequested_{false};
     std::atomic<int32_t> configuredCapacity_{kDefaultCapacity};
     std::atomic<int32_t> queueDepth_{0};
     std::atomic<bool> running_{false};

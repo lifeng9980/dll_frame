@@ -10,6 +10,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -17,18 +18,20 @@
 #include <cstdint>
 #include <cwctype>
 #include <cstring>
-#include <deque>
 #include <memory>
 #include <limits>
 #include <mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace ir::acquisition {
 namespace {
-constexpr size_t DirectShowQueueCapacity = 64;
+// 回调线程与 read() 之间的缓冲深度。只吸收调度抖动；持久队列由 FrameQueue 负责，
+// 满时在这里丢最旧帧，由 read() 通过序号缺口计入 frames_dropped。
+constexpr size_t DirectShowQueueCapacity = 4;
 using Microsoft::WRL::ComPtr;
 using ir::api::Error;
 using ir::api::require;
@@ -174,6 +177,8 @@ struct QueuedFrame {
 
 class SampleCallback final : public ISampleGrabberCallback {
 public:
+    explicit SampleCallback(size_t frameBytes) : frameBytes_(frameBytes) {}
+
     STDMETHODIMP QueryInterface(REFIID id, void **object) override
     {
         if (!object) return E_POINTER;
@@ -201,24 +206,23 @@ public:
     {
         if (!buffer || length <= 0) return S_OK;
         try {
-            uint64_t generation = 0;
             {
                 std::lock_guard lock(mutex_);
                 if (interrupted_) return S_OK;
-                generation = generation_;
-            }
-            QueuedFrame frame;
-            frame.bytes.assign(buffer, buffer + length);
-            if (std::isfinite(sampleTime) && sampleTime >= 0) {
-                frame.timestampNs = static_cast<int64_t>(sampleTime * 1000000000.0);
-                frame.hasTimestamp = true;
-            }
-            {
-                std::lock_guard lock(mutex_);
-                if (interrupted_ || generation != generation_) return S_OK;
-                frame.sequence = ++sequence_;
-                if (frames_.size() == DirectShowQueueCapacity) frames_.pop_front();
-                frames_.push_back(std::move(frame));
+                const auto sequence = ++sequence_;
+                if (static_cast<size_t>(length) < frameBytes_) return S_OK;
+
+                auto &frame = frames_[(head_ + count_) % frames_.size()];
+                frame.bytes.resize(frameBytes_);
+                std::memcpy(frame.bytes.data(), buffer, frameBytes_);
+                frame.sequence = sequence;
+                frame.hasTimestamp = std::isfinite(sampleTime) && sampleTime >= 0;
+                if (frame.hasTimestamp)
+                    frame.timestampNs = static_cast<int64_t>(sampleTime * 1000000000.0);
+                if (count_ == frames_.size())
+                    head_ = (head_ + 1) % frames_.size();
+                else
+                    ++count_;
             }
             ready_.notify_one();
             return S_OK;
@@ -230,17 +234,16 @@ public:
     void reset()
     {
         std::lock_guard lock(mutex_);
-        ++generation_;
-        frames_.clear();
+        head_ = count_ = 0;
         sequence_ = 0;
         interrupted_ = false;
     }
 
-    void clearQueue()
+    uint64_t clearQueue()
     {
         std::lock_guard lock(mutex_);
-        ++generation_;
-        frames_.clear();
+        head_ = count_ = 0;
+        return sequence_;
     }
 
     void wake()
@@ -255,21 +258,25 @@ public:
     bool next(QueuedFrame &frame, std::chrono::milliseconds timeout)
     {
         std::unique_lock lock(mutex_);
-        if (!ready_.wait_for(lock, timeout, [&] { return interrupted_ || !frames_.empty(); }) ||
-            interrupted_ || frames_.empty()) return false;
+        if (!ready_.wait_for(lock, timeout, [&] { return interrupted_ || count_ != 0; }) ||
+            interrupted_) return false;
 
-        frame = std::move(frames_.front());
-        frames_.pop_front();
+        // 将上次 read 使用的缓冲换回队列，像素复制留在锁外。
+        std::swap(frame, frames_[head_]);
+        head_ = (head_ + 1) % frames_.size();
+        --count_;
         return true;
     }
 
 private:
+    const size_t frameBytes_;
     std::atomic<ULONG> references_{1};
     std::mutex mutex_;
     std::condition_variable ready_;
-    std::deque<QueuedFrame> frames_;
+    std::array<QueuedFrame, DirectShowQueueCapacity> frames_;
+    size_t head_{};
+    size_t count_{};
     uint64_t sequence_{};
-    uint64_t generation_{};
     bool interrupted_{};
 };
 }
@@ -292,7 +299,7 @@ public:
     uint64_t bufferedBytes() const noexcept override
     {
         return static_cast<uint64_t>(rowStride_) * static_cast<uint64_t>(geometry_.height) *
-               DirectShowQueueCapacity;
+               (DirectShowQueueCapacity + 1);
     }
 
     void start() override
@@ -300,7 +307,6 @@ public:
         require(!running_, IR_BUSY, "DirectShow capture is already running");
         callback_->reset();
         previousSequence_ = 0;
-        hasPreviousSequence_ = false;
         checkHr(control_->Run(), "Start DirectShow capture");
         running_ = true;
     }
@@ -308,51 +314,34 @@ public:
     void read(void *pixels, IRFrameStamp &stamp, int timeoutMs) override
     {
         require(running_, IR_BAD_ARGUMENT, "Start DirectShow capture before reading frames");
-        const auto deadline = std::chrono::steady_clock::now() +
-                              std::chrono::milliseconds(timeoutMs);
+        if (!callback_->next(readFrame_, std::chrono::milliseconds(timeoutMs)))
+            throw Error(IR_TIMEOUT, "DirectShow frame wait timed out");
+
+        const auto &frame = readFrame_;
         const size_t rowBytes = size_t(geometry_.width) * sizeof(uint16_t);
-        const size_t frameBytes = rowStride_ * size_t(geometry_.height);
-        bool receivedFrame = false;
-
-        for (;;) {
-            if (receivedFrame && std::chrono::steady_clock::now() >= deadline)
-                throw Error(IR_TIMEOUT, "DirectShow frame wait timed out");
-            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-                deadline - std::chrono::steady_clock::now()).count();
-            QueuedFrame frame;
-            if (!callback_->next(frame, std::chrono::milliseconds(std::max<int64_t>(0, remaining))))
-                throw Error(IR_TIMEOUT, "DirectShow frame wait timed out");
-            receivedFrame = true;
-            if (frame.bytes.size() < frameBytes) continue;
-
-            const auto *source = frame.bytes.data();
-            auto *destination = reinterpret_cast<BYTE *>(pixels);
-            for (LONG row = 0; row < geometry_.height; ++row)
-                std::memcpy(destination + size_t(row) * rowBytes,
-                            source + size_t(row) * rowStride_, rowBytes);
-            stamp = {};
-            stamp.sequence = frame.sequence;
-            if (hasPreviousSequence_ && frame.sequence > previousSequence_ + 1) {
-                const auto missing = frame.sequence - previousSequence_ - 1;
-                stamp.lost_frames = missing > UINT32_MAX ? UINT32_MAX : uint32_t(missing);
-            }
-            stamp.fields = IR_HAS_SEQUENCE | IR_SEQUENCE_IS_CALLBACK | IR_HAS_LOSS;
-            if (frame.hasTimestamp) {
-                stamp.timestamp_ns = frame.timestampNs;
-                stamp.time_origin = IR_TIME_SOURCE;
-            }
-            previousSequence_ = frame.sequence;
-            hasPreviousSequence_ = true;
-            return;
+        const auto *source = frame.bytes.data();
+        auto *destination = reinterpret_cast<BYTE *>(pixels);
+        for (LONG row = 0; row < geometry_.height; ++row)
+            std::memcpy(destination + size_t(row) * rowBytes,
+                        source + size_t(row) * rowStride_, rowBytes);
+        stamp = {};
+        stamp.sequence = frame.sequence;
+        if (frame.sequence > previousSequence_ + 1) {
+            const auto missing = frame.sequence - previousSequence_ - 1;
+            stamp.lost_frames = missing > UINT32_MAX ? UINT32_MAX : uint32_t(missing);
         }
+        stamp.fields = IR_HAS_SEQUENCE | IR_SEQUENCE_IS_CALLBACK | IR_HAS_LOSS;
+        if (frame.hasTimestamp) {
+            stamp.timestamp_ns = frame.timestampNs;
+            stamp.time_origin = IR_TIME_SOURCE;
+        }
+        previousSequence_ = frame.sequence;
     }
 
     void flush() override
     {
         require(running_, IR_BAD_ARGUMENT, "Start DirectShow capture before flushing frames");
-        callback_->clearQueue();
-        previousSequence_ = 0;
-        hasPreviousSequence_ = false;
+        previousSequence_ = callback_->clearQueue();
     }
 
     void stop() override
@@ -433,8 +422,6 @@ private:
         checkHr(grabber_->SetOneShot(FALSE), "Disable DirectShow one-shot capture");
         checkHr(grabber_->SetBufferSamples(FALSE), "Disable DirectShow sample copy buffer");
 
-        callback_ = new SampleCallback;
-        checkHr(grabber_->SetCallback(callback_, 1), "Set DirectShow sample callback");
         checkHr(builder_->RenderStream(&PIN_CATEGORY_CAPTURE, &MEDIATYPE_Video, camera_.Get(),
                                        grabberFilter_.Get(), nullRenderer_.Get()),
                 "Connect DirectShow capture graph");
@@ -448,6 +435,8 @@ private:
                 connectedFormat.width == width_ && connectedFormat.height == height_,
                 IR_UNSUPPORTED, "DirectShow connected format differs from the selected 16-bit raw format");
         rowStride_ = connectedFormat.rowStride;
+        callback_ = new SampleCallback(rowStride_ * static_cast<size_t>(connectedFormat.height));
+        checkHr(grabber_->SetCallback(callback_, 1), "Set DirectShow sample callback");
         checkHr(graph_.As(&control_), "Get DirectShow media control");
 
         ComPtr<IMediaFilter> mediaFilter;
@@ -531,7 +520,7 @@ private:
     LONG height_{};
     int validBits_{};
     uint64_t previousSequence_{};
-    bool hasPreviousSequence_{};
+    QueuedFrame readFrame_;
     GUID selectedSubtype_{};
     IRGeometry geometry_{};
     size_t rowStride_{};

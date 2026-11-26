@@ -78,6 +78,7 @@ IR_STATION_API int32_t IR_CloseFrames(char *err, int32_t err_bytes) IR_STATION_N
 IR_STATION_API int32_t IR_SetFrameQueueCapacity(int32_t capacity, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
 /* 无阻塞读取最新一帧预览快照（丢旧保新，不消耗测量有界队列，也不因配方/测量取帧返回 IR_BUSY）。
+ * 实时采集由轮询请求下一帧快照。首个快照准备前返回 0，此后保留最近一次快照直到更新。
  * batch 描述一个输出帧；stamps 可为 NULL/0。pixels.frames 是输入容量、返回帧数：0 表示暂无帧，1 表示有帧。
  * 有帧但类型不匹配或容量不足时返回错误，pixels.frames 保持 0。
  */

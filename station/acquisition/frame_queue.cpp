@@ -85,8 +85,8 @@ void FrameQueue::configure(IRGeometry geometry, int32_t dataType, int32_t capaci
         std::lock_guard<std::mutex> lock(previewMutex_);
         previewGeometry_ = geometry;
         previewDataType_ = dataType;
-        previewPixelCount_ = pxCount;
         previewFrameBytes_ = oneFrameBytes;
+        previewRequested_.store(false, std::memory_order_relaxed);
         hasLatest_ = false;
         latestPixels_.assign(static_cast<size_t>(oneFrameBytes), 0);
         latestStamp_ = {};
@@ -153,8 +153,8 @@ void FrameQueue::resetClosed()
         std::lock_guard<std::mutex> lock(previewMutex_);
         previewGeometry_ = {};
         previewDataType_ = IR_TYPE_U16;
-        previewPixelCount_ = 0;
         previewFrameBytes_ = 0;
+        previewRequested_.store(false, std::memory_order_relaxed);
         hasLatest_ = false;
         latestPixels_.clear();
         latestPixels_.shrink_to_fit();
@@ -171,17 +171,19 @@ void FrameQueue::setRunning(bool running) noexcept
 }
 
 void FrameQueue::recordPreviewLocked(const void *pixelData, const IRFrameStamp &stamp,
-                                     int64_t pxCount)
+                                     bool snapshotRequested)
 {
-    if (!pixelData || pxCount <= 0 || latestPixels_.size() < previewFrameBytes_)
+    if (!pixelData || previewFrameBytes_ == 0 || latestPixels_.size() < previewFrameBytes_)
         return;
 
-    std::memcpy(latestPixels_.data(), pixelData, static_cast<size_t>(previewFrameBytes_));
-    latestStamp_ = stamp;
-    hasLatest_ = true;
-    previewFrames_.fetch_add(1, std::memory_order_relaxed);
-
     const int64_t nowNs = steadyNowNs();
+    if (snapshotRequested) {
+        std::memcpy(latestPixels_.data(), pixelData, static_cast<size_t>(previewFrameBytes_));
+        latestStamp_ = stamp;
+        hasLatest_ = true;
+        previewFrames_.fetch_add(1, std::memory_order_relaxed);
+    }
+
     const size_t n = fpsTimestampsNs_.size();
     const size_t writeIdx = (fpsHead_ + fpsCount_) % n;
     fpsTimestampsNs_[writeIdx] = nowNs;
@@ -232,7 +234,7 @@ void FrameQueue::push(const void *pixelData, const IRFrameStamp &stamp)
         framesDropped_.fetch_add(1, std::memory_order_relaxed);
     std::unique_lock previewLock(previewMutex_, std::try_to_lock);
     if (previewLock.owns_lock())
-        recordPreviewLocked(pixelData, stamp, previewPixelCount_);
+        recordPreviewLocked(pixelData, stamp, previewRequested_.exchange(false, std::memory_order_relaxed));
     queueCv_.notify_one();
 }
 
@@ -244,7 +246,7 @@ void FrameQueue::publishPulledFrame(const void *pixelData, const IRFrameStamp &s
         framesDelivered_.fetch_add(1, std::memory_order_relaxed);
     std::unique_lock lock(previewMutex_, std::try_to_lock);
     if (lock.owns_lock())
-        recordPreviewLocked(pixelData, stamp, previewPixelCount_);
+        recordPreviewLocked(pixelData, stamp, true);
 }
 
 void FrameQueue::recordDelivered()
@@ -347,6 +349,8 @@ void FrameQueue::tryReadLatest(IRFrameBatchView &batch)
     const int32_t requestedHeight = batch.pixels.height;
     const int32_t requestedFrames = batch.pixels.frames;
     batch.pixels.frames = 0;
+    // 即使本次拿不到锁也登记需求：下一帧起推送路径开始保留预览像素。
+    previewRequested_.store(true, std::memory_order_relaxed);
     std::unique_lock<std::mutex> lock(previewMutex_, std::try_to_lock);
     if (!lock.owns_lock())
         return;
