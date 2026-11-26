@@ -9,7 +9,9 @@
 using namespace ir::api;
 namespace ir::acquisition {
 static_assert(sizeof(IRCaptureStats) == 64, "IRCaptureStats ABI size must be 64 bytes");
-Capture &capture() { static Capture value; return value; }
+// 进程级常驻、退出时不析构（同 plugin_runtime 的 NativeLibraryCache）：宿主没有 Stop/Close 就退出时，
+// 不会因析构仍可 join 的 pumpThread_ 而 std::terminate，也不会在 Loader Lock 内释放 DirectShow/COM。
+Capture &capture() { static auto *value = new Capture; return *value; }
 
 namespace {
 uint64_t checkedMultiply(uint64_t left, uint64_t right)

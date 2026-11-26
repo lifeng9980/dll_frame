@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -654,10 +655,37 @@ void testPublicCApiConcurrentPreviewAndStats()
 
 } // namespace
 
-int main()
+#if defined(_WIN32) || defined(__linux__)
+// 宿主打开并启动实时源后既不 Stop 也不 Close 就退出：泵线程仍可 join，
+// 单例若在静态析构中销毁会 std::terminate。由 CTest 以子进程方式检查退出码。
+int exitWhileRunning()
+{
+#ifdef _WIN32
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+    constexpr auto backend = IR_DIRECTSHOW;
+#else
+    constexpr auto backend = IR_V4L2;
+#endif
+    char error[512]{};
+    IRFrameSourceInfo sourceInfo{};
+    if (IR_OpenFrames(backend, "fake-live", 16, &sourceInfo, error, sizeof error) != IR_OK ||
+        IR_StartFrames(error, sizeof error) != IR_OK) {
+        std::fprintf(stderr, "exit-while-running setup failed: %s\n", error);
+        return 1;
+    }
+    return 0;
+}
+#endif
+
+int main(int argc, char **argv)
 {
 #if defined(_WIN32) || defined(__linux__)
+    if (argc > 1 && std::string(argv[1]) == "--exit-while-running")
+        return exitWhileRunning();
     testLiveSessionRunningStats();
+#else
+    (void)argc;
+    (void)argv;
 #endif
     testTerminalErrorFollowsQueuedFrames();
     testPreviewContentionDoesNotBlockMeasurementQueue();
