@@ -30,27 +30,67 @@ struct FrameQueueTestAccess {
 };
 
 namespace {
+struct LiveSourceObservations {
+    int32_t startRunning{-1};
+    int32_t scratchRunning{-1};
+    int32_t flushRunning{-1};
+    int32_t readRunning{-1};
+    int stops{};
+    bool failStart{};
+    bool failScratch{};
+    bool failFlush{};
+    bool failRead{};
+} live;
+
+int32_t captureRunning()
+{
+    IRCaptureStats stats{};
+    char error[256]{};
+    ir::api::checkStatus(IR_GetCaptureStats(&stats, error, sizeof error), error);
+    return stats.running;
+}
+
 class TestLiveSource final : public FrameSource {
 public:
     IRGeometry geometry() const override
     {
-        // The first geometry request after start() is part of pump scratch setup.
-        if (started_ && std::exchange(failScratchSetup_, false))
-            throw std::bad_alloc{};
+        if (std::exchange(inspectScratch_, false)) {
+            live.scratchRunning = captureRunning();
+            if (std::exchange(live.failScratch, false))
+                throw std::bad_alloc{};
+        }
         return {2, 2, 16};
     }
 
     void start() override
     {
         ir::api::require(!started_, IR_BUSY, "Live test source is still started");
+        live.startRunning = captureRunning();
         started_ = true;
+        if (std::exchange(live.failStart, false))
+            throw ir::api::Error(IR_IO_ERROR, "Live start failed");
         delivered_ = false;
+        inspectScratch_ = true;
     }
-    void stop() override { started_ = false; }
-    void flush() override { failScratchSetup_ = true; }
+    void stop() override
+    {
+        if (std::exchange(started_, false))
+            ++live.stops;
+    }
+    void flush() override
+    {
+        live.flushRunning = captureRunning();
+        if (std::exchange(live.failFlush, false))
+            throw ir::api::Error(IR_IO_ERROR, "Live flush failed");
+        delivered_ = false;
+        inspectScratch_ = true;
+    }
 
     void read(void *frame, IRFrameStamp &stamp, int) override
     {
+        live.readRunning = captureRunning();
+        if (live.failRead)
+            throw ir::api::Error(IR_IO_ERROR, "Live read failed");
         if (std::exchange(delivered_, true))
             throw ir::api::Error(IR_END_OF_STREAM, "End of live test data");
         std::fill_n(static_cast<uint16_t *>(frame), 4, uint16_t{17});
@@ -61,7 +101,7 @@ public:
 private:
     bool started_{};
     bool delivered_{};
-    mutable bool failScratchSetup_{true};
+    mutable bool inspectScratch_{};
 };
 }
 
@@ -117,37 +157,69 @@ struct TempDirGuard {
 using ir::acquisition::FrameQueue;
 
 #if defined(_WIN32) || defined(__linux__)
-void testLiveScratchStartupFailure()
+void testLiveSessionRunningStats()
 {
 #ifdef _WIN32
     constexpr auto backend = IR_DIRECTSHOW;
 #else
     constexpr auto backend = IR_V4L2;
 #endif
+    using ir::acquisition::live;
+    using ir::acquisition::captureRunning;
     char error[512]{};
     IRFrameSourceInfo sourceInfo{};
     CHECK(IR_OpenFrames(backend, "fake-live", 16, &sourceInfo, error, sizeof error) == IR_OK);
+    live.failScratch = true;
     CHECK(IR_StartFrames(error, sizeof error) == IR_COMPUTATION_FAILED);
-    IRCaptureStats stats{};
-    CHECK(IR_GetCaptureStats(&stats, error, sizeof error) == IR_OK);
-    CHECK(stats.running == 0);
+    CHECK(live.startRunning == 0 && live.scratchRunning == 0);
+    CHECK(captureRunning() == 0 && live.stops == 1);
 
     CHECK(IR_StartFrames(error, sizeof error) == IR_OK);
-    uint16_t pixels[4]{};
-    IRFrameStamp stamp{};
-    auto batch = makeU16Batch(pixels, sizeof pixels, 2, 2, 1, &stamp, 1);
-    CHECK(IR_ReadFrames(1000, &batch, error, sizeof error) == IR_OK);
+    uint16_t pixels[8]{};
+    IRFrameStamp stamps[2]{};
+    auto batch = makeU16Batch(pixels, sizeof pixels, 2, 2, 2, stamps, 2);
+    CHECK(IR_ReadFrames(1000, &batch, error, sizeof error) == IR_END_OF_STREAM);
     CHECK(batch.pixels.frames == 1 && pixels[0] == 17 && pixels[3] == 17);
+    CHECK(live.readRunning == 1 && captureRunning() == 0);
+    CHECK(IR_StartFrames(error, sizeof error) == IR_BUSY);
 
     int32_t discarded = -1;
+    live.failScratch = true;
     CHECK(IR_FlushFrames(0, 0, &discarded, error, sizeof error) == IR_COMPUTATION_FAILED);
     CHECK(discarded == 0);
-    CHECK(IR_GetCaptureStats(&stats, error, sizeof error) == IR_OK);
-    CHECK(stats.running == 0);
+    CHECK(live.flushRunning == 0 && live.scratchRunning == 0);
+    CHECK(captureRunning() == 0 && live.stops == 2);
+
+    live.failRead = true;
     CHECK(IR_StartFrames(error, sizeof error) == IR_OK);
     batch.pixels.frames = 1;
-    CHECK(IR_ReadFrames(1000, &batch, error, sizeof error) == IR_OK);
+    CHECK(IR_ReadFrames(1000, &batch, error, sizeof error) == IR_IO_ERROR);
+    CHECK(batch.pixels.frames == 0 && std::string(error) == "Live read failed");
+    CHECK(live.readRunning == 1 && captureRunning() == 0);
+    CHECK(IR_StopFrames(error, sizeof error) == IR_OK);
+    CHECK(live.stops == 3);
+    live.failRead = false;
+
+    live.failStart = true;
+    CHECK(IR_StartFrames(error, sizeof error) == IR_IO_ERROR);
+    CHECK(std::string(error) == "Live start failed");
+    CHECK(live.startRunning == 0 && captureRunning() == 0 && live.stops == 4);
+    CHECK(IR_StartFrames(error, sizeof error) == IR_OK);
+    CHECK(IR_FlushFrames(0, 0, &discarded, error, sizeof error) == IR_OK);
+    CHECK(live.flushRunning == 0 && live.scratchRunning == 0);
+    batch.pixels.frames = 2;
+    CHECK(IR_ReadFrames(1000, &batch, error, sizeof error) == IR_END_OF_STREAM);
     CHECK(batch.pixels.frames == 1 && pixels[0] == 17 && pixels[3] == 17);
+    CHECK(live.readRunning == 1 && captureRunning() == 0);
+    CHECK(IR_FlushFrames(1, 1000, &discarded, error, sizeof error) == IR_OK);
+    CHECK(discarded == 1);
+    batch.pixels.frames = 1;
+    CHECK(IR_ReadFrames(1000, &batch, error, sizeof error) == IR_END_OF_STREAM);
+    CHECK(batch.pixels.frames == 0);
+    live.failFlush = true;
+    CHECK(IR_FlushFrames(0, 0, &discarded, error, sizeof error) == IR_IO_ERROR);
+    CHECK(std::string(error) == "Live flush failed");
+    CHECK(live.flushRunning == 0 && captureRunning() == 0 && live.stops == 5);
     CHECK(IR_CloseFrames(error, sizeof error) == IR_OK);
 }
 #endif
@@ -166,6 +238,7 @@ void testTerminalErrorFollowsQueuedFrames()
     const std::string message = prefix + "\xe4\xb8\xad";
     queue.setTerminalError(IR_IO_ERROR, message.c_str());
     queue.setTerminalError(IR_TIMEOUT, "Later failure");
+    CHECK(queue.stats().running == 0 && queue.stats().queue_depth == 1);
 
     uint16_t out[4]{};
     IRFrameStamp outStamp{};
@@ -174,6 +247,7 @@ void testTerminalErrorFollowsQueuedFrames()
     const auto neverStop = [] { return false; };
     CHECK(queue.pop(out, outStamp, 0, neverStop, code, detail) == FrameQueue::PopStatus::ok);
     CHECK(outStamp.sequence == 3 && out[0] == 4 && out[3] == 7);
+    CHECK(queue.stats().queue_depth == 0);
     CHECK(queue.pop(out, outStamp, 0, neverStop, code, detail) == FrameQueue::PopStatus::terminal_error);
     CHECK(code == IR_IO_ERROR && detail == prefix);
 }
@@ -583,7 +657,7 @@ void testPublicCApiConcurrentPreviewAndStats()
 int main()
 {
 #if defined(_WIN32) || defined(__linux__)
-    testLiveScratchStartupFailure();
+    testLiveSessionRunningStats();
 #endif
     testTerminalErrorFollowsQueuedFrames();
     testPreviewContentionDoesNotBlockMeasurementQueue();

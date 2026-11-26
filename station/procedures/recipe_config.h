@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -79,7 +80,7 @@ struct PowerStep {
 
 using PixelStorage = std::variant<std::vector<uint16_t>, std::vector<uint32_t>>;
 
-// 只有采集写入像素。指标和归档都以 const 引用使用完整批次。
+// 只有采集写入像素。归档持有只读批次，后续采集按需替换槽位。
 struct FrameBatch {
     IRGeometry geometry{};
     PixelStorage pixels{std::vector<uint16_t>{}};
@@ -116,6 +117,11 @@ struct FrameBatch {
         if (const auto *values = std::get_if<std::vector<uint32_t>>(&pixels))
             return static_cast<uint64_t>(values->capacity()) * sizeof(uint32_t);
         return 0;
+    }
+
+    uint64_t capacityBytes() const noexcept
+    {
+        return pixelCapacityBytes() + static_cast<uint64_t>(stamps.capacity()) * sizeof(IRFrameStamp);
     }
 };
 
@@ -169,7 +175,7 @@ struct ByteMask {
 
 struct ExecutionContext {
     IRGeometry geometry{};
-    std::map<std::string, FrameBatch> batches;
+    std::map<std::string, std::shared_ptr<FrameBatch>> batches;
     std::map<std::string, DoubleMap> maps;
     std::map<std::string, ByteMask> masks;
     std::map<std::string, IRGjbDriftContext> driftContexts;
@@ -188,8 +194,7 @@ struct ExecutionContext {
         };
         for (const auto &[name, batch] : batches) {
             (void)name;
-            add(batch.pixelCapacityBytes(), 1);
-            add(batch.stamps.capacity(), sizeof(IRFrameStamp));
+            add(batch->capacityBytes(), 1);
         }
         for (const auto &[name, map] : maps) {
             (void)name;

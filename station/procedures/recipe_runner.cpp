@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iomanip>
 #include <locale>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <thread>
@@ -27,49 +28,54 @@ using ir::utf8::pathFromUtf8;
 struct SavedBatchSnapshot {
     std::string inputSlot;
     std::string subdir;
-    FrameBatch batch;
+    std::shared_ptr<const FrameBatch> batch;
 };
 
-uint64_t retainedRecipeStorage(const RecipeConfig &recipe, IRGeometry geometry,
-                               int32_t dataType, int64_t maxBatchBytes)
+uint64_t peakRecipeStorage(const RecipeConfig &recipe, IRGeometry geometry,
+                           int32_t dataType, int64_t maxBatchBytes)
 {
     struct BatchSlot {
-        int32_t currentFrames{};
-        int32_t maxFrames{};
+        uint64_t bytes{};
+        bool archived{};
     };
 
-    uint64_t total = 0;
+    uint64_t retained = 0;
+    uint64_t peak = 0;
     std::map<std::string, BatchSlot> batchSlots;
     const auto recordCapture = [&](const CaptureStep &step) {
         auto &slot = batchSlots[step.outputSlot];
-        slot.currentFrames = step.frames;
-        slot.maxFrames = std::max(slot.maxFrames, step.frames);
+        const auto bytes = batchStorageBytes(geometry, step.frames, dataType, maxBatchBytes);
+        if (!slot.archived && slot.bytes >= bytes)
+            return;
+        // The previous generation remains alive until the replacement is ready.
+        retained = addBytes(retained, bytes);
+        peak = std::max(peak, retained);
+        if (!slot.archived)
+            retained -= slot.bytes;
+        slot = {bytes, false};
     };
 
     for (const auto &step : recipe.steps) {
         if (const auto *capture = std::get_if<CaptureStep>(&step)) {
             recordCapture(*capture);
         } else if (const auto *burst = std::get_if<RepeatBurstStep>(&step)) {
+            // No saves are allowed inside a burst. Later iterations reuse the same capacity.
             for (const auto &inner : burst->steps)
                 if (const auto *capture = std::get_if<CaptureStep>(&inner))
                     recordCapture(*capture);
         } else if (const auto *save = std::get_if<SaveRawStep>(&step)) {
-            const auto frames = batchSlots.at(save->inputSlot).currentFrames;
-            total = addBytes(total, batchStorageBytes(geometry, frames, dataType, maxBatchBytes));
+            batchSlots.at(save->inputSlot).archived = true;
         }
     }
 
-    for (const auto &[name, slot] : batchSlots) {
-        (void)name;
-        total = addBytes(total, batchStorageBytes(geometry, slot.maxFrames, dataType, maxBatchBytes));
-    }
-
     const uint64_t pixelCount = static_cast<uint64_t>(pixels(geometry.height, geometry.width));
-    total = addBytes(total, multiplyBytes(
+    // Estimate the final named slots separately from transient capture growth.
+    // Runtime allocations check actual overlap with any maps already produced.
+    uint64_t finalStorage = addBytes(retained, multiplyBytes(
         multiplyBytes(pixelCount, sizeof(double)), recipe.doubleMapSlotCount));
-    total = addBytes(total, multiplyBytes(pixelCount, recipe.byteMaskSlotCount));
-    total = addBytes(total, multiplyBytes(sizeof(IRGjbDriftContext), recipe.driftContextSlotCount));
-    return total;
+    finalStorage = addBytes(finalStorage, multiplyBytes(pixelCount, recipe.byteMaskSlotCount));
+    finalStorage = addBytes(finalStorage, multiplyBytes(sizeof(IRGjbDriftContext), recipe.driftContextSlotCount));
+    return std::max(peak, finalStorage);
 }
 
 
@@ -104,6 +110,20 @@ std::string formatDoubleClassic(double val)
     oss.imbue(std::locale::classic());
     oss << std::setprecision(15) << val;
     return oss.str();
+}
+
+void writeCsvField(std::ostream &stream, std::string_view field)
+{
+    if (field.find_first_of(",\"\r\n") == std::string_view::npos) {
+        stream << field;
+        return;
+    }
+    stream << '"';
+    for (char ch : field) {
+        if (ch == '"') stream << '"';
+        stream << ch;
+    }
+    stream << '"';
 }
 
 struct TopStepInfo {
@@ -172,11 +192,22 @@ struct RuntimeState {
     ExecutionContext ctx;
     RecipeReadbacks readbacks;
     std::vector<SavedBatchSnapshot> savedSnapshots;
-    uint64_t savedSnapshotBytes{0};
+    uint64_t archivedOnlyBytes{0};
     std::vector<Json> burstRunsSummary;
     Json stepRecords = Json::array();
     bool destinationCreated{false};
     bool freshFramesRequired{false};
+
+    uint64_t inflightBaseBytes() const
+    {
+        return addBytes(capture.bufferedBytes(), archivedOnlyBytes);
+    }
+
+    void requireInflightStorage(uint64_t extra = 0) const
+    {
+        const auto retained = addBytes(inflightBaseBytes(), ctx.retainedBytes());
+        requireWithinMemoryLimit(addBytes(retained, extra), station.maxInflightBytes);
+    }
 
     void createDestination()
     {
@@ -247,8 +278,8 @@ void preflightRecipe(RuntimeState &rt)
     }
     uint64_t requiredStorage = rt.capture.bufferedBytes();
     requiredStorage = addBytes(requiredStorage,
-        retainedRecipeStorage(rt.recipe, rt.ctx.geometry, rt.sourceInfo.data_type,
-                              rt.station.maxBatchBytes));
+        peakRecipeStorage(rt.recipe, rt.ctx.geometry, rt.sourceInfo.data_type,
+                          rt.station.maxBatchBytes));
     requireWithinMemoryLimit(requiredStorage, rt.station.maxInflightBytes);
     rt.capture.checkStop();
 }
@@ -350,14 +381,34 @@ void executeCommonStep(RuntimeState &rt, const auto &s)
     } else if constexpr (std::is_same_v<T, CaptureStep>) {
         rt.progress.enter(IR_RECIPE_STAGE_CAPTURE, &s.ref);
         rt.capture.checkStop();
-        rt.ensureCaptureStarted();
-        rt.clearPendingFrames();
         const int64_t elements = stackSize(
             pixels(rt.ctx.geometry.height, rt.ctx.geometry.width), s.frames);
-        auto &batch = rt.ctx.batches[s.outputSlot];
-        batch.geometry = rt.ctx.geometry;
-        batch.resizePixels(rt.sourceInfo.data_type, static_cast<std::size_t>(elements));
-        batch.stamps.resize(static_cast<size_t>(s.frames));
+        const auto dataType = rt.sourceInfo.data_type;
+        const auto frameCount = static_cast<std::size_t>(s.frames);
+        const auto requiredBytes = batchStorageBytes(rt.ctx.geometry, s.frames, dataType,
+                                                     rt.station.maxBatchBytes);
+        const auto pixelBytes = requiredBytes - frameCount * sizeof(IRFrameStamp);
+        auto slot = rt.ctx.batches.find(s.outputSlot);
+        const bool hasBatch = slot != rt.ctx.batches.end();
+        const bool archived = hasBatch && slot->second.use_count() > 1;
+        if (hasBatch && !archived && slot->second->pixelCapacityBytes() >= pixelBytes &&
+                slot->second->stamps.capacity() >= frameCount) {
+            slot->second->resizePixels(dataType, static_cast<std::size_t>(elements));
+            slot->second->stamps.resize(frameCount);
+        } else {
+            rt.requireInflightStorage(requiredBytes);
+            auto next = std::make_shared<FrameBatch>();
+            next->geometry = rt.ctx.geometry;
+            next->resizePixels(dataType, static_cast<std::size_t>(elements));
+            next->stamps.resize(frameCount);
+            rt.requireInflightStorage(next->capacityBytes());
+            const auto detachedBytes = archived ? slot->second->capacityBytes() : 0;
+            slot = rt.ctx.batches.insert_or_assign(s.outputSlot, std::move(next)).first;
+            rt.archivedOnlyBytes = addBytes(rt.archivedOnlyBytes, detachedBytes);
+        }
+        auto &batch = *slot->second;
+        rt.ensureCaptureStarted();
+        rt.clearPendingFrames();
         IRFrameBatchView readView{
             mutableFrameBatchArrayView(batch, s.frames),
             batch.geometry.valid_bits,
@@ -367,7 +418,7 @@ void executeCommonStep(RuntimeState &rt, const auto &s)
         const auto keepCompleted = [&] {
             const int32_t completed = std::clamp(readView.pixels.frames, 0, s.frames);
             const auto pixelsPerFrame = static_cast<std::size_t>(elements / s.frames);
-            batch.resizePixels(rt.sourceInfo.data_type,
+            batch.resizePixels(dataType,
                                pixelsPerFrame * static_cast<std::size_t>(completed));
             batch.stamps.resize(static_cast<std::size_t>(completed));
             return completed;
@@ -380,23 +431,19 @@ void executeCommonStep(RuntimeState &rt, const auto &s)
         }
         rt.progress.result.completed_frames += keepCompleted();
         rt.capture.checkStop();
-        requireWithinMemoryLimit(addBytes(
-            addBytes(rt.capture.bufferedBytes(), rt.ctx.retainedBytes()), rt.savedSnapshotBytes),
-            rt.station.maxInflightBytes);
+        rt.requireInflightStorage();
     } else if constexpr (std::is_same_v<T, AnalysisStep>) {
         rt.progress.enter(IR_RECIPE_STAGE_ANALYZE, &s.ref);
         rt.capture.checkStop();
         AnalysisRunContext runCtx{
             rt.ctx,
             [&capture = rt.capture]() noexcept { return capture.isStopRequested(); },
-            addBytes(rt.capture.bufferedBytes(), rt.savedSnapshotBytes),
+            rt.inflightBaseBytes(),
             rt.station.maxInflightBytes
         };
         s.operations.execute(runCtx);
         rt.capture.checkStop();
-        requireWithinMemoryLimit(addBytes(
-            addBytes(rt.capture.bufferedBytes(), rt.ctx.retainedBytes()), rt.savedSnapshotBytes),
-            rt.station.maxInflightBytes);
+        rt.requireInflightStorage();
     }
 }
 
@@ -432,10 +479,11 @@ int32_t executeRepeatBurstStep(RuntimeState &rt, const RepeatBurstStep &rb)
             csvStream << "iteration,timestamp_utc,elapsed_s";
             for (const auto &col : rb.recordMetrics) {
                 const auto itUnit = rt.recipe.metricUnits.find(col);
+                csvStream << ',';
                 if (itUnit != rt.recipe.metricUnits.end() && !itUnit->second.empty())
-                    csvStream << ',' << col << " [" << itUnit->second << ']';
+                    writeCsvField(csvStream, col + " [" + itUnit->second + ']');
                 else
-                    csvStream << ',' << col;
+                    writeCsvField(csvStream, col);
             }
             csvStream << '\n';
         }
@@ -645,15 +693,16 @@ void archiveRecipeResult(RuntimeState &rt, const std::string &startedUtc,
     std::vector<SavedBatchRef> batchRefs;
     batchRefs.reserve(rt.savedSnapshots.size());
     for (const auto &snap : rt.savedSnapshots) {
-        batchRefs.push_back({snap.subdir, &snap.batch});
+        const auto &batch = *snap.batch;
+        batchRefs.push_back({snap.subdir, &batch});
         savedBatchesMeta.push_back({
             {"input", snap.inputSlot},
             {"subdir", snap.subdir},
-            {"frames", snap.batch.stamps.size()},
-            {"width", snap.batch.geometry.width},
-            {"height", snap.batch.geometry.height},
-            {"data_type", pixelDataTypeName(snap.batch.dataType())},
-            {"valid_bits", snap.batch.geometry.valid_bits}
+            {"frames", batch.stamps.size()},
+            {"width", batch.geometry.width},
+            {"height", batch.geometry.height},
+            {"data_type", pixelDataTypeName(batch.dataType())},
+            {"valid_bits", batch.geometry.valid_bits}
         });
     }
 
@@ -754,18 +803,8 @@ void runRecipe(const char *stationJson,
                     if (const auto *sr = std::get_if<SaveRawStep>(&step)) {
                         rt.progress.enter(IR_RECIPE_STAGE_ARCHIVE, &sr->ref);
                         rt.capture.checkStop();
-                        const auto &batch = rt.ctx.batches.at(sr->inputSlot);
-                        const uint64_t snapshotBytes = batchStorageBytes(
-                            batch.geometry, static_cast<int32_t>(batch.stamps.size()), batch.dataType(),
-                            station.maxBatchBytes);
-                        const uint64_t nextSavedSnapshotBytes = addBytes(
-                            rt.savedSnapshotBytes, snapshotBytes);
-                        const uint64_t requiredStorage = addBytes(
-                            addBytes(rt.capture.bufferedBytes(), rt.ctx.retainedBytes()),
-                            nextSavedSnapshotBytes);
-                        requireWithinMemoryLimit(requiredStorage, station.maxInflightBytes);
-                        rt.savedSnapshots.push_back({sr->inputSlot, sr->subdir, batch});
-                        rt.savedSnapshotBytes = nextSavedSnapshotBytes;
+                        rt.savedSnapshots.push_back({sr->inputSlot, sr->subdir,
+                                                     rt.ctx.batches.at(sr->inputSlot)});
                     } else if (const auto *rb = std::get_if<RepeatBurstStep>(&step)) {
                         burstIterationsForRecord = executeRepeatBurstStep(rt, *rb);
                     } else {

@@ -70,9 +70,13 @@ cmake --preset windows
 cmake --build --preset windows
 ctest --preset windows --output-on-failure
 
-# 2. 全量 Windows Debug 验收（可选 -RunCom0ComHil 启用虚拟串口 HIL，发布前加 -RequireClean）
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\verify_windows.ps1 -PythonExe "<venv-python>" -RunCom0ComHil
+# 2. 全量 Windows Debug 验收（可选 -RunCom0ComHil 启用虚拟串口 HIL）
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\verify_windows.ps1 -PythonExe "<venv-python>"
+
+# 3. Windows Release 发布验收
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\verify_windows.ps1 -Configuration Release -PythonExe "<venv-python>" -RequireClean
 ```
 
 - **L5 → L0 源码追踪**：`examples/ir_recipe_cli.cpp` → `include/IR_recipe.h` → `station/procedures/recipe_json.cpp` → `recipe_{parse,instruments,runner}.cpp` → `recipe_metrics.cpp` + `metrics_{basic,standard}.cpp` → `analysis/*.cpp`。
-- **调试与产物目录**：Windows Debug 统一使用 Ninja 和 `实验/build-debug`，产物放在 `bin`、`bin/plugins`、`lib`、`lib/plugins` 和 `tests/bin`。各轮迭代复用该目录。VS Code `F5` 运行 `ir_run_recipe.exe --run --station 实验/debug_tc002a/station.json --recipe 实验/debug_tc002a/recipe.json --output out_dbg`。
+- **调试与产物目录**：Windows Debug 统一使用 Ninja 和 `实验/build-debug`，产物放在 `bin`、`bin/plugins`、`lib`、`lib/plugins` 和 `tests/bin`。各轮迭代复用该目录。VS Code `F5` 从仓库根目录运行 `ir_run_recipe.exe --run --station 实验/debug_tc002a/station.json --recipe 实验/debug_tc002a/recipe.json --output 实验/debug_tc002a/out_dbg`。
+- **客户包**：Windows 安装与打包使用 Ninja 的 `windows-release` 和 `实验/build-release`。默认离线 CTest 使用临时合成 RAW。

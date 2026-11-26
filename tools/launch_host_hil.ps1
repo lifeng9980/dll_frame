@@ -1,8 +1,13 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$HostExe = "D:\CSLearning\IR_dll\optmeas-usb\build\实验\修复验证\Release\FPA测试上位机.exe",
+    [Parameter(Mandatory)]
+    [string]$HostExe,
     [string]$WorkDir = "",
-    [string]$QtRuntimeDir = "",
+    [Parameter(Mandatory)]
+    [string]$QtRuntimeDir,
+    [Parameter(Mandatory)]
+    [string]$OpenCvRuntimeDir,
+    [string]$HostRuntimeDir = "",
     [ValidateSet("dcn1000-serial", "pcn7lt-tcp")]
     [string]$BlackbodyMode = "dcn1000-serial",
     [int]$BlackbodyTcpPort = 21010,
@@ -13,13 +18,16 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-if (-not (Test-Path $HostExe)) {
+if (-not (Test-Path -LiteralPath $HostExe -PathType Leaf)) {
     throw "Host executable not found: $HostExe"
 }
-$HostExe = (Resolve-Path $HostExe).Path
+$HostExe = (Resolve-Path -LiteralPath $HostExe).Path
 $HostReleaseDir = Split-Path -Parent $HostExe
-$HostBuildRoot = Split-Path -Parent $HostReleaseDir
-$HostBinReleaseDir = Join-Path $HostBuildRoot "bin\Release"
+if ([string]::IsNullOrWhiteSpace($HostRuntimeDir)) {
+    $HostRuntimeDir = $HostReleaseDir
+} else {
+    $HostRuntimeDir = (Resolve-Path -LiteralPath $HostRuntimeDir).Path
+}
 
 if ([string]::IsNullOrWhiteSpace($WorkDir)) {
     $WorkDir = Join-Path $RepoRoot "实验\host-hil-workdir"
@@ -29,72 +37,45 @@ $ConfigDir = Join-Path $WorkDir "config"
 New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
 
 function Find-Qt515Runtime {
-    param([string]$ExplicitDir)
-    $candidates = New-Object System.Collections.Generic.List[string]
-    if (-not [string]::IsNullOrWhiteSpace($ExplicitDir)) {
-        $candidates.Add($ExplicitDir)
-    }
-    $packagedRuntime = Join-Path (Split-Path -Parent $RepoRoot) "FPA测试上位机-v1-0-0-win64\FPA测试上位机"
-    if (Test-Path $packagedRuntime) { $candidates.Add($packagedRuntime) }
-    Get-ChildItem "C:\Qt" -Directory -Filter "5.15*" -ErrorAction SilentlyContinue | ForEach-Object {
-        $msvcBin = Join-Path $_.FullName "msvc2019_64\bin"
-        if (Test-Path $msvcBin) { $candidates.Add($msvcBin) }
-    }
-    foreach ($dir in $candidates) {
-        if (-not (Test-Path $dir)) { continue }
-        $core = Join-Path $dir "Qt5Core.dll"
-        $gui = Join-Path $dir "Qt5Gui.dll"
-        $widgets = Join-Path $dir "Qt5Widgets.dll"
-        $opengl = Join-Path $dir "Qt5OpenGL.dll"
-        $svg = Join-Path $dir "Qt5Svg.dll"
-        if (-not ((Test-Path $core) -and (Test-Path $gui) -and (Test-Path $widgets) -and (Test-Path $opengl) -and (Test-Path $svg))) {
-            continue
+    param([string]$RuntimeDir)
+    $dir = (Resolve-Path -LiteralPath $RuntimeDir).Path
+    foreach ($dll in @("Qt5Core.dll", "Qt5Gui.dll", "Qt5Widgets.dll", "Qt5OpenGL.dll", "Qt5Svg.dll")) {
+        if (-not (Test-Path -LiteralPath (Join-Path $dir $dll) -PathType Leaf)) {
+            throw "Missing $dll in $dir"
         }
-        $ver = (Get-Item $core).VersionInfo.FileVersion
-        if ($ver -notlike "5.15.*") { continue }
-        foreach ($plat in @(
-            (Join-Path $dir "platforms"),
-            (Join-Path $dir "plugins\platforms"),
-            (Join-Path (Split-Path -Parent $dir) "plugins\platforms")
-        )) {
-            if (Test-Path (Join-Path $plat "qwindows.dll")) {
-                return @{
-                    BinDir       = $dir
-                    PluginRoot   = Split-Path -Parent $plat
-                    PlatformsDir = $plat
-                    Version      = $ver
-                }
+    }
+    $ver = (Get-Item -LiteralPath (Join-Path $dir "Qt5Core.dll")).VersionInfo.FileVersion
+    if ($ver -notlike "5.15.*") { throw "Qt 5.15.x is required by this host." }
+    foreach ($plat in @(
+        (Join-Path $dir "platforms"),
+        (Join-Path $dir "plugins\platforms"),
+        (Join-Path (Split-Path -Parent $dir) "plugins\platforms")
+    )) {
+        if (Test-Path -LiteralPath (Join-Path $plat "qwindows.dll") -PathType Leaf) {
+            return @{
+                BinDir       = $dir
+                PluginRoot   = Split-Path -Parent $plat
+                PlatformsDir = $plat
+                Version      = $ver
             }
         }
     }
-    throw "No complete Qt 5.15.x runtime (Qt5Core/Gui/Widgets/OpenGL/Svg + platforms\qwindows.dll) found."
+    throw "Qt platform plugin qwindows.dll not found for $dir"
 }
 
-function Find-OpenCvBinDir {
-    foreach ($dir in @(
-        "D:\CSLearning\3rd\opencv-4.14.0\opencv\build\x64\vc16\bin",
-        "D:\CS\3rd\opencv\build\x64\vc16\bin"
-    )) {
-        if (Test-Path (Join-Path $dir "opencv_world4140.dll")) {
-            return $dir
-        }
-    }
-    $found = Get-ChildItem "D:\CSLearning\3rd" -Recurse -Filter "opencv_world4140.dll" -Depth 6 -ErrorAction SilentlyContinue |
-        Select-Object -First 1 -ExpandProperty DirectoryName
-    if ($found) { return $found }
-    throw "opencv_world4140.dll not found."
+$qt = Find-Qt515Runtime -RuntimeDir $QtRuntimeDir
+$opencvBin = (Resolve-Path -LiteralPath $OpenCvRuntimeDir).Path
+if (-not (Test-Path -LiteralPath (Join-Path $opencvBin "opencv_world4140.dll") -PathType Leaf)) {
+    throw "opencv_world4140.dll not found in $opencvBin"
 }
-
-$qt = Find-Qt515Runtime -ExplicitDir $QtRuntimeDir
-$opencvBin = Find-OpenCvBinDir
-if (-not (Test-Path (Join-Path $HostBinReleaseDir "QtPropertyBrowser.dll"))) {
-    throw "QtPropertyBrowser.dll not found under $HostBinReleaseDir"
+if (-not (Test-Path -LiteralPath (Join-Path $HostRuntimeDir "QtPropertyBrowser.dll") -PathType Leaf)) {
+    throw "QtPropertyBrowser.dll not found in $HostRuntimeDir"
 }
 
 $python = (Get-Command python.exe -ErrorAction Stop).Source
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 
-# Write isolated oven.json under $WorkDir\config (never touching optmeas-usb\config)
+# Write isolated oven.json in the HIL working directory.
 $ovenCfg = [ordered]@{
     schema_version = 1
     driver         = "gws_sten"
@@ -208,7 +189,7 @@ try {
     Write-Output "Detector/Cooler: COM16 (Detector) / COM18 (Cooler 9600 8N2)"
 
     # Keep $opencvBin (v4.14.0) and $HostReleaseDir (current qwt.dll) ahead of $qt.BinDir
-    $env:PATH = (@($HostReleaseDir, $HostBinReleaseDir, $opencvBin, $qt.BinDir) -join ";") + ";" + $oldPath
+    $env:PATH = (@($HostReleaseDir, $HostRuntimeDir, $opencvBin, $qt.BinDir) -join ";") + ";" + $oldPath
     $env:QT_PLUGIN_PATH = $qt.PluginRoot
     $env:QT_QPA_PLATFORM_PLUGIN_PATH = $qt.PlatformsDir
 

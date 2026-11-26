@@ -73,6 +73,8 @@ void FrameQueue::configure(IRGeometry geometry, int32_t dataType, int32_t capaci
         stamps_.assign(static_cast<size_t>(capacity), IRFrameStamp{});
         head_ = 0;
         count_ = 0;
+        queueDepth_.store(0, std::memory_order_relaxed);
+        setRunning(false);
         droppedSinceLastPush_ = 0;
         terminalStatus_ = IR_OK;
         terminalMessage_[0] = '\0';
@@ -93,8 +95,6 @@ void FrameQueue::configure(IRGeometry geometry, int32_t dataType, int32_t capaci
         framesDropped_.store(0, std::memory_order_relaxed);
         previewFrames_.store(0, std::memory_order_relaxed);
         configuredCapacity_.store(capacity, std::memory_order_relaxed);
-        queueDepth_.store(0, std::memory_order_relaxed);
-        running_ = 0;
         fpsTimestampsNs_.fill(0);
         fpsHead_ = 0;
         fpsCount_ = 0;
@@ -104,66 +104,31 @@ void FrameQueue::configure(IRGeometry geometry, int32_t dataType, int32_t capaci
 void FrameQueue::resetSession(IRGeometry geometry, int32_t dataType, int32_t capacity, bool running)
 {
     configure(geometry, dataType, capacity);
-    std::lock_guard<std::mutex> lock(previewMutex_);
-    running_ = running ? 1 : 0;
+    setRunning(running);
 }
 
-void FrameQueue::beginStartSession(IRGeometry geometry, int32_t dataType, int32_t capacity)
+void FrameQueue::beginStartSession()
 {
-    validateCapacity(capacity);
-    const int64_t pxCount = pixels(geometry.height, geometry.width);
-    const uint64_t oneFrameBytes = frameBytes(geometry, dataType);
-    require(oneFrameBytes <= std::numeric_limits<size_t>::max() / static_cast<size_t>(capacity),
-            IR_BAD_ARGUMENT, "FrameQueue storage size overflows");
-    const size_t poolBytes = static_cast<size_t>(oneFrameBytes) * static_cast<size_t>(capacity);
-    {
-        std::lock_guard<std::mutex> lock(queueMutex_);
-        queuePixelCount_ = pxCount;
-        queueFrameBytes_ = oneFrameBytes;
-        capacity_ = capacity;
-        pool_.assign(poolBytes, 0);
-        stamps_.assign(static_cast<size_t>(capacity), IRFrameStamp{});
-        head_ = 0;
-        count_ = 0;
-        droppedSinceLastPush_ = 0;
-        terminalStatus_ = IR_OK;
-        terminalMessage_[0] = '\0';
-        stopped_ = false;
-    }
-    {
-        std::lock_guard<std::mutex> lock(previewMutex_);
-        previewGeometry_ = geometry;
-        previewDataType_ = dataType;
-        previewPixelCount_ = pxCount;
-        previewFrameBytes_ = oneFrameBytes;
-        hasLatest_ = false;
-        latestPixels_.assign(static_cast<size_t>(oneFrameBytes), 0);
-        latestStamp_ = {};
-        configuredCapacity_ = capacity;
-        queueDepth_.store(0, std::memory_order_relaxed);
-        running_ = 1;
-        fpsTimestampsNs_.fill(0);
-        fpsHead_ = 0;
-        fpsCount_ = 0;
-    }
+    resumeSession();
+    std::lock_guard<std::mutex> lock(previewMutex_);
+    hasLatest_ = false;
+    latestStamp_ = {};
+    fpsTimestampsNs_.fill(0);
+    fpsHead_ = 0;
+    fpsCount_ = 0;
 }
 
 void FrameQueue::resumeSession()
 {
-    {
-        std::lock_guard<std::mutex> lock(queueMutex_);
-        head_ = 0;
-        count_ = 0;
-        droppedSinceLastPush_ = 0;
-        terminalStatus_ = IR_OK;
-        terminalMessage_[0] = '\0';
-        stopped_ = false;
-    }
-    {
-        std::lock_guard<std::mutex> lock(previewMutex_);
-        queueDepth_.store(0, std::memory_order_relaxed);
-        running_ = 1;
-    }
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    head_ = 0;
+    count_ = 0;
+    queueDepth_.store(0, std::memory_order_relaxed);
+    setRunning(false);
+    droppedSinceLastPush_ = 0;
+    terminalStatus_ = IR_OK;
+    terminalMessage_[0] = '\0';
+    stopped_ = false;
 }
 
 void FrameQueue::resetClosed()
@@ -177,6 +142,8 @@ void FrameQueue::resetClosed()
         stamps_.clear();
         head_ = 0;
         count_ = 0;
+        queueDepth_.store(0, std::memory_order_relaxed);
+        setRunning(false);
         droppedSinceLastPush_ = 0;
         terminalStatus_ = IR_OK;
         terminalMessage_[0] = '\0';
@@ -192,18 +159,15 @@ void FrameQueue::resetClosed()
         latestPixels_.clear();
         latestPixels_.shrink_to_fit();
         latestStamp_ = {};
-        queueDepth_ = 0;
-        running_ = 0;
         fpsHead_ = 0;
         fpsCount_ = 0;
     }
     queueCv_.notify_all();
 }
 
-void FrameQueue::setRunning(bool running)
+void FrameQueue::setRunning(bool running) noexcept
 {
-    std::lock_guard<std::mutex> lock(previewMutex_);
-    running_ = running ? 1 : 0;
+    running_.store(running, std::memory_order_relaxed);
 }
 
 void FrameQueue::recordPreviewLocked(const void *pixelData, const IRFrameStamp &stamp,
@@ -236,7 +200,6 @@ void FrameQueue::push(const void *pixelData, const IRFrameStamp &stamp)
     framesDropped_.fetch_add(stamp.lost_frames, std::memory_order_relaxed);
 
     bool overflowed = false;
-    int32_t newDepth = 0;
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         if (stopped_ || queuePixelCount_ <= 0 || queueFrameBytes_ == 0 || capacity_ <= 0)
@@ -257,16 +220,14 @@ void FrameQueue::push(const void *pixelData, const IRFrameStamp &stamp)
             }
             stamps_[static_cast<size_t>(tail)] = queuedStamp;
             ++count_;
-            newDepth = count_;
+            queueDepth_.store(count_, std::memory_order_relaxed);
         } else {
             // Preserve the unread contiguous prefix on overflow; drop the newly arriving frame.
             ++droppedSinceLastPush_;
             overflowed = true;
-            newDepth = count_;
         }
     }
 
-    queueDepth_.store(newDepth, std::memory_order_relaxed);
     if (overflowed)
         framesDropped_.fetch_add(1, std::memory_order_relaxed);
     std::unique_lock previewLock(previewMutex_, std::try_to_lock);
@@ -298,61 +259,53 @@ FrameQueue::PopStatus FrameQueue::pop(void *outPixels, IRFrameStamp &outStamp, i
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     bool attempted = false;
 
+    std::unique_lock<std::mutex> lock(queueMutex_);
     for (;;) {
-        int32_t newDepth = 0;
-        bool popped = false;
-        {
-            std::unique_lock<std::mutex> lock(queueMutex_);
-            if (stopRequested && stopRequested())
-                return PopStatus::cancelled;
+        if (stopRequested && stopRequested())
+            return PopStatus::cancelled;
 
-            if (count_ > 0) {
+        if (count_ > 0) {
+            if (outPixels)
                 std::memcpy(outPixels,
                             pool_.data() + static_cast<size_t>(head_) * static_cast<size_t>(queueFrameBytes_),
                             static_cast<size_t>(queueFrameBytes_));
-                outStamp = stamps_[static_cast<size_t>(head_)];
-                head_ = (head_ + 1) % capacity_;
-                --count_;
-                newDepth = count_;
-                popped = true;
-            } else if (droppedSinceLastPush_ > 0) {
-                droppedSinceLastPush_ = 0;
-                return PopStatus::gap;
-            } else if (terminalStatus_ != IR_OK) {
-                terminalCode = terminalStatus_;
-                terminalMessage = terminalMessage_.data();
-                return PopStatus::terminal_error;
-            } else if (stopped_) {
-                return PopStatus::stopped;
-            } else {
-                const auto now = std::chrono::steady_clock::now();
-                if (attempted && now >= deadline)
-                    return PopStatus::timeout;
-                const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
-                const auto wait = std::clamp<int64_t>(remaining, 0, 50);
-                queueCv_.wait_for(lock, std::chrono::milliseconds(wait));
-                attempted = true;
-                continue;
-            }
-        }
-        if (popped) {
-            queueDepth_.store(newDepth, std::memory_order_relaxed);
+            outStamp = stamps_[static_cast<size_t>(head_)];
+            head_ = (head_ + 1) % capacity_;
+            --count_;
+            queueDepth_.store(count_, std::memory_order_relaxed);
             return PopStatus::ok;
         }
+        if (droppedSinceLastPush_ > 0) {
+            droppedSinceLastPush_ = 0;
+            return PopStatus::gap;
+        }
+        if (terminalStatus_ != IR_OK) {
+            terminalCode = terminalStatus_;
+            terminalMessage = terminalMessage_.data();
+            return PopStatus::terminal_error;
+        }
+        if (stopped_)
+            return PopStatus::stopped;
+
+        const auto now = std::chrono::steady_clock::now();
+        if (attempted && now >= deadline)
+            return PopStatus::timeout;
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+        const auto wait = std::clamp<int64_t>(remaining, 0, 50);
+        queueCv_.wait_for(lock, std::chrono::milliseconds(wait));
+        attempted = true;
     }
 }
 
 void FrameQueue::clearMeasurementQueue()
 {
-    {
-        std::lock_guard<std::mutex> lock(queueMutex_);
-        head_ = 0;
-        count_ = 0;
-        droppedSinceLastPush_ = 0;
-        terminalStatus_ = IR_OK;
-        terminalMessage_[0] = '\0';
-    }
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    head_ = 0;
+    count_ = 0;
     queueDepth_.store(0, std::memory_order_relaxed);
+    droppedSinceLastPush_ = 0;
+    terminalStatus_ = IR_OK;
+    terminalMessage_[0] = '\0';
 }
 
 void FrameQueue::setTerminalError(int32_t code, const char *message)
@@ -364,6 +317,7 @@ void FrameQueue::setTerminalError(int32_t code, const char *message)
             copyText(terminalMessage_.data(), static_cast<int32_t>(terminalMessage_.size()), message);
         }
         stopped_ = true;
+        setRunning(false);
     }
     queueCv_.notify_all();
 }
@@ -373,6 +327,7 @@ void FrameQueue::markStopped()
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         stopped_ = true;
+        setRunning(false);
     }
     queueCv_.notify_all();
 }
@@ -434,7 +389,7 @@ IRCaptureStats FrameQueue::stats()
     out.queue_depth = queueDepth_.load(std::memory_order_relaxed);
     out.width = previewGeometry_.width;
     out.height = previewGeometry_.height;
-    out.running = running_;
+    out.running = running_.load(std::memory_order_relaxed) ? 1 : 0;
     out.reserved = 0;
 
     if (fpsCount_ >= 2) {

@@ -686,6 +686,31 @@ void testRepeatBurstCancelPreservesFlushedCsv()
     CHECK(Json::parse(readText(outDir / "result.json")).at("run_status") == "CANCELLED");
 }
 
+void testBurstCsvQuotesMetricNames()
+{
+    TempDirGuard root("burst_csv_quotes");
+    const auto fixture = root.path() / "fixture";
+    fs::create_directories(fixture);
+    buildDriftFixture(fixture, 4, 4, 2, 2, 1);
+    const std::string name = "sensor,\"A\"\r\nambient";
+    const Json recipe{{"recipe_id", "quoted-csv"}, {"steps", Json::array({
+        {{"id", "burst"}, {"type", "repeat_burst"}, {"max_iterations", 1},
+         {"record_metrics", Json::array({name + ".mean_dn"})},
+         {"steps", Json::array({
+             {{"id", "cap"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}},
+             {{"id", "stats"}, {"type", "analyze"}, {"method", "frame_stats"},
+              {"name", name}, {"input", "cap"}}
+         })}}
+    })}};
+    char err[2048]{};
+    IRRecipeResult result{};
+    const auto out = root.path() / "out";
+    CHECK(IR_RunRecipeJson(makeStation(fixture).dump().c_str(), recipe.dump().c_str(),
+                          utf8(out).c_str(), nullptr, &result, err, sizeof err) == IR_OK);
+    CHECK(readText(out / "burst_summary.csv").starts_with(
+        "iteration,timestamp_utc,elapsed_s,\"sensor,\"\"A\"\"\r\nambient.mean_dn [DN]\"\n"));
+}
+
 void testPreflightRejections()
 {
     TempDirGuard root("preflight_v2");
@@ -841,6 +866,19 @@ void testPreflightRejections()
                            utf8(root.path() / "scratch_fit").c_str(), nullptr, &result,
                            err, sizeof err) == IR_OK);
 
+    auto savedStatsRecipe = scratchRecipe;
+    auto &savedSteps = savedStatsRecipe["steps"];
+    savedSteps.insert(savedSteps.begin() + 1, Json{
+        {"id", "save_first"}, {"type", "save_raw"}, {"input", "capture"}, {"subdir", "first"}});
+    savedSteps.insert(savedSteps.begin() + 2, Json{
+        {"id", "save_second"}, {"type", "save_raw"}, {"input", "capture"}, {"subdir", "second"}});
+    const auto savedStatsOut = root.path() / "saved_stats";
+    CHECK(IR_RunRecipeJson(limitedStation.dump().c_str(), savedStatsRecipe.dump().c_str(),
+                           utf8(savedStatsOut).c_str(), nullptr, &result, err, sizeof err) == IR_OK);
+    const auto firstRaw = readText(savedStatsOut / "first" / "frames.raw");
+    CHECK(firstRaw.size() == 2 * 16 * sizeof(uint16_t));
+    CHECK(firstRaw == readText(savedStatsOut / "second" / "frames.raw"));
+
     const auto repeatedFixture = root.path() / "repeated_capture_fixture";
     fs::create_directories(repeatedFixture);
     {
@@ -872,6 +910,34 @@ void testPreflightRejections()
     CHECK(result.completed_frames == 20);
     CHECK(fs::is_regular_file(reuseOut / "frames.raw"));
 
+    const Json growthRecipe{{"recipe_id", "batch-growth-budget"}, {"steps", Json::array({
+        {{"id", "capture_first"}, {"type", "capture"}, {"frames", 4}, {"frame_timeout_ms", 0}, {"output", "b"}},
+        {{"id", "capture_second"}, {"type", "capture"}, {"frames", 5}, {"frame_timeout_ms", 0}, {"output", "b"}}
+    })}};
+    auto growthStation = makeStation(repeatedFixture, 2);
+    constexpr uint64_t captureBuffers = 4 * 16 * sizeof(uint16_t) + 2 * sizeof(IRFrameStamp);
+    constexpr uint64_t bytesPerStoredFrame = 16 * sizeof(uint16_t) + sizeof(IRFrameStamp);
+    constexpr uint64_t growthPeak = captureBuffers + (4 + 5) * bytesPerStoredFrame;
+    growthStation["acquisition"]["max_inflight_bytes"] = growthPeak - 1;
+    CHECK(IR_RunRecipeJson(growthStation.dump().c_str(), growthRecipe.dump().c_str(),
+                           utf8(root.path() / "growth_rejected").c_str(), nullptr, &result,
+                           err, sizeof err) == IR_BAD_ARGUMENT);
+    CHECK(result.failed_stage == IR_RECIPE_STAGE_PREPARE && result.completed_frames == 0);
+    growthStation["acquisition"]["max_inflight_bytes"] = growthPeak;
+    CHECK(IR_RunRecipeJson(growthStation.dump().c_str(), growthRecipe.dump().c_str(),
+                           utf8(root.path() / "growth_fit").c_str(), nullptr, &result,
+                           err, sizeof err) == IR_OK);
+    CHECK(result.completed_frames == 9);
+
+    auto growthThenMaps = growthRecipe;
+    growthThenMaps["steps"].push_back({
+        {"id", "stats"}, {"type", "analyze"}, {"method", "frame_stats"}, {"input", "b"},
+        {"outputs", {{"mean_map", "mean"}, {"std_map", "std"}}}
+    });
+    CHECK(IR_RunRecipeJson(growthStation.dump().c_str(), growthThenMaps.dump().c_str(),
+                           utf8(root.path() / "growth_then_maps").c_str(), nullptr, &result,
+                           err, sizeof err) == IR_OK);
+
     const Json archiveThenReuseRecipe{
         {"schemav", 1}, {"recipe_id", "archive-before-reuse"},
         {"steps", Json::array({
@@ -887,8 +953,7 @@ void testPreflightRejections()
     };
     const auto archiveReuseOut = root.path() / "archive_before_reuse_output";
     auto archiveStation = makeStation(repeatedFixture, 2);
-    // 2 帧队列加上 18 帧的槽位及 2 + 18 帧的快照可以保留在预算内。
-    archiveStation["acquisition"]["max_inflight_bytes"] = 3000;
+    archiveStation["acquisition"]["max_inflight_bytes"] = captureBuffers + (2 + 18) * bytesPerStoredFrame;
     CHECK(IR_RunRecipeJson(archiveStation.dump().c_str(), archiveThenReuseRecipe.dump().c_str(), utf8(archiveReuseOut).c_str(), nullptr, &result, err, sizeof err) == IR_OK);
     CHECK(result.completed_frames == 20);
     const auto rawMatches = [](const fs::path &path, uint16_t firstValue, size_t pixelCount) {
@@ -1377,6 +1442,7 @@ int main(int argc, char **argv)
     run("testRepeatBurstNoDiskDrift", [] { testRepeatBurstNoDiskDrift(); });
     run("testMultiBatchSaveRawSubdirs", [] { testMultiBatchSaveRawSubdirs(); });
     run("testRepeatBurstCancelPreservesFlushedCsv", [] { testRepeatBurstCancelPreservesFlushedCsv(); });
+    run("testBurstCsvQuotesMetricNames", [] { testBurstCsvQuotesMetricNames(); });
     run("testPreflightRejections", [] { testPreflightRejections(); });
     run("testGaussianFilterAndFlickerDetectV2", [] { testGaussianFilterAndFlickerDetectV2(); });
     run("testFft2dPipelineV2", [] { testFft2dPipelineV2(); });

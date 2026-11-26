@@ -25,15 +25,16 @@ public:
     void setIdleCapacity(int32_t capacity);
     void configure(IRGeometry geometry, int32_t dataType, int32_t capacity);
     void resetSession(IRGeometry geometry, int32_t dataType, int32_t capacity, bool running);
-    void beginStartSession(IRGeometry geometry, int32_t dataType, int32_t capacity);
+    void beginStartSession();
     void resumeSession();
     void resetClosed();
-    void setRunning(bool running);
+    void setRunning(bool running) noexcept;
 
     void push(const void *pixels, const IRFrameStamp &stamp);
     void publishPulledFrame(const void *pixels, const IRFrameStamp &stamp, bool delivered);
     void recordDelivered();
 
+    // A null pixel destination discards the frame without a copy.
     PopStatus pop(void *outPixels, IRFrameStamp &outStamp, int32_t timeoutMs,
                   const std::function<bool()> &stopRequested,
                   int32_t &terminalCode, std::string &terminalMessage);
@@ -79,7 +80,7 @@ private:
     std::atomic<uint64_t> previewFrames_{0};
     std::atomic<int32_t> configuredCapacity_{kDefaultCapacity};
     std::atomic<int32_t> queueDepth_{0};
-    int32_t running_{0};
+    std::atomic<bool> running_{false};
     std::array<int64_t, 16> fpsTimestampsNs_{};
     size_t fpsHead_{0};
     size_t fpsCount_{0};

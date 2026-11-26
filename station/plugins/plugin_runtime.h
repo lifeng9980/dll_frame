@@ -49,7 +49,8 @@ public:
     static bool isValidPluginMethodName(std::string_view methodName) noexcept;
 
 private:
-    int32_t loadLibrary(const std::filesystem::path &libraryPath, std::string *errOut);
+    int32_t loadLibrary(const std::filesystem::path &libraryPath, bool requireQuerySymbol,
+                        std::string *errOut);
     int32_t loadFromDirectory(const std::filesystem::path &pluginDir, std::string *errOut);
     std::optional<LoadedMetricPlugin> findMetric(std::string_view methodName) const;
 

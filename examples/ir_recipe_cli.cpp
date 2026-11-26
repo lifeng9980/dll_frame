@@ -120,9 +120,14 @@ struct Arguments {
     fs::path output;
 };
 
+constexpr char usage[] =
+    "Usage: ir_run_recipe --check --station station.json --recipe recipe.json\n"
+    "       ir_run_recipe --run --station station.json --recipe recipe.json --output new-directory\n"
+    "Relative output paths are resolved from the working directory.";
+
 void printUsage()
 {
-    std::puts("Usage: ir_run_recipe --check|--run --station station.json --recipe recipe.json --output new-directory");
+    std::puts(usage);
 }
 
 const char *statusName(int32_t status) noexcept
@@ -199,8 +204,12 @@ Arguments parseArguments(const std::vector<std::string> &values)
             throw std::runtime_error("Unknown argument: " + value);
         }
     }
-    if (arguments.mode.empty() || arguments.station.empty() || arguments.recipe.empty() || arguments.output.empty())
-        throw std::runtime_error("Usage: ir_run_recipe --check|--run --station station.json --recipe recipe.json --output new-directory");
+    if (arguments.mode.empty() || arguments.station.empty() || arguments.recipe.empty())
+        throw std::runtime_error(usage);
+    if (arguments.mode == "--run" && arguments.output.empty())
+        throw std::runtime_error("--run requires --output");
+    if (arguments.mode == "--check" && !arguments.output.empty())
+        throw std::runtime_error("--output is only used with --run");
     return arguments;
 }
 
@@ -215,24 +224,21 @@ int execute(const std::vector<std::string> &values)
         isRunMode = arguments.mode == "--run";
         const auto stationPath = fs::absolute(arguments.station).lexically_normal();
         const auto recipePath = fs::absolute(arguments.recipe).lexically_normal();
-        auto outputPath = arguments.output;
-        if (outputPath.is_relative()) outputPath = recipePath.parent_path() / outputPath;
-        outputPath = fs::absolute(outputPath).lexically_normal();
 
         const auto stationText = resolveStationSource(stationPath, readText(stationPath));
         const auto recipeText = readText(recipePath);
         char error[2048]{};
         int32_t status = IR_OK;
-        if (arguments.mode == "--check") {
+        if (!isRunMode) {
             status = IR_CheckRecipeJson(stationText.c_str(), recipeText.c_str(), error, sizeof error);
             if (status != IR_OK) {
                 std::fprintf(stderr, "recipe check status=%d (%s) %s\n", status, statusName(status), error);
                 return status;
             }
-            checkOutputDirectory(outputPath);
             std::puts("recipe=VALID");
             return 0;
         }
+        const auto outputPath = fs::absolute(arguments.output).lexically_normal();
         checkOutputDirectory(outputPath);
 
         const auto outputText = pathUtf8(outputPath);

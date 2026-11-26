@@ -38,7 +38,7 @@ public:
     std::string sourceName;
     std::thread::id owner;
     int backend{};
-    bool running{};
+    bool running{}; // The owner must stop this backend session even after the pump exits.
     IRFrameSourceInfo open(int backend, const char *name, int validBits);
     IRFrameSourceInfo open(int backend, const char *name, int validBits,
                            int32_t queueCapacity, uint64_t memoryLimitBytes);

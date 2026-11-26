@@ -186,7 +186,7 @@ Arguments parseArguments(const std::vector<std::string> &values)
         } else if (v == "--timeout-ms") {
             args.timeoutMs = parseIntArg("--timeout-ms", needVal("--timeout-ms"), 0, 86400000);
         } else if (v == "--valid-bits") {
-            args.validBits = parseIntArg("--valid-bits", needVal("--valid-bits"), 0, 16);
+            args.validBits = parseIntArg("--valid-bits", needVal("--valid-bits"), 0, 32);
         } else if (v == "--queue-capacity") {
             args.queueCapacity = parseIntArg("--queue-capacity", needVal("--queue-capacity"), 2, 4096);
         } else if (v == "--cycles") {

@@ -62,8 +62,8 @@ IR_TYPE_U32 = 3
 
 IR_NOISE3D_MODE_ORG = 0
 IR_NOISE3D_MODE_NUC = 1
-IR_NOISE3D_SCALAR_DELTA_I = 1
-IR_NOISE3D_SCALAR_DELTA_J = 2
+IR_NOISE3D_SCALAR_DELTA_TI = 4
+IR_NOISE3D_SCALAR_DELTA_TJ = 5
 IR_NOISE3D_SCALAR_DELTA_TOTAL = 7
 IR_NOISE3D_SCALAR_COUNT = 16
 IR_NOISE3D_HIST_GROUP_COUNT = 4
@@ -773,10 +773,10 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
                     )
                     n3d_org_tot = f"{n3d_scalars_org[IR_NOISE3D_SCALAR_DELTA_TOTAL]:.9g}"
                     n3d_nuc_tot = f"{n3d_scalars_nuc[IR_NOISE3D_SCALAR_DELTA_TOTAL]:.9g}"
-                    n3d_org_ti = f"{n3d_scalars_org[IR_NOISE3D_SCALAR_DELTA_I]:.9g}"
-                    n3d_nuc_ti = f"{n3d_scalars_nuc[IR_NOISE3D_SCALAR_DELTA_I]:.9g}"
-                    n3d_org_tj = f"{n3d_scalars_org[IR_NOISE3D_SCALAR_DELTA_J]:.9g}"
-                    n3d_nuc_tj = f"{n3d_scalars_nuc[IR_NOISE3D_SCALAR_DELTA_J]:.9g}"
+                    n3d_org_ti = f"{n3d_scalars_org[IR_NOISE3D_SCALAR_DELTA_TI]:.9g}"
+                    n3d_nuc_ti = f"{n3d_scalars_nuc[IR_NOISE3D_SCALAR_DELTA_TI]:.9g}"
+                    n3d_org_tj = f"{n3d_scalars_org[IR_NOISE3D_SCALAR_DELTA_TJ]:.9g}"
+                    n3d_nuc_tj = f"{n3d_scalars_nuc[IR_NOISE3D_SCALAR_DELTA_TJ]:.9g}"
 
                 row = {
                     "burst_index": burst_idx,

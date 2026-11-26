@@ -23,13 +23,7 @@ def sdk_library_directory():
     if configured:
         return Path(configured).resolve()
     package_root = Path(__file__).resolve().parents[2]
-    packaged = package_root / ("windows-x64/bin" if os.name == "nt" else "linux-x86_64/lib")
-    if packaged.is_dir():
-        return packaged
-    build_debug = package_root / "实验" / "build-debug" / ("bin" if os.name == "nt" else "lib")
-    if build_debug.is_dir():
-        return build_debug
-    return packaged
+    return package_root / ("windows-x64/bin" if os.name == "nt" else "linux-x86_64/lib")
 
 
 def load_station(directory):
@@ -69,7 +63,7 @@ def station_text(path):
 
 
 def check_output_directory(path):
-    if path.exists():
+    if path.exists() or path.is_symlink():
         raise ValueError(f"Output already exists: {path}")
     if not path.parent.is_dir():
         raise ValueError(f"Output parent directory does not exist: {path.parent}")
@@ -82,15 +76,20 @@ def main():
     mode.add_argument("--run", dest="mode", action="store_const", const="run")
     parser.add_argument("station", type=Path)
     parser.add_argument("recipe", type=Path)
-    parser.add_argument("output", type=Path, help="new output directory; resolved relative to the recipe")
+    parser.add_argument("output", type=Path, nargs="?",
+                        help="new output directory for --run, relative to the working directory")
     parser.add_argument("--library-dir", type=Path, default=sdk_library_directory())
     args = parser.parse_args()
 
     station_path = args.station.resolve()
     recipe_path = args.recipe.resolve()
-    output = args.output if args.output.is_absolute() else recipe_path.parent / args.output
-    output = output.resolve()
-    check_output_directory(output)
+    if args.mode == "run":
+        if args.output is None:
+            parser.error("--run requires an output directory")
+        output = Path(os.path.abspath(args.output))
+        check_output_directory(output)
+    elif args.output is not None:
+        parser.error("the output directory is only used with --run")
 
     (sdk, _analysis), dll_directory = load_station(args.library_dir.resolve())
     sdk.IR_StationVersion.argtypes = []

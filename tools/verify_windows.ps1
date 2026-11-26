@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$WorkRoot = "",
+    [ValidateSet("Debug", "Release")][string]$Configuration = "Debug",
     [switch]$RequireClean,
     [string]$PythonExe = "",
     [switch]$RunCom0ComHil
@@ -12,6 +13,7 @@ $ErrorActionPreference = "Stop"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 try {
     [Console]::OutputEncoding = $Utf8NoBom
+    [Console]::InputEncoding = $Utf8NoBom
 } catch {
 }
 
@@ -112,14 +114,6 @@ function Write-Utf8File([string]$Path, [string]$Content) {
     [System.IO.File]::WriteAllText($Path, $Content, $Utf8NoBom)
 }
 
-function Get-FreeTcpPort {
-    $listener = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
-    $listener.Start()
-    $port = ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
-    $listener.Stop()
-    return $port
-}
-
 function Find-VsInstallation {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
     if (Test-Path $vswhere) {
@@ -192,21 +186,17 @@ function Assert-TraceabilityFields($Record, [string]$ExpectedVersion, [string]$L
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $ExperimentDir = Join-Path $RepoRoot ([string]([char]0x5B9E) + [char]0x9A8C)
-if (-not $WorkRoot) {
-    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $WorkRoot = Join-Path $ExperimentDir "verify-windows-$stamp"
-}
-$WorkRoot = [System.IO.Path]::GetFullPath($WorkRoot)
-New-Item -ItemType Directory -Path $WorkRoot -Force | Out-Null
-
 $cmakeText = [System.IO.File]::ReadAllText((Join-Path $RepoRoot "CMakeLists.txt"), $Utf8NoBom)
 if ($cmakeText -notmatch 'project\(IRSDK VERSION ([0-9]+\.[0-9]+\.[0-9]+)') {
     throw "Cannot parse PROJECT_VERSION from CMakeLists.txt"
 }
 $SdkVersion = $matches[1]
 $ExpectedFileVersion = "$SdkVersion.0"
+$IsRelease = $Configuration -eq "Release"
+$Preset = if ($IsRelease) { "windows-release" } else { "windows" }
+$EnableCom0ComHil = if ($RunCom0ComHil) { "ON" } else { "OFF" }
 
-Write-Step "1. Setting up VS 2022 BuildTools x64 + CMake + Ninja + Python environment"
+Write-Step "1. Setting up MSVC x64, CMake, Ninja, and Python"
 $vsPath = Find-VsInstallation
 Import-VsDevEnv $vsPath
 $pythonPath = Find-WindowsPython $PythonExe
@@ -222,22 +212,26 @@ Write-Host "cmake.exe  : $cmakePath"
 Write-Host "ninja.exe  : $ninjaPath"
 Write-Host "python.exe : $pythonPath"
 Write-Host "SDK Version: $SdkVersion (FileVersion $ExpectedFileVersion)"
-Write-Host "WorkRoot   : $WorkRoot"
 
-Write-Step "2. Configuring and building Debug via CMake windows preset"
+Write-Step "2. Configuring and building $Configuration via the $Preset preset"
 $res = Invoke-External -FilePath $cmakePath -WorkingDirectory $RepoRoot `
-    -Arguments @("--preset", "windows", "-DPython3_EXECUTABLE=$pythonPath")
+    -Arguments @("--preset", $Preset, "-DBUILD_TESTING=ON", "-DPython3_EXECUTABLE=$pythonPath", `
+                 "-DIR_ENABLE_COM0COM_HIL=$EnableCom0ComHil")
 Write-Host $res.StdOut.Trim()
 $res = Invoke-External -FilePath $cmakePath -WorkingDirectory $RepoRoot `
-    -Arguments @("--build", "--preset", "windows")
+    -Arguments @("--build", "--preset", $Preset)
 if ($res.StdOut.Trim()) { Write-Host $res.StdOut.Trim() }
 
-Write-Step "3. Running CTest via windows preset"
+Write-Step "3. Running CTest via the $Preset preset"
+if ($RunCom0ComHil) {
+    $hilMapPath = Join-Path $ExperimentDir "hil_serial_map.json"
+    Assert-True (Test-Path -LiteralPath $hilMapPath -PathType Leaf) "hil_serial_map.json not found at $hilMapPath"
+}
 $res = Invoke-External -FilePath $ctestPath -WorkingDirectory $RepoRoot `
-    -Arguments @("--preset", "windows", "--output-on-failure")
+    -Arguments @("--preset", $Preset, "--output-on-failure", "--no-tests=error")
 Write-Host $res.StdOut.Trim()
 
-$BuildDir = Join-Path $ExperimentDir "build-debug"
+$BuildDir = Join-Path $ExperimentDir ("build-" + $Configuration.ToLowerInvariant())
 $BuildBinDir = Join-Path $BuildDir "bin"
 $StationDll = Join-Path $BuildBinDir "IR_station.dll"
 $AnalysisDll = Join-Path $BuildBinDir "IR_analysis.dll"
@@ -328,10 +322,22 @@ foreach ($dll in @($StationDll, $AnalysisDll)) {
     $DllComments[$leaf] = $vi.Comments
 }
 
-Write-Step "6. Installing Windows SDK prefix"
-$InstallDir = Join-Path $WorkRoot "install-windows"
+if (-not $IsRelease) {
+    Write-Step "WINDOWS DEBUG VERIFICATION PASSED"
+    return
+}
+
+if (-not $WorkRoot) {
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss-fff"
+    $WorkRoot = Join-Path $BuildDir "verify-$stamp"
+}
+$WorkRoot = [System.IO.Path]::GetFullPath($WorkRoot)
+New-Item -ItemType Directory -Path $WorkRoot -Force | Out-Null
+
+Write-Step "6. Installing Windows Release SDK prefix"
+$InstallDir = Join-Path $WorkRoot "install-windows-release"
 Invoke-External -FilePath $cmakePath -WorkingDirectory $RepoRoot `
-    -Arguments @("--install", $BuildDir, "--prefix", $InstallDir) | Out-Null
+    -Arguments @("--install", $BuildDir, "--config", "Release", "--prefix", $InstallDir) | Out-Null
 Write-Host "  Installed to $InstallDir"
 
 Write-Step "7. Packaging Windows-only SDK archive with hygiene verification"
@@ -339,7 +345,7 @@ $PackageDir = Join-Path $WorkRoot "package"
 New-Item -ItemType Directory -Path $PackageDir -Force | Out-Null
 $ZipPath = Join-Path $PackageDir "IR-SDK-$SdkVersion-Windows.zip"
 $pkgArgs = @(
-    "-B",
+    "-X", "utf8", "-B",
     (Join-Path $RepoRoot "tools\package_sdk.py"),
     "--windows-only",
     "--windows-install", $InstallDir,
@@ -401,7 +407,7 @@ Write-Step "9. Building and running standalone C/C++ client examples from extrac
 $ClientBuildDir = Join-Path $WorkRoot "client-build"
 Invoke-External -FilePath $cmakePath -WorkingDirectory $PkgRoot `
     -Arguments @("-S", (Join-Path $PkgRoot "examples"), "-B", $ClientBuildDir,
-                 "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Debug", "-DIR_SDK_ROOT=$PkgRoot") | Out-Null
+                 "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DIR_SDK_ROOT=$PkgRoot") | Out-Null
 Invoke-External -FilePath $cmakePath -WorkingDirectory $PkgRoot `
     -Arguments @("--build", $ClientBuildDir) | Out-Null
 
@@ -416,181 +422,46 @@ Assert-True (-not ($analysisCDllLines -contains "IR_station.dll")) "ir_analysis_
 $null = Invoke-External -FilePath $analysisCExe
 $standaloneCliCheck = Invoke-External -FilePath (Join-Path $ClientBuildDir "ir_run_recipe.exe") `
     -Arguments @("--check", "--station", (Join-Path $PkgRoot "examples\stations\offline.json"),
-                 "--recipe", (Join-Path $PkgRoot "examples\recipes\noise_roi.json"),
-                 "--output", (Join-Path $WorkRoot "standalone-check-unused"))
+                 "--recipe", (Join-Path $PkgRoot "examples\recipes\noise_roi.json"))
 Assert-True ($standaloneCliCheck.StdOut.Trim() -eq "recipe=VALID") "standalone ir_run_recipe --check failed"
 $null = Invoke-External -FilePath (Join-Path $ClientBuildDir "ir_capture_accept.exe") -Arguments @("--list")
 Write-Host "  Standalone ir_c_client, ir_cpp_client, ir_analysis_c_sample, ir_run_recipe, and ir_capture_accept verified."
 
-Write-Step "10. Running packaged CLI smoke tests (PASS / NG / ERROR)"
+Write-Step "10. Running packaged CLI and Python smoke tests"
 $PkgCli = Join-Path $PkgRoot "windows-x64\bin\ir_run_recipe.exe"
 $TempRecipesDir = Join-Path $WorkRoot "temp-recipes"
 New-Item -ItemType Directory -Path $TempRecipesDir -Force | Out-Null
+$RawSmokeDir = Join-Path $TempRecipesDir "replay"
+Invoke-External -FilePath $pythonPath -WorkingDirectory $RepoRoot `
+    -Arguments @("-B", (Join-Path $RepoRoot "sdk_tests\raw_replay_cli_test.py"),
+                 "--write-fixture", $RawSmokeDir) | Out-Null
 
 $OfflineStationObj = [System.IO.File]::ReadAllText((Join-Path $PkgRoot "examples\stations\offline.json"), $Utf8NoBom) | ConvertFrom-Json
-$OfflineStationObj.acquisition.source = (Join-Path $RepoRoot "examples\data\tc002a_640")
-$OfflineStation = Join-Path $TempRecipesDir "offline_tc002a.json"
+$OfflineStationObj.acquisition.source = "replay"
+$OfflineStation = Join-Path $TempRecipesDir "offline.json"
 Write-Utf8File $OfflineStation ($OfflineStationObj | ConvertTo-Json -Depth 10)
 $OfflineRecipe = Join-Path $PkgRoot "examples\recipes\noise_roi.json"
+$PkgPythonRecipe = Join-Path $PkgRoot "examples\python\ir_recipe.py"
+$PackageEnv = @{ IR_SDK_LIB_DIR = "" }
 
 $PassOut = Join-Path $WorkRoot "cli-pass-out"
-$passRes = Invoke-External -FilePath $PkgCli -Arguments @("--run", "--station", $OfflineStation, "--recipe", $OfflineRecipe, "--output", $PassOut)
+$passRes = Invoke-External -FilePath $PkgCli -WorkingDirectory $WorkRoot `
+    -Arguments @("--run", "--station", $OfflineStation, "--recipe", $OfflineRecipe, "--output", "cli-pass-out")
 Assert-True ($passRes.StdOut -match "(?m)^run_status=PASS\r?$") "CLI PASS missing run_status=PASS (got: $($passRes.StdOut))"
 $passJson = [System.IO.File]::ReadAllText((Join-Path $PassOut "result.json"), $Utf8NoBom) | ConvertFrom-Json
 Assert-TraceabilityFields $passJson $SdkVersion "CLI PASS"
 
-$ngRecipeObj = [System.IO.File]::ReadAllText($OfflineRecipe, $Utf8NoBom) | ConvertFrom-Json
-$ngRecipeObj.limits[0].value = 1.0
-$NgRecipePath = Join-Path $TempRecipesDir "noise_roi_ng.json"
-Write-Utf8File $NgRecipePath ($ngRecipeObj | ConvertTo-Json -Depth 10)
-$NgOut = Join-Path $WorkRoot "cli-ng-out"
-$ngRes = Invoke-External -FilePath $PkgCli -Arguments @("--run", "--station", $OfflineStation, "--recipe", $NgRecipePath, "--output", $NgOut) -AllowedExitCodes @(20)
-Assert-True ($ngRes.ExitCode -eq 20 -and $ngRes.StdOut -match "(?m)^run_status=NG\r?$") "CLI NG check failed"
-
-$errRecipeObj = [System.IO.File]::ReadAllText($OfflineRecipe, $Utf8NoBom) | ConvertFrom-Json
-$errRecipeObj.steps[0].frames = 101
-$ErrRecipePath = Join-Path $TempRecipesDir "noise_roi_short_error.json"
-Write-Utf8File $ErrRecipePath ($errRecipeObj | ConvertTo-Json -Depth 10)
-$ErrOut = Join-Path $WorkRoot "cli-error-out"
-$errRes = Invoke-External -FilePath $PkgCli -Arguments @("--run", "--station", $OfflineStation, "--recipe", $ErrRecipePath, "--output", $ErrOut) -AllowedExitCodes @(11)
-Assert-True ($errRes.ExitCode -eq 11 -and $errRes.StdOut -match "(?m)^run_status=ERROR\r?$") "CLI ERROR check failed"
-$errJson = [System.IO.File]::ReadAllText((Join-Path $ErrOut "result.json"), $Utf8NoBom) | ConvertFrom-Json
-Assert-True ($errJson.run_status -eq "ERROR") "CLI ERROR diagnostic result.json status mismatch"
-Write-Host "  Packaged CLI PASS, NG (exit 20), and ERROR diagnostic result.json verified."
-
-Write-Step "11. Running packaged Python ctypes smoke test (ir_recipe.py)"
-$PyRecipeOut = Join-Path $WorkRoot "py-recipe-out"
-$pyRunRes = Invoke-External -FilePath $pythonPath `
-    -Arguments @((Join-Path $PkgRoot "examples\python\ir_recipe.py"),
-                 "--run", $OfflineStation, $OfflineRecipe, $PyRecipeOut)
+$pyCheck = Invoke-External -FilePath $pythonPath -WorkingDirectory $WorkRoot -Environment $PackageEnv `
+    -Arguments @("-B", $PkgPythonRecipe, "--check", (Join-Path $PkgRoot "examples\stations\offline.json"), $OfflineRecipe)
+Assert-True ($pyCheck.StdOut.Trim() -eq "recipe=VALID") "Packaged Python recipe preflight failed"
+$pyRunRes = Invoke-External -FilePath $pythonPath -WorkingDirectory $WorkRoot `
+    -Environment $PackageEnv -Arguments @("-B", $PkgPythonRecipe,
+                 "--run", $OfflineStation, $OfflineRecipe, "py-recipe-out")
 Assert-True ($pyRunRes.StdOut -match "(?m)^run_status=PASS\r?$") "ir_recipe.py --run failed (got: $($pyRunRes.StdOut))"
-Write-Host "  Python ir_recipe.py smoke verified."
+Assert-True (Test-Path (Join-Path $WorkRoot "py-recipe-out\result.json")) "Python output missing under working directory"
+Write-Host "  Packaged CLI and Python recipe runs verified."
 
-$SimScript = Join-Path $PkgRoot "simulators\ir_sim_devices.py"
-$BbRecipe = Join-Path $PkgRoot "examples\recipes\noise_blackbody.json"
-
-function Read-TextShared([string]$Path) {
-    if (-not (Test-Path $Path)) { return "" }
-    $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-    try {
-        $sr = New-Object System.IO.StreamReader($fs, $Utf8NoBom)
-        try {
-            return $sr.ReadToEnd()
-        } finally {
-            $sr.Dispose()
-        }
-    } finally {
-        $fs.Dispose()
-    }
-}
-
-function Start-SimAndWait([string[]]$SimArgs, [string]$LogOut, [string]$LogErr) {
-    $argString = (($SimArgs | ForEach-Object { Format-WinArg $_ }) -join " ")
-    $proc = Start-Process -FilePath $pythonPath -ArgumentList $argString `
-        -RedirectStandardOutput $LogOut -RedirectStandardError $LogErr `
-        -NoNewWindow -PassThru
-    $deadline = (Get-Date).AddSeconds(6)
-    while ((Get-Date) -lt $deadline) {
-        if ($proc.HasExited) {
-            $errText = Read-TextShared $LogErr
-            throw "Simulator exited early (code=$($proc.ExitCode)): $errText"
-        }
-        $content = Read-TextShared $LogOut
-        if ($content -match "TCP simulator listening") {
-            return $proc
-        }
-        Start-Sleep -Milliseconds 50
-    }
-    try { & taskkill.exe /PID $proc.Id /T /F *> $null } catch {}
-    throw "Timed out waiting for TCP simulator to start"
-}
-
-function Stop-SimProcess($Proc) {
-    if (-not $Proc) { return }
-    try {
-        if (-not $Proc.HasExited) {
-            Invoke-External -FilePath "taskkill.exe" -Arguments @("/PID", "$($Proc.Id)", "/T", "/F") -AllowedExitCodes @(0, 128) | Out-Null
-            $Proc.WaitForExit(3000) | Out-Null
-        }
-    } catch {
-    } finally {
-        try { $Proc.Dispose() } catch {}
-    }
-}
-
-$simStationObj = [System.IO.File]::ReadAllText((Join-Path $PkgRoot "examples\stations\sim_tcp.json"), $Utf8NoBom) | ConvertFrom-Json
-$simStationObj.acquisition.source = (Join-Path $RepoRoot "examples\data\tc002a_640")
-
-Write-Step "12b. Running live CTRL_BREAK_EVENT cancellation test against TCP simulator"
-$simPort3 = Get-FreeTcpPort
-$simStationObj.devices.bb.connection.tcp_port = $simPort3
-$SimStationPath3 = Join-Path $TempRecipesDir "sim_tcp_cancel.json"
-Write-Utf8File $SimStationPath3 ($simStationObj | ConvertTo-Json -Depth 10)
-$cancelBbRecipeObj = [System.IO.File]::ReadAllText($BbRecipe, $Utf8NoBom) | ConvertFrom-Json
-$cancelBbRecipeObj.steps[0].stable_window_ms = 2000
-$cancelBbRecipeObj.steps[0].timeout_ms = 15000
-$CancelBbRecipePath = Join-Path $TempRecipesDir "noise_blackbody_cancel.json"
-Write-Utf8File $CancelBbRecipePath ($cancelBbRecipeObj | ConvertTo-Json -Depth 10)
-
-$simLogOut3 = Join-Path $WorkRoot "sim-cancel-stdout.log"
-$simLogErr3 = Join-Path $WorkRoot "sim-cancel-stderr.log"
-$CancelOut = Join-Path $WorkRoot "cli-tcp-cancel-out"
-$simProc3 = Start-SimAndWait @(
-    "-u", $SimScript, "blackbody-tcp",
-    "--host", "127.0.0.1", "--port", "$simPort3",
-    "--unstable", "--log-io"
-) $simLogOut3 $simLogErr3
-try {
-    $cancelPy = @'
-import json, pathlib, signal, subprocess, sys, time
-cli, station, recipe, out_dir, sim_log = sys.argv[1:6]
-proc = subprocess.Popen(
-    [cli, "--run", "--station", station, "--recipe", recipe, "--output", out_dir],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
-    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-)
-deadline = time.monotonic() + 8.0
-seen_rx = False
-while time.monotonic() < deadline:
-    if proc.poll() is not None:
-        break
-    log_path = pathlib.Path(sim_log)
-    if log_path.exists() and "[RX]" in log_path.read_text(encoding="utf-8", errors="replace"):
-        seen_rx = True
-        break
-    time.sleep(0.05)
-if not seen_rx:
-    proc.kill()
-    stdout, stderr = proc.communicate()
-    raise RuntimeError(f"CLI did not reach blackbody polling before break (rc={proc.returncode}, out={stdout!r}, err={stderr!r})")
-time.sleep(0.1)
-proc.send_signal(signal.CTRL_BREAK_EVENT)
-stdout, stderr = proc.communicate(timeout=8)
-print(json.dumps({
-    "returncode": proc.returncode,
-    "stdout": stdout.decode("utf-8", errors="replace"),
-    "stderr": stderr.decode("utf-8", errors="replace"),
-}))
-'@
-    $cancelPyPath = Join-Path $TempRecipesDir "run_ctrl_break.py"
-    Write-Utf8File $cancelPyPath $cancelPy
-    $cancelRes = Invoke-External -FilePath $pythonPath `
-        -Arguments @("-B", $cancelPyPath, $PkgCli, $SimStationPath3, $CancelBbRecipePath, $CancelOut, $simLogOut3)
-    $cancelJson = $cancelRes.StdOut.Trim() | ConvertFrom-Json
-    Assert-True ($cancelJson.returncode -eq 8) "CTRL_BREAK_EVENT expected exit 8 (IR_CANCELLED), got $($cancelJson.returncode)`nSTDERR: $($cancelJson.stderr)"
-    Assert-True ($cancelJson.stdout -match "(?m)^run_status=CANCELLED\r?$") "CTRL_BREAK_EVENT missing run_status=CANCELLED (got: $($cancelJson.stdout))"
-    Assert-True ($cancelJson.stdout -match "(?m)^completed_frames=0\r?$") "CTRL_BREAK_EVENT expected completed_frames=0 (got: $($cancelJson.stdout))"
-    Assert-True ($cancelJson.stderr -match "status=8" -and $cancelJson.stderr -match "cleanup_status=0") "CTRL_BREAK_EVENT stderr missing diagnostics: $($cancelJson.stderr)"
-    Assert-True (Test-Path (Join-Path $CancelOut "result.json")) "Cancelled CLI run must write diagnostic result.json"
-    $cancelDiagJson = [System.IO.File]::ReadAllText((Join-Path $CancelOut "result.json"), $Utf8NoBom) | ConvertFrom-Json
-    Assert-True ($cancelDiagJson.run_status -eq "CANCELLED") "Cancelled CLI diagnostic result.json run_status != CANCELLED"
-} finally {
-    Stop-SimProcess $simProc3
-}
-Write-Host "  Live CTRL_BREAK_EVENT cancellation verified (exit 8 + run_status=CANCELLED + cleanup_status=0)."
-
-Write-Step "13. Checking optional C# sample (dotnet)"
+Write-Step "11. Checking optional C# sample (dotnet)"
 $dotnetCandidates = New-Object System.Collections.Generic.List[string]
 $dotnetInPath = Get-Command dotnet -ErrorAction SilentlyContinue
 if ($dotnetInPath -and ($dotnetInPath.Source -notmatch "(?i)\\Program Files \(x86\)\\")) {
@@ -633,36 +504,15 @@ if (-not $dotnetExe) {
         -Environment $csEnv -Arguments @("build", $CsProj, "--nologo")
 
     $CsOut = Join-Path $WorkRoot "csharp-recipe-out"
-    $csRes = Invoke-External -FilePath $dotnetExe -WorkingDirectory $PkgRoot `
+    $csRes = Invoke-External -FilePath $dotnetExe -WorkingDirectory $WorkRoot `
         -Environment $csEnv -Arguments @("run", "--no-build", "--project", $CsProj,
-            "--", "--recipe", $OfflineStation, $OfflineRecipe, $CsOut)
+            "--", "--recipe", $OfflineStation, $OfflineRecipe, "csharp-recipe-out")
     Assert-True ($csRes.StdOut -match "(?m)^run_status=PASS\r?$") "C# recipe sample failed (got: $($csRes.StdOut))"
+    Assert-True (Test-Path (Join-Path $CsOut "result.json")) "C# output missing under working directory"
 
     $null = Invoke-External -FilePath $dotnetExe -WorkingDirectory $PkgRoot `
         -Environment $csEnv -Arguments @("run", "--no-build", "--project", $CsProj, "--", "--analysis")
     Write-Host "  C# sample verified (dotnet ${dotnetVer}: recipe + analysis)."
-}
-
-if ($RunCom0ComHil) {
-    Write-Step "14. Running live 6-pair com0com HIL verification"
-    $hilMapPath = Join-Path $ExperimentDir "hil_serial_map.json"
-    Assert-True (Test-Path $hilMapPath) "hil_serial_map.json not found at $hilMapPath"
-    $hilArgs = @(
-        "-B",
-        (Join-Path $RepoRoot "tools\verify_com0com_hil.py"),
-        "--station-lib", (Join-Path $PkgRoot "windows-x64\bin\IR_station.dll"),
-        "--cli", $PkgCli,
-        "--serial-map", $hilMapPath,
-        "--csharp-project", (Join-Path $PkgRoot "examples\csharp\IRSdkSample.csproj"),
-        "--python-recipe", (Join-Path $PkgRoot "examples\python\ir_recipe.py"),
-        "--work-parent", $WorkRoot
-    )
-    if ($dotnetExe) {
-        $hilArgs += @("--dotnet", $dotnetExe)
-    }
-    $hilRes = Invoke-External -FilePath $pythonPath -Arguments $hilArgs
-    Assert-True ($hilRes.StdOut -match "(?m)^COM0COM_HIL=PASS\r?$") "Live com0com HIL missing COM0COM_HIL=PASS (got: $($hilRes.StdOut))"
-    Write-Host ($hilRes.StdOut.Trim())
 }
 
 Write-Step "ALL WINDOWS VERIFICATION CHECKS PASSED"

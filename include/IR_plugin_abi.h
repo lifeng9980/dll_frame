@@ -73,7 +73,9 @@ typedef struct IRPrepareCallbacks {
 
 typedef struct IRHostCallbacks {
     void *host_ctx;
+    /* Returns 1 for a bound key and 0 otherwise. Probe optional slots before accessing them. */
     int32_t (*has_slot)(void *host_ctx, const char *io_key);
+    /* A get_slot error fails the step even if execute returns IR_OK. */
     int32_t (*get_slot)(void *host_ctx, const char *input_key, IRSlotView *out_view);
     int32_t (*alloc_double_map)(void *host_ctx, const char *output_key,
                                   int32_t width, int32_t height, double **out_data);

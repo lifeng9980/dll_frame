@@ -236,25 +236,34 @@ if(BUILD_TESTING)
     target_link_libraries(plugin_abi_test PRIVATE IR_station Threads::Threads)
     add_dependencies(plugin_abi_test
         ir_test_plugin_good ir_test_plugin_bad_abi ir_test_plugin_duplicate)
-    add_test(NAME plugin_abi COMMAND plugin_abi_test "$<TARGET_FILE_DIR:ir_test_plugin_good>")
-    add_test(NAME ir_run_recipe_offline_check COMMAND ir_run_recipe --check
-        --station "${PROJECT_SOURCE_DIR}/examples/stations/offline.json"
-        --recipe "${PROJECT_SOURCE_DIR}/examples/recipes/noise_roi.json"
-        --output "recipe-smoke-output")
-    add_test(NAME ir_capture_accept_list COMMAND ir_capture_accept --list)
-    add_test(NAME ir_capture_accept_soak COMMAND ir_capture_accept
-        --backend raw_replay
-        --source "${PROJECT_SOURCE_DIR}/examples/data/tc002a_640"
-        --frames 2 --cycles 3 --preview-ms 5
-        --report "${PROJECT_BINARY_DIR}/capture_accept_smoke.json")
+    add_test(NAME plugin_abi COMMAND plugin_abi_test
+        "$<TARGET_FILE_DIR:ir_test_plugin_good>" "$<TARGET_FILE:IR_analysis>")
+    add_test(NAME ir_capture_accept_list COMMAND "$<TARGET_FILE:ir_capture_accept>" --list)
     set_target_properties(${IR_TEST_TARGETS} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/tests/bin")
+    # The C and C++ tests use assert for both exercising the API and validating results.
+    foreach(target IN LISTS IR_TEST_TARGETS)
+        if(MSVC)
+            target_compile_options(${target} PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(${target} PRIVATE -UNDEBUG)
+        endif()
+    endforeach()
     if(WIN32)
         set_tests_properties(${IR_TEST_NAMES} PROPERTIES
             ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:IR_station>")
+        option(IR_ENABLE_COM0COM_HIL "Run live com0com regression using the local serial map" OFF)
     endif()
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME ir_run_recipe_offline_check COMMAND "${Python3_EXECUTABLE}" -B
+            "${PROJECT_SOURCE_DIR}/sdk_tests/raw_replay_cli_test.py"
+            --recipe-cli "$<TARGET_FILE:ir_run_recipe>" --fixture-parent "${PROJECT_BINARY_DIR}")
+        add_test(NAME ir_capture_accept_soak COMMAND "${Python3_EXECUTABLE}" -B
+            "${PROJECT_SOURCE_DIR}/sdk_tests/raw_replay_cli_test.py"
+            --capture-accept "$<TARGET_FILE:ir_capture_accept>" --fixture-parent "${PROJECT_BINARY_DIR}")
+        set_tests_properties(ir_run_recipe_offline_check ir_capture_accept_soak PROPERTIES TIMEOUT 60)
+
         add_test(NAME blackbody_tcp COMMAND "${Python3_EXECUTABLE}" -B
             "${PROJECT_SOURCE_DIR}/sdk_tests/blackbody_mock_test.py"
             tcp "$<TARGET_FILE:IR_station>" --fixture-parent "${PROJECT_BINARY_DIR}")
@@ -274,6 +283,13 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/sdk_tests/virtual_station_hil_test.py"
             "$<TARGET_FILE:IR_station>" "$<TARGET_FILE:ir_run_recipe>" --fixture-parent "${PROJECT_BINARY_DIR}")
         set_tests_properties(virtual_station_hil PROPERTIES TIMEOUT 60)
+        if(WIN32 AND IR_ENABLE_COM0COM_HIL)
+            add_test(NAME com0com_hil COMMAND "${Python3_EXECUTABLE}" -B
+                "${PROJECT_SOURCE_DIR}/tools/verify_com0com_hil.py"
+                --station-lib "$<TARGET_FILE:IR_station>" --cli "$<TARGET_FILE:ir_run_recipe>"
+                --work-parent "${PROJECT_BINARY_DIR}")
+            set_tests_properties(com0com_hil PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
+        endif()
         if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             add_test(NAME blackbody_serial COMMAND "${Python3_EXECUTABLE}" -B
                 "${PROJECT_SOURCE_DIR}/sdk_tests/blackbody_mock_test.py"

@@ -60,8 +60,11 @@ int32_t maxValidBits(int32_t dataType)
 
 class FrameScratch {
 public:
-    FrameScratch(int32_t dataType, size_t pixelCount)
+    explicit FrameScratch(const FrameSource &source)
     {
+        const auto geometry = source.geometry();
+        const auto pixelCount = static_cast<size_t>(pixels(geometry.height, geometry.width));
+        const auto dataType = source.dataType();
         if (dataType == IR_TYPE_U16) {
             pixels16_.resize(pixelCount);
         } else if (dataType == IR_TYPE_U32) {
@@ -244,9 +247,9 @@ uint64_t Capture::bufferedBytes() const
 }
 void Capture::startPump()
 {
-    const auto geometry = source->geometry();
-    FrameScratch scratch(source->dataType(), static_cast<size_t>(pixels(geometry.height, geometry.width)));
+    FrameScratch scratch(*source);
     pumpStop_.store(false, std::memory_order_release);
+    frameQueue_.setRunning(true);
     pumpThread_ = std::thread([this, scratch = std::move(scratch)]() mutable {
         pumpLoop(scratch.data());
     });
@@ -259,7 +262,6 @@ void Capture::stopPump()
     if (pumpThread_.joinable())
         pumpThread_.join();
     pumpActive_ = false;
-    frameQueue_.setRunning(false);
 }
 void Capture::pumpLoop(void *frame)
 {
@@ -299,16 +301,19 @@ void Capture::start()
     checkOperationAccess();
     checkStop();
     require(!running, IR_BUSY, "Source is already running");
-    frameQueue_.beginStartSession(source->geometry(), source->dataType(), queueCapacity_);
-    source->start();
-    running = true;
-    if (source->isLive()) {
-        try {
+    frameQueue_.beginStartSession();
+    try {
+        source->start();
+        running = true;
+        if (source->isLive())
             startPump();
-        } catch (...) {
-            try { stop(); } catch (...) {}
-            throw;
-        }
+        else
+            frameQueue_.setRunning(true);
+    } catch (...) {
+        stopPump();
+        running = false;
+        try { source->stop(); } catch (...) {}
+        throw;
     }
 }
 void Capture::stop()
@@ -433,27 +438,17 @@ void Capture::flush(int32_t discardFrames, int32_t timeoutMs, int32_t &discarded
             try { stop(); } catch (...) {}
             throw;
         }
-        if (discardFrames == 0)
-            return;
-
-        const auto g = source->geometry();
-        const auto n = pixels(g.height, g.width);
-        FrameScratch scratch(source->dataType(), static_cast<size_t>(n));
-        int32_t i = 0;
-        while (i < discardFrames) {
+        while (discarded < discardFrames) {
             checkStop();
             IRFrameStamp stamp{};
             int32_t termCode = IR_OK;
             std::string termMsg;
             const auto popStatus = frameQueue_.pop(
-                scratch.data(), stamp, timeoutMs,
+                nullptr, stamp, timeoutMs,
                 [this] { return stopState_.load() == StopState::requested; },
                 termCode, termMsg);
-            if (popStatus == FrameQueue::PopStatus::gap)
-                continue;
             switch (popStatus) {
             case FrameQueue::PopStatus::ok:
-                ++i;
                 ++discarded;
                 break;
             case FrameQueue::PopStatus::cancelled:
@@ -475,9 +470,7 @@ void Capture::flush(int32_t discardFrames, int32_t timeoutMs, int32_t &discarded
     if (discardFrames == 0)
         return;
 
-    const auto g = source->geometry();
-    const auto n = pixels(g.height, g.width);
-    FrameScratch scratch(source->dataType(), static_cast<size_t>(n));
+    FrameScratch scratch(*source);
     for (int32_t i = 0; i < discardFrames; ++i) {
         checkStop();
         const auto deadline = std::chrono::steady_clock::now() +

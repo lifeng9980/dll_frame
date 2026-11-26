@@ -99,14 +99,13 @@ double sampleStdVector(const std::vector<double> &values)
     return std::sqrt(ss / static_cast<double>(values.size() - 1));
 }
 
-double sampleStdSum(double sum, double sumSquares, size_t count)
+double histogramWidth(double minValue, double maxValue, int32_t histInterval)
 {
-    if (count < 2)
-        return 0.0;
-    double numerator = sumSquares - (sum * sum / static_cast<double>(count));
-    if (numerator < 0.0 && numerator > -1.0e-8)
-        numerator = 0.0;
-    return std::sqrt(numerator / static_cast<double>(count - 1));
+    const double width = maxValue == minValue
+        ? 1.0 : (maxValue - minValue) / static_cast<double>(histInterval);
+    require(width > 0.0 && std::isfinite(width), IR_COMPUTATION_FAILED,
+            "Noise3D histogram bin width is not representable");
+    return width;
 }
 
 void addHistogramValue(double value, int32_t histInterval, double minValue, double maxValue,
@@ -115,11 +114,8 @@ void addHistogramValue(double value, int32_t histInterval, double minValue, doub
     int32_t bin = 0;
     if (maxValue > minValue)
     {
-        bin = static_cast<int32_t>((value - minValue) / width);
-        if (bin >= histInterval)
-            bin = histInterval - 1;
-        if (bin < 0)
-            bin = 0;
+        const double position = (value - minValue) / width;
+        bin = static_cast<int32_t>(std::clamp(position, 0.0, static_cast<double>(histInterval - 1)));
     }
     hist[bin] += 1.0;
 }
@@ -135,12 +131,12 @@ void buildHistogram(const std::vector<double> &values, int32_t histInterval,
         return;
     }
 
+    require(isFiniteArray(values.data(), values.size()), IR_COMPUTATION_FAILED,
+            "Noise3D histogram contains non-finite samples");
     const auto limits = std::minmax_element(values.begin(), values.end());
     const double minValue = *limits.first;
     const double maxValue = *limits.second;
-    const double width = (maxValue > minValue)
-                             ? ((maxValue - minValue) / static_cast<double>(histInterval))
-                             : 1.0;
+    const double width = histogramWidth(minValue, maxValue, histInterval);
 
     meta[0] = minValue;
     meta[1] = maxValue;
@@ -440,6 +436,13 @@ extern "C" IR_ANALYSIS_API int32_t IR_Noise3DComputeFramesDn(
 
             const size_t validPixelCount = validPixels.size();
             const size_t validSampleCount = validPixelCount * static_cast<size_t>(frame_count);
+            // Remove the common DC level before accumulating frame and pixel means.
+            const double reference = frameValue(typedOrgFrames, 0, validPixels.front().index,
+                                                params->compute_mode, k_map, b_map, params->b_avg);
+            const auto offsetFromReference = [&](size_t base, size_t index) {
+                return frameValue(typedOrgFrames, base, index, params->compute_mode,
+                                  k_map, b_map, params->b_avg) - reference;
+            };
             std::vector<double> frameRawSums(static_cast<size_t>(frame_count), 0.0);
             std::vector<double> pixelRawSums(framePixels, 0.0);
             double globalSum = 0.0;
@@ -450,8 +453,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_Noise3DComputeFramesDn(
                 double frameSum = 0.0;
                 for (const ValidPixelDn &pixel : validPixels)
                 {
-                    const double value = frameValue(typedOrgFrames, base, pixel.index, params->compute_mode,
-                                                    k_map, b_map, params->b_avg);
+                    const double value = offsetFromReference(base, pixel.index);
                     frameSum += value;
                     pixelRawSums[pixel.index] += value;
                 }
@@ -459,7 +461,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_Noise3DComputeFramesDn(
                 globalSum += frameSum;
             }
 
-            const double globalMean = globalSum / static_cast<double>(validSampleCount);
+            const double globalOffset = globalSum / static_cast<double>(validSampleCount);
             const double firstPassSeconds = elapsedSeconds(stageBegin, Clock::now());
             stageBegin = Clock::now();
 
@@ -473,11 +475,11 @@ extern "C" IR_ANALYSIS_API int32_t IR_Noise3DComputeFramesDn(
             for (int32_t t = 0; t < frame_count; ++t)
             {
                 frameMean[static_cast<size_t>(t)] =
-                    frameRawSums[static_cast<size_t>(t)] / static_cast<double>(validPixelCount) - globalMean;
+                    frameRawSums[static_cast<size_t>(t)] / static_cast<double>(validPixelCount) - globalOffset;
             }
             for (const ValidPixelDn &pixel : validPixels)
             {
-                const double mean = pixelRawSums[pixel.index] / static_cast<double>(frame_count) - globalMean;
+                const double mean = pixelRawSums[pixel.index] / static_cast<double>(frame_count) - globalOffset;
                 pixelMean[pixel.index] = mean;
                 rowMean[static_cast<size_t>(pixel.row)] += mean;
                 colMean[static_cast<size_t>(pixel.col)] += mean;
@@ -506,8 +508,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_Noise3DComputeFramesDn(
                 const size_t tjBase = static_cast<size_t>(t) * static_cast<size_t>(cols);
                 for (const ValidPixelDn &pixel : validPixels)
                 {
-                    const double value = frameValue(typedOrgFrames, base, pixel.index, params->compute_mode,
-                                                    k_map, b_map, params->b_avg) - globalMean;
+                    const double value = offsetFromReference(base, pixel.index) - globalOffset;
                     mapTI[tiBase + static_cast<size_t>(pixel.row)] += value;
                     mapTJ[tjBase + static_cast<size_t>(pixel.col)] += value;
                 }
@@ -539,58 +540,63 @@ extern "C" IR_ANALYSIS_API int32_t IR_Noise3DComputeFramesDn(
             outputs->scalars[IR_NOISE3D_SCALAR_DELTA_J] = sampleStdVector(colMean);
 
             double ijSum = 0.0;
+            for (const ValidPixelDn &pixel : validPixels)
+                ijSum += outputs->map_ij[pixel.index];
+            const double ijMean = ijSum / static_cast<double>(validPixelCount);
             double ijSumSquares = 0.0;
             for (const ValidPixelDn &pixel : validPixels)
             {
-                const double value = outputs->map_ij[pixel.index];
-                ijSum += value;
-                ijSumSquares += value * value;
+                const double delta = outputs->map_ij[pixel.index] - ijMean;
+                ijSumSquares += delta * delta;
             }
             outputs->scalars[IR_NOISE3D_SCALAR_DELTA_IJ] =
-                sampleStdSum(ijSum, ijSumSquares, validPixelCount);
+                std::sqrt(ijSumSquares / static_cast<double>(validPixelCount - 1));
+            outputs->scalars[IR_NOISE3D_SCALAR_DELTA_TI] = sampleStdVector(mapTI);
+            outputs->scalars[IR_NOISE3D_SCALAR_DELTA_TJ] = sampleStdVector(mapTJ);
 
-            const double tiSum = std::accumulate(mapTI.begin(), mapTI.end(), 0.0);
-            double tiSumSquares = 0.0;
-            for (double value : mapTI)
-                tiSumSquares += value * value;
-            outputs->scalars[IR_NOISE3D_SCALAR_DELTA_TI] =
-                sampleStdSum(tiSum, tiSumSquares, mapTI.size());
-
-            const double tjSum = std::accumulate(mapTJ.begin(), mapTJ.end(), 0.0);
-            double tjSumSquares = 0.0;
-            for (double value : mapTJ)
-                tjSumSquares += value * value;
-            outputs->scalars[IR_NOISE3D_SCALAR_DELTA_TJ] =
-                sampleStdSum(tjSum, tjSumSquares, mapTJ.size());
+            const auto forEachResidual = [&](const auto &consume) {
+                for (int32_t t = 0; t < frame_count; ++t)
+                {
+                    const size_t base = static_cast<size_t>(t) * framePixels;
+                    const size_t tiBase = static_cast<size_t>(t) * static_cast<size_t>(rows);
+                    const size_t tjBase = static_cast<size_t>(t) * static_cast<size_t>(cols);
+                    for (const ValidPixelDn &pixel : validPixels)
+                    {
+                        const double value = offsetFromReference(base, pixel.index) - globalOffset -
+                            frameMean[static_cast<size_t>(t)] - rowMean[static_cast<size_t>(pixel.row)] -
+                            colMean[static_cast<size_t>(pixel.col)] - outputs->map_ij[pixel.index] -
+                            mapTI[tiBase + static_cast<size_t>(pixel.row)] -
+                            mapTJ[tjBase + static_cast<size_t>(pixel.col)];
+                        consume(value);
+                    }
+                }
+            };
 
             double tijSum = 0.0;
-            double tijSumSquares = 0.0;
             double tijMin = std::numeric_limits<double>::infinity();
             double tijMax = -std::numeric_limits<double>::infinity();
-            for (int32_t t = 0; t < frame_count; ++t)
-            {
-                const size_t base = static_cast<size_t>(t) * framePixels;
-                const size_t tiBase = static_cast<size_t>(t) * static_cast<size_t>(rows);
-                const size_t tjBase = static_cast<size_t>(t) * static_cast<size_t>(cols);
-                for (const ValidPixelDn &pixel : validPixels)
-                {
-                    const double centered = frameValue(typedOrgFrames, base, pixel.index, params->compute_mode,
-                                                       k_map, b_map, params->b_avg) - globalMean;
-                    const double value =
-                        centered - frameMean[static_cast<size_t>(t)] -
-                        rowMean[static_cast<size_t>(pixel.row)] -
-                        colMean[static_cast<size_t>(pixel.col)] -
-                        outputs->map_ij[pixel.index] -
-                        mapTI[tiBase + static_cast<size_t>(pixel.row)] -
-                        mapTJ[tjBase + static_cast<size_t>(pixel.col)];
-                    tijSum += value;
-                    tijSumSquares += value * value;
-                    tijMin = std::min(tijMin, value);
-                    tijMax = std::max(tijMax, value);
-                }
-            }
+            forEachResidual([&](double value) {
+                require(std::isfinite(value), IR_COMPUTATION_FAILED,
+                        "Noise3D histogram contains non-finite residuals");
+                tijSum += value;
+                tijMin = std::min(tijMin, value);
+                tijMax = std::max(tijMax, value);
+            });
+            const double tijMean = tijSum / static_cast<double>(validSampleCount);
+            double *tijHist = outputs->hist + static_cast<size_t>(IR_NOISE3D_HIST_TIJ) * params->hist_interval;
+            double *tijMeta = outputs->hist_meta + static_cast<size_t>(IR_NOISE3D_HIST_TIJ) * 3;
+            const double tijWidth = histogramWidth(tijMin, tijMax, params->hist_interval);
+            tijMeta[0] = tijMin;
+            tijMeta[1] = tijMax;
+            tijMeta[2] = tijWidth;
+            double tijSumSquares = 0.0;
+            forEachResidual([&](double value) {
+                const double delta = value - tijMean;
+                tijSumSquares += delta * delta;
+                addHistogramValue(value, params->hist_interval, tijMin, tijMax, tijWidth, tijHist);
+            });
             outputs->scalars[IR_NOISE3D_SCALAR_DELTA_TIJ] =
-                sampleStdSum(tijSum, tijSumSquares, validSampleCount);
+                std::sqrt(tijSumSquares / static_cast<double>(validSampleCount - 1));
 
             double totalSquares = 0.0;
             for (int32_t i = IR_NOISE3D_SCALAR_DELTA_T; i <= IR_NOISE3D_SCALAR_DELTA_TIJ; ++i)
@@ -599,7 +605,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_Noise3DComputeFramesDn(
             outputs->scalars[IR_NOISE3D_SCALAR_DELTA_SYS] = std::sqrt(
                 outputs->scalars[IR_NOISE3D_SCALAR_DELTA_IJ] * outputs->scalars[IR_NOISE3D_SCALAR_DELTA_IJ] +
                 outputs->scalars[IR_NOISE3D_SCALAR_DELTA_TIJ] * outputs->scalars[IR_NOISE3D_SCALAR_DELTA_TIJ]);
-            outputs->scalars[IR_NOISE3D_SCALAR_GLOBAL_MEAN] = globalMean;
+            outputs->scalars[IR_NOISE3D_SCALAR_GLOBAL_MEAN] = reference + globalOffset;
             outputs->scalars[IR_NOISE3D_SCALAR_VALID_PIXEL_COUNT] = static_cast<double>(validPixelCount);
             outputs->scalars[IR_NOISE3D_SCALAR_VALID_SAMPLE_COUNT] = static_cast<double>(validSampleCount);
             outputs->scalars[IR_NOISE3D_SCALAR_FRAME_COUNT] = static_cast<double>(frame_count);
@@ -616,34 +622,6 @@ extern "C" IR_ANALYSIS_API int32_t IR_Noise3DComputeFramesDn(
             buildHistogram(colMean, params->hist_interval,
                            outputs->hist + static_cast<size_t>(IR_NOISE3D_HIST_J) * histBins,
                            outputs->hist_meta + static_cast<size_t>(IR_NOISE3D_HIST_J) * 3);
-
-            double *tijHist = outputs->hist + static_cast<size_t>(IR_NOISE3D_HIST_TIJ) * histBins;
-            double *tijMeta = outputs->hist_meta + static_cast<size_t>(IR_NOISE3D_HIST_TIJ) * 3;
-            const double tijWidth = (tijMax > tijMin)
-                                        ? ((tijMax - tijMin) / static_cast<double>(params->hist_interval))
-                                        : 1.0;
-            tijMeta[0] = tijMin;
-            tijMeta[1] = tijMax;
-            tijMeta[2] = tijWidth;
-            for (int32_t t = 0; t < frame_count; ++t)
-            {
-                const size_t base = static_cast<size_t>(t) * framePixels;
-                const size_t tiBase = static_cast<size_t>(t) * static_cast<size_t>(rows);
-                const size_t tjBase = static_cast<size_t>(t) * static_cast<size_t>(cols);
-                for (const ValidPixelDn &pixel : validPixels)
-                {
-                    const double centered = frameValue(typedOrgFrames, base, pixel.index, params->compute_mode,
-                                                       k_map, b_map, params->b_avg) - globalMean;
-                    const double value =
-                        centered - frameMean[static_cast<size_t>(t)] -
-                        rowMean[static_cast<size_t>(pixel.row)] -
-                        colMean[static_cast<size_t>(pixel.col)] -
-                        outputs->map_ij[pixel.index] -
-                        mapTI[tiBase + static_cast<size_t>(pixel.row)] -
-                        mapTJ[tjBase + static_cast<size_t>(pixel.col)];
-                    addHistogramValue(value, params->hist_interval, tijMin, tijMax, tijWidth, tijHist);
-                }
-            }
 
             require(isFiniteArray(outputs->scalars, IR_NOISE3D_SCALAR_COUNT) &&
                         isFiniteArray(outputs->hist, static_cast<size_t>(histCount)) &&

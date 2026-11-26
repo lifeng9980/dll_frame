@@ -311,8 +311,6 @@ internal static class IRStation
         {
             var packaged = Path.Combine(dir.FullName, platDir, subDir);
             if (Directory.Exists(packaged)) return packaged;
-            var buildDebug = Path.Combine(dir.FullName, "实验", "build-debug", subDir);
-            if (Directory.Exists(buildDebug)) return buildDebug;
         }
         throw new InvalidOperationException("Set IR_SDK_LIB_DIR to the platform library directory.");
     }

@@ -18,6 +18,9 @@ import time
 import urllib.request
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "sdk_tests"))
+
+from raw_replay_cli_test import write_raw_replay_fixture  # noqa: E402
 
 IR_DCN1000 = 3
 IR_IT6332A = 4
@@ -225,7 +228,6 @@ def main():
     cli_path = args.cli.resolve()
     serial_map_path = args.serial_map.resolve()
     recipe_path = (REPO_ROOT / "examples" / "recipes" / "virtual_station_hil.json").resolve()
-    raw_dir = (REPO_ROOT / "examples" / "data" / "tc002a_640").resolve()
     serial_map = json.loads(serial_map_path.read_text(encoding="utf-8"))
 
     required_roles = ("power", "oven", "dmm", "detector", "cooler", "blackbody")
@@ -242,6 +244,8 @@ def main():
     with TemporaryDirectory(prefix="com0com-hil-", dir=args.work_parent) as tmp:
         work = Path(tmp)
         station_path = work / "station_6com.json"
+        raw_dir = work / "replay"
+        write_raw_replay_fixture(raw_dir)
         sim_cmd = [
             sys.executable, "-B",
             str(REPO_ROOT / "simulators" / "ir_virtual_station.py"),
@@ -381,11 +385,11 @@ def main():
                             pass
             print(f"COM0COM_HIL_PHASE_A=PASS open_all_6_ms={open_ms:.1f}")
 
-            # Phase B: CLI Schema v2 PASS + mid-recipe fault rollback
+            # Phase B: CLI PASS + mid-recipe fault rollback
             cli_out = work / "cli-v2-out"
             rc = subprocess.run(
                 [str(cli_path), "--check", "--station", str(station_path),
-                 "--recipe", str(recipe_path), "--output", str(cli_out)],
+                 "--recipe", str(recipe_path)],
                 capture_output=True, text=True, check=False,
             )
             assert rc.returncode == 0 and rc.stdout.strip() == "recipe=VALID", (rc.returncode, rc.stdout, rc.stderr)

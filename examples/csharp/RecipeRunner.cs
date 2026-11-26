@@ -51,7 +51,7 @@ internal static class RecipeRunner
 
             var stationJson = station.ToJsonString();
             var recipeJson = File.ReadAllText(recipePath);
-            var outputDirectory = Path.GetFullPath(args[3], Path.GetDirectoryName(recipePath)!);
+            var outputDirectory = Path.GetFullPath(args[3]);
             if (Directory.Exists(outputDirectory) || File.Exists(outputDirectory))
                 throw new InvalidOperationException("Output directory already exists.");
 

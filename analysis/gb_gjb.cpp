@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <initializer_list>
 #include <queue>
 #include <utility>
 #include <vector>
@@ -90,11 +91,18 @@ void validateCalcParameters(const IRCalcParameters &p)
             IR_BAD_ARGUMENT, "Calculation parameters contain non-finite floating-point values");
     require(p.digital_full != 0, IR_BAD_ARGUMENT, "digital_full must not be zero");
     require(p.system_gain != 0.0, IR_BAD_ARGUMENT, "system_gain must not be zero");
+    require(p.adc_swing_v != 0.0, IR_BAD_ARGUMENT, "adc_swing_v must not be zero");
     require(std::abs(p.t1_c - p.t0_c) != 0.0, IR_BAD_ARGUMENT, "t1_c - t0_c must not be zero");
     const double actualIntegrationTimeUs =
         static_cast<double>(p.integration_time_us) - static_cast<double>(p.invalid_integration_us);
     require(actualIntegrationTimeUs > 0.0, IR_BAD_ARGUMENT,
             "Actual integration time (integration_time_us - invalid_integration_us) must be positive");
+}
+
+void requireFiniteMetrics(std::initializer_list<double> metrics)
+{
+    require(std::all_of(metrics.begin(), metrics.end(), [](double value) { return std::isfinite(value); }),
+            IR_COMPUTATION_FAILED, "GB/GJB evaluation produced a non-finite metric");
 }
 
 void validateGbCriteria(const IRGbCriteria &c)
@@ -208,6 +216,8 @@ CommonBeforeData computeCommonBefore(ConstMatrixView<double> v1,
     res.netd = Matrix2D<double>(rows, cols);
 
     res.voltsPerCount = p.adc_swing_v / static_cast<double>(p.digital_full) / p.system_gain;
+    require(res.voltsPerCount != 0.0 && std::isfinite(res.voltsPerCount),
+            IR_COMPUTATION_FAILED, "GB/GJB voltage conversion is not representable");
     res.fov = 4.0 * p.f_number * p.f_number + 1.0;
 
     const double pixelPitchCm = p.pixel_pitch_um / 10000.0;
@@ -251,6 +261,10 @@ CommonBeforeData computeCommonBefore(ConstMatrixView<double> v1,
     res.avgNoiseVoltageV = finiteMean(res.noiseVoltage.view());
     res.avgDetectivity = finiteMean(res.detectivity.view());
     res.avgNetd = finiteMean(res.netd.view());
+    require(res.avgResponsivity != 0.0 && res.avgNoiseVoltageV != 0.0,
+            IR_COMPUTATION_FAILED, "GB/GJB evaluation requires nonzero average response and noise");
+    requireFiniteMetrics({res.avgPixelResponseCount, res.avgPixelResponseVoltage, res.avgSnr,
+                          res.avgResponsivity, res.avgNoiseVoltageV, res.avgDetectivity, res.avgNetd});
     return res;
 }
 
@@ -805,6 +819,8 @@ noexcept{
         const double afterAvgResponsivity = maskedFiniteMean(before.responsivity.view(), validView);
         const double afterAvgNetd = maskedFiniteMean(before.netd.view(), validView);
         const double afterAvgNoiseVoltageV = maskedFiniteMean(before.noiseVoltage.view(), validView);
+        require(afterAvgResponsivity != 0.0, IR_COMPUTATION_FAILED,
+                "GB evaluation has zero average responsivity after filtering");
         const double actualIntegrationTimeMs =
             (static_cast<double>(params->integration_time_us) -
              static_cast<double>(params->invalid_integration_us)) * 1e-3;
@@ -838,6 +854,11 @@ noexcept{
         out.after_avg_detectivity = maskedFiniteMean(before.detectivity.view(), validView);
         out.bad_pixels = bad.summary;
 
+        requireFiniteMetrics({out.before_avg_blackbody_response, out.before_sitf,
+                              out.after_avg_response_voltage_v, out.after_avg_responsivity,
+                              out.after_avg_netd_mk, out.after_avg_noise_voltage_mv,
+                              out.after_response_mv_per_ms_k, out.after_avg_nep_w,
+                              out.after_response_nonuniformity_pct, out.after_avg_detectivity});
         *summary = out;
         copyGbMasks(masks, bad, &shortMask, &openMask, pixelCount);
     });
@@ -937,6 +958,8 @@ noexcept{
         const double afterAvgResponsivity = maskedFiniteMean(before.responsivity.view(), validView);
         const double afterAvgNetd = maskedFiniteMean(before.netd.view(), validView);
         const double afterAvgNoiseVoltageV = maskedFiniteMean(before.noiseVoltage.view(), validView);
+        require(afterAvgResponsivity != 0.0 && afterAvgNoiseVoltageV != 0.0,
+                IR_COMPUTATION_FAILED, "GJB evaluation has zero average response or noise after filtering");
         const double afterAvgNoiseVoltageMv = afterAvgNoiseVoltageV * 1000.0;
         const double responsivityStdDev =
             maskedFiniteStdDev(before.responsivity.view(), validView, afterAvgResponsivity);
@@ -948,11 +971,18 @@ noexcept{
         Matrix2D<double> vnuc(rows, cols);
         for (int64_t i = 0; i < pixelCount; ++i)
         {
+            if (validView.ptr[i] == 0)
+                continue;
             const double t1 = signalT1V.data[size_t(i)];
             const double t2 = signalT2V.data[size_t(i)];
-            const double k = safeDivide(avgSignalVoltageT1 - avgSignalVoltageT2, t1 - t2);
+            const double delta = t1 - t2;
+            require(delta != 0.0 && std::isfinite(delta), IR_COMPUTATION_FAILED,
+                    "GJB RFPN needs a nonzero two-point response at every valid pixel");
+            const double k = (avgSignalVoltageT1 - avgSignalVoltageT2) / delta;
             const double b = avgSignalVoltageT1 - k * t1;
             vnuc.data[size_t(i)] = k * signalVmV.data[size_t(i)] + b;
+            require(std::isfinite(vnuc.data[size_t(i)]), IR_COMPUTATION_FAILED,
+                    "GJB RFPN correction produced a non-finite voltage");
         }
         const double avgVnuc = maskedFiniteMean(vnuc.view(), validView);
         const double rfpn = maskedFiniteStdDev(vnuc.view(), validView, avgVnuc);
@@ -978,10 +1008,17 @@ noexcept{
         out.after_avg_detectivity = maskedFiniteMean(before.detectivity.view(), validView);
         out.after_spatial_noise = afterAvgNoiseVoltageMv * respNonuniformityPct;
         const double maxOutputVoltage = params->vmax_per_count * before.voltsPerCount;
-        out.after_max_dynamic_range_db = 20.0 * std::log10(maxOutputVoltage / afterAvgNoiseVoltageV);
+        const double dynamicRange = maxOutputVoltage / afterAvgNoiseVoltageV;
+        require(dynamicRange > 0.0 && std::isfinite(dynamicRange), IR_COMPUTATION_FAILED,
+                "GJB dynamic range requires a finite positive signal-to-noise ratio");
+        out.after_max_dynamic_range_db = 20.0 * std::log10(dynamicRange);
         out.after_rfpn_v = rfpn;
         out.bad_pixels = bad.summary;
 
+        requireFiniteMetrics({out.after_avg_response_voltage_v, out.after_avg_responsivity,
+                              out.after_avg_nep_w, out.after_response_nonuniformity_pct,
+                              out.after_avg_noise_voltage_mv, out.after_avg_netd_mk,
+                              out.after_avg_detectivity, out.after_spatial_noise, out.after_rfpn_v});
         *summary = out;
         copyGjbMasks(masks, bad);
     });

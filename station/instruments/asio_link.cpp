@@ -31,20 +31,25 @@ void withDeadline(asio::io_context &io, Deadline deadline, const char *operation
     io.restart();
     asio::steady_timer timer(io, deadline);
     asio::error_code result;
-    bool expired = false;
+    enum class Completion { pending, io, timer };
+    Completion completion = Completion::pending;
     start([&](asio::error_code error) {
+        if (completion != Completion::pending)
+            return;
+        completion = Completion::io;
         result = error;
         timer.cancel();
     });
     timer.async_wait([&](asio::error_code error) {
-        if (!error) {
-            expired = true;
+        // Cancelling the timer cannot change a successful wait already queued for dispatch.
+        if (!error && completion == Completion::pending) {
+            completion = Completion::timer;
             cancel();
         }
     });
     // Finish the cancellation handler before caller-owned buffers go out of scope.
     io.run();
-    if (expired) throw Error(IR_TIMEOUT, std::string(operation) + " timed out");
+    if (completion == Completion::timer) throw Error(IR_TIMEOUT, std::string(operation) + " timed out");
     if (result) throw Error(IR_IO_ERROR, std::string(operation) + ": " + result.message());
 }
 }

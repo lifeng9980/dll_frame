@@ -13,12 +13,24 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }
+    },
+    {
+      "name": "windows-release",
+      "inherits": "windows",
+      "binaryDir": "${sourceDir}/实验/build-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
     }
   ],
   "buildPresets": [
     {
       "name": "windows",
       "configurePreset": "windows"
+    },
+    {
+      "name": "windows-release",
+      "configurePreset": "windows-release"
     }
   ],
   "testPresets": [
@@ -28,6 +40,11 @@
       "output": {
         "outputOnFailure": true
       }
+    },
+    {
+      "name": "windows-release",
+      "inherits": "windows",
+      "configurePreset": "windows-release"
     }
   ]
 }

@@ -302,6 +302,59 @@ void testGbEvaluateMapsClosedFormAndZeroNoiseParity()
     CHECK_NEAR(zeroSummary.before_avg_netd_mk, (0.0 + 200.0 + 200.0 + 200.0) / 4.0, 1e-12);
 }
 
+void testEvaluateMapsRejectsUndefinedMetrics()
+{
+    constexpr int32_t rows = 2, cols = 2, n = rows * cols;
+    const auto params = defaultCalcParams();
+    const IRGbCriteria gbCriteria{1.5, 0.5, 1.5, 2.0, 0.0, 0.0, 1, 0};
+    const IRGjbCriteria gjbCriteria{1.0, 1.0, 0.5, 0.5, 1, 0};
+    const double v1[n] = {200.0, 200.0, 200.0, 200.0};
+    const double v2[n] = {100.0, 100.0, 100.0, 100.0};
+    const double noise[n] = {4.0, 4.0, 4.0, 4.0};
+    const double zeroNoise[n]{};
+    IRGbSummary gb{};
+    IRGjbSummary gjb{};
+    char err[256]{};
+
+    CHECK(IR_GbEvaluateMaps(v1, v1, noise, rows, cols, n, &params, &gbCriteria,
+                            &gb, nullptr, err, sizeof err) == IR_COMPUTATION_FAILED);
+    CHECK(IR_GjbEvaluateMaps(v1, v1, noise, v2, rows, cols, n, &params, &gjbCriteria,
+                             &gjb, nullptr, err, sizeof err) == IR_COMPUTATION_FAILED);
+    CHECK(IR_GbEvaluateMaps(v1, v2, zeroNoise, rows, cols, n, &params, &gbCriteria,
+                            &gb, nullptr, err, sizeof err) == IR_COMPUTATION_FAILED);
+    CHECK(IR_GjbEvaluateMaps(v1, v2, zeroNoise, v2, rows, cols, n, &params, &gjbCriteria,
+                             &gjb, nullptr, err, sizeof err) == IR_COMPUTATION_FAILED);
+
+    const double partiallyZeroNoise[n] = {0.0, 4.0, 4.0, 4.0};
+    CHECK(IR_GjbEvaluateMaps(v1, v2, partiallyZeroNoise, v2, rows, cols, n, &params, &gjbCriteria,
+                             &gjb, nullptr, err, sizeof err) == IR_OK);
+    CHECK_NEAR(gjb.before_avg_snr, 18.75, 1e-12);
+    CHECK(std::isfinite(gjb.after_max_dynamic_range_db));
+
+    auto noVoltage = params;
+    noVoltage.adc_swing_v = 0.0;
+    CHECK(IR_GbEvaluateMaps(v1, v2, noise, rows, cols, n, &noVoltage, &gbCriteria,
+                            &gb, nullptr, err, sizeof err) == IR_BAD_ARGUMENT);
+    CHECK(IR_GjbEvaluateMaps(v1, v2, noise, v2, rows, cols, n, &noVoltage, &gjbCriteria,
+                             &gjb, nullptr, err, sizeof err) == IR_BAD_ARGUMENT);
+
+    auto overflowingSitf = params;
+    overflowingSitf.system_gain = std::numeric_limits<double>::min();
+    overflowingSitf.adc_swing_v = overflowingSitf.system_gain;
+    overflowingSitf.digital_full = 1;
+    CHECK(IR_GbEvaluateMaps(v1, v2, noise, rows, cols, n, &overflowingSitf, &gbCriteria,
+                            &gb, nullptr, err, sizeof err) == IR_COMPUTATION_FAILED);
+
+    auto noDynamicRange = params;
+    noDynamicRange.vmax_per_count = 0.0;
+    CHECK(IR_GjbEvaluateMaps(v1, v2, noise, v2, rows, cols, n, &noDynamicRange, &gjbCriteria,
+                             &gjb, nullptr, err, sizeof err) == IR_COMPUTATION_FAILED);
+
+    const double onePixelNoResponse[n] = {100.0, 200.0, 200.0, 200.0};
+    CHECK(IR_GjbEvaluateMaps(onePixelNoResponse, v2, noise, v2, rows, cols, n, &params, &gjbCriteria,
+                             &gjb, nullptr, err, sizeof err) == IR_COMPUTATION_FAILED);
+}
+
 void testGbClusterGrades()
 {
     const int32_t rows = 20, cols = 20;
@@ -536,6 +589,7 @@ int main()
     testNetdCountIsNotLost();
     testLargeArrayGbAndGjbProcessing();
     testGbEvaluateMapsClosedFormAndZeroNoiseParity();
+    testEvaluateMapsRejectsUndefinedMetrics();
     testGbClusterGrades();
     testGjbClustersBlocksAndRfpn();
     testRaw16PopulationStdIntegrationAndValidation();

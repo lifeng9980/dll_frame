@@ -227,8 +227,8 @@ int wmain(int argc, wchar_t **argv)
 int main(int argc, char **argv)
 #endif
 {
-    if (argc < 2) {
-        std::cerr << "Usage: plugin_abi_test <plugin_build_dir>\n";
+    if (argc != 3) {
+        std::cerr << "Usage: plugin_abi_test <plugin_build_dir> <analysis_library>\n";
         return 2;
     }
 
@@ -255,6 +255,9 @@ int main(int argc, char **argv)
     const fs::path badCopy = badPluginDir / srcBad.filename();
     fs::copy_file(srcGood, goodCopy, fs::copy_options::overwrite_existing);
     fs::copy_file(srcBad, badCopy, fs::copy_options::overwrite_existing);
+    const fs::path analysisLibrary(argv[2]);
+    const auto auxiliaryCopy = goodPluginDir / analysisLibrary.filename();
+    fs::copy_file(analysisLibrary, auxiliaryCopy);
 
     const Json stationGood{
         {"schemav", 1},
@@ -338,6 +341,15 @@ int main(int argc, char **argv)
                              err, sizeof err) == IR_BAD_ARGUMENT);
     CHECK(IR_CheckRecipeJson(stGood.c_str(), goodPassRecipe.dump().c_str(),
                              err, sizeof err) == IR_OK);
+    auto stationWithExplicitAuxiliary = stationGood;
+    stationWithExplicitAuxiliary["plugins"] = Json::array({utf8(auxiliaryCopy)});
+    CHECK(IR_CheckRecipeJson(stationWithExplicitAuxiliary.dump().c_str(), goodPassRecipe.dump().c_str(),
+                             err, sizeof err) == IR_UNSUPPORTED);
+    CHECK(std::string(err).find("missing symbol") != std::string::npos);
+    auto stationWithBadDirectory = stationBad;
+    stationWithBadDirectory["plugins"] = Json::array({utf8(badPluginDir)});
+    CHECK(IR_CheckRecipeJson(stationWithBadDirectory.dump().c_str(), minPluginRecipe.dump().c_str(),
+                             err, sizeof err) == IR_UNSUPPORTED);
 
     // Unknown input field, wrong version, unit mismatch
     {

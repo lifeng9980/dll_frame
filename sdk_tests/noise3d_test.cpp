@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <iterator>
 #include <limits>
 #include <numeric>
 #include <vector>
@@ -291,6 +292,44 @@ void testComputeFramesNucAndBlindPixels()
     CHECK_NEAR(scalars32[IR_NOISE3D_SCALAR_DELTA_TIJ], 0.0, 1e-12);
 }
 
+void testConstantNucHistogramsAndResiduals()
+{
+    constexpr int32_t frameCount = 3, rows = 2, cols = 3;
+    constexpr int32_t n = rows * cols, histInterval = 4;
+    uint16_t frames[frameCount * n];
+    std::fill_n(frames, std::size(frames), uint16_t{1});
+    const uint8_t blindMask[n]{};
+    double kMap[n];
+    // Rounding in the NUC means can give a constant residual whose square overflows.
+    std::fill_n(kMap, n, 1e180);
+    const double bMap[n]{};
+    double scalars[IR_NOISE3D_SCALAR_COUNT]{};
+    double hist[IR_NOISE3D_HIST_GROUP_COUNT * histInterval]{};
+    double histMeta[IR_NOISE3D_HIST_GROUP_COUNT * 3]{};
+    double mapIJ[n]{}, mapTI[frameCount * rows]{}, mapTJ[frameCount * cols]{};
+    const IRNoise3DComputeOutputs outputs{
+        scalars, hist, histMeta, mapIJ, mapTI, mapTJ, nullptr,
+        std::size(hist), n, std::size(mapTI), std::size(mapTJ),
+        IR_NOISE3D_SCALAR_COUNT, std::size(histMeta), 0, 0};
+    const IRNoise3DComputeParams params{IR_NOISE3D_MODE_NUC, 1, histInterval, 0, 0.0, 0.0};
+    const auto input = makeArrayView(frames, frameCount, rows, cols);
+    char err[256]{};
+    CHECK(IR_Noise3DComputeFramesDn(&input, blindMask, n, kMap, bMap, n,
+                                    &params, &outputs, err, sizeof err) == IR_OK);
+    for (int i = IR_NOISE3D_SCALAR_DELTA_T; i <= IR_NOISE3D_SCALAR_DELTA_SYS; ++i)
+        CHECK_NEAR(scalars[i], 0.0, 0.0);
+
+    const double sampleCounts[] = {frameCount, rows, cols, frameCount * n};
+    for (int group = 0; group < IR_NOISE3D_HIST_GROUP_COUNT; ++group)
+    {
+        CHECK_NEAR(histMeta[group * 3], histMeta[group * 3 + 1], 0.0);
+        CHECK_NEAR(histMeta[group * 3 + 2], 1.0, 0.0);
+        CHECK_NEAR(hist[group * histInterval], sampleCounts[group], 0.0);
+        for (int bin = 1; bin < histInterval; ++bin)
+            CHECK_NEAR(hist[group * histInterval + bin], 0.0, 0.0);
+    }
+}
+
 void testErrorPaths()
 {
     const int32_t rows = 2, cols = 2, frameCount = 2;
@@ -353,6 +392,25 @@ void testErrorPaths()
     CHECK(IR_Noise3DComputeFramesDn(&input,
                                     okMask, n, nullptr, bMap, n,
                                     &pNuc, &outOrg, err, sizeof err) == IR_NULL_POINTER);
+
+    const uint16_t temporalFrames[8] = {0, 0, 0, 0, 1, 1, 1, 1};
+    const uint16_t interactionFrames[8] = {1, 0, 0, 1, 0, 1, 1, 0};
+    const auto temporalInput = makeArrayView(temporalFrames, frameCount, rows, cols);
+    const auto interactionInput = makeArrayView(interactionFrames, frameCount, rows, cols);
+    const double tiny = std::numeric_limits<double>::denorm_min();
+    double tinyGains[4] = {tiny, tiny, tiny, tiny};
+    const double zeroOffsets[4]{};
+    CHECK(IR_Noise3DComputeFramesDn(&temporalInput, okMask, n, tinyGains, zeroOffsets, n,
+                                    &pNuc, &outOrg, err, sizeof err) == IR_COMPUTATION_FAILED);
+    CHECK(IR_Noise3DComputeFramesDn(&interactionInput, okMask, n, tinyGains, zeroOffsets, n,
+                                    &pNuc, &outOrg, err, sizeof err) == IR_COMPUTATION_FAILED);
+
+    std::fill_n(tinyGains, 4, 2.0 * tiny);
+    CHECK(IR_Noise3DComputeFramesDn(&temporalInput, okMask, n, tinyGains, zeroOffsets, n,
+                                    &pNuc, &outOrg, err, sizeof err) == IR_OK);
+    CHECK_NEAR(histMeta[IR_NOISE3D_HIST_T * 3 + 2], tiny, 0.0);
+    CHECK_NEAR(hist[IR_NOISE3D_HIST_T * 2], 1.0, 0.0);
+    CHECK_NEAR(hist[IR_NOISE3D_HIST_T * 2 + 1], 1.0, 0.0);
 }
 
 } // namespace
@@ -362,6 +420,7 @@ int main()
     testBuildCalibDn();
     testComputeFramesOrgHandDerived();
     testComputeFramesNucAndBlindPixels();
+    testConstantNucHistogramsAndResiduals();
     testErrorPaths();
 
     if (gFailures == 0)

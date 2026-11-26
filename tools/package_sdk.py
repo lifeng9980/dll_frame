@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import tempfile
 import time
@@ -25,6 +26,10 @@ REQUIRED_CUSTOMER_FILES = (
 )
 FORBIDDEN_PACKAGE_FILES = (
     "AGENTS.md",
+    "tools",
+    "sdk_tests",
+    "examples/data/tc002a_640",
+    "examples/data/s07_1280",
     "实施计划.md",
     "验证记录.md",
     "docs/实施计划.md",
@@ -42,11 +47,22 @@ FORBIDDEN_PATTERNS = (
     ("internal codex branch reference", re.compile(r"(?i)codex/")),
     ("internal windows-iter branch reference", re.compile(r"(?i)windows-iter")),
     ("internal feat/plugin-arch branch reference", re.compile(r"(?i)feat/plugin-arch")),
+    ("internal build or probe path", re.compile(
+        r"""实验(?:[\\/]+|["']\s*[,/+]\s*["'](?:[\\/]+)?)(?:build-(?:debug|release)|debug_tc002a|hil_serial_map\.json)\b""",
+        re.IGNORECASE,
+    )),
 )
 HYGIENE_TEXT_EXTENSIONS = (
-    ".md", ".txt", ".json", ".py", ".c", ".cpp", ".h", ".cs", ".csproj", ".ps1", ".sh", ".cmake",
+    ".md", ".txt", ".json", ".py", ".c", ".cpp", ".h", ".hpp", ".cs", ".csproj", ".ps1", ".sh", ".cmake",
 )
 MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
+DEBUG_CRT_DLL_RE = re.compile(
+    r"(?:ucrtbased|msvcr(?:t|[0-9]{2,3})d|msvcm[0-9]{2,3}d|"
+    r"msvcp[0-9]{2,3}(?:_[0-9]+)?d(?:_(?:atomic_wait|codecvt_ids))?|"
+    r"vcruntime[0-9]{3}(?:_(?:[0-9]+|threads))?d|"
+    r"(?:concrt|vccorlib|vcamp|vcomp)[0-9]{2,3}d)\.dll",
+    re.IGNORECASE,
+)
 
 
 def file_hash(path):
@@ -135,10 +151,11 @@ def scan_package_hygiene(stage):
             violations.append(f"{relative}: invalid UTF-8 ({error})")
             continue
 
-        for line_no, line in enumerate(content.splitlines(), start=1):
-            for label, pattern in FORBIDDEN_PATTERNS:
-                if pattern.search(line):
-                    violations.append(f"{relative}:{line_no}: forbidden {label}: {line.strip()}")
+        lines = content.split("\n")
+        for label, pattern in FORBIDDEN_PATTERNS:
+            for match in pattern.finditer(content):
+                line_no = content.count("\n", 0, match.start()) + 1
+                violations.append(f"{relative}:{line_no}: forbidden {label}: {lines[line_no - 1].strip()}")
 
         if path.suffix.lower() == ".md":
             for line_no, line in enumerate(content.splitlines(), start=1):
@@ -211,6 +228,88 @@ def verify_windows_dll_commit(dll_path, expected_commit):
         )
 
 
+def windows_imports(path):
+    """Read direct and delay-loaded PE DLL names without using Windows tooling."""
+    data = path.read_bytes()
+    try:
+        (pe,) = struct.unpack_from("<I", data, 0x3c)
+        if data[:2] != b"MZ" or data[pe:pe + 4] != b"PE\x00\x00":
+            raise ValueError("missing PE signature")
+        (section_count,) = struct.unpack_from("<H", data, pe + 6)
+        (optional_size,) = struct.unpack_from("<H", data, pe + 20)
+        optional = pe + 24
+        (magic,) = struct.unpack_from("<H", data, optional)
+        if magic == 0x10b:
+            directories_offset = 96
+            (image_base,) = struct.unpack_from("<I", data, optional + 28)
+        elif magic == 0x20b:
+            directories_offset = 112
+            (image_base,) = struct.unpack_from("<Q", data, optional + 24)
+        else:
+            raise ValueError(f"unknown PE optional header type {magic:#x}")
+        directories = optional + directories_offset
+        (directory_count,) = struct.unpack_from("<I", data, directories - 4)
+        (headers_size,) = struct.unpack_from("<I", data, optional + 60)
+        sections_offset = optional + optional_size
+        if directories + 8 * directory_count > sections_offset or sections_offset + 40 * section_count > len(data):
+            raise ValueError("truncated PE headers")
+        # Section header fields: VirtualAddress, SizeOfRawData, PointerToRawData.
+        sections = [struct.unpack_from("<III", data, sections_offset + i * 40 + 12)
+                    for i in range(section_count)]
+        sections.append((0, headers_size, 0))
+
+        def rva_bounds(rva):
+            for address, size, start in sections:
+                if address <= rva < address + size and start + size <= len(data):
+                    return start + rva - address, start + size
+            raise ValueError(f"invalid PE import RVA {rva:#x}")
+
+        imports = set()
+        # Directory 1: IMAGE_IMPORT_DESCRIPTOR. Directory 13: delay-load descriptors.
+        for directory, entry_words, name_field in ((1, 5, 3), (13, 8, 1)):
+            if directory >= directory_count:
+                continue
+            rva, size = struct.unpack_from("<II", data, directories + 8 * directory)
+            if not rva and not size:
+                continue
+            begin, end = rva_bounds(rva)
+            if not rva or begin + size > end:
+                raise ValueError("invalid PE import directory extent")
+            entry = struct.Struct(f"<{entry_words}I")
+            for offset in range(begin, begin + size - entry.size + 1, entry.size):
+                fields = entry.unpack_from(data, offset)
+                if not any(fields):
+                    break
+                name_rva = fields[name_field]
+                if directory == 13 and not fields[0] & 1:
+                    name_rva -= image_base
+                if name_rva <= 0:
+                    raise ValueError("invalid PE import name RVA")
+                name, bound = rva_bounds(name_rva)
+                name_end = data.find(b"\0", name, bound)
+                if name_end <= name:
+                    raise ValueError("invalid PE import name")
+                imports.add(data[name:name_end].decode("ascii"))
+            else:
+                raise ValueError("missing PE import directory terminator")
+        return imports
+    except (ValueError, struct.error) as error:
+        raise ValueError(f"Cannot inspect Windows imports of {path}: {error}") from error
+
+
+def verify_windows_runtime_dependencies(stage):
+    violations = []
+    for path in sorted(stage.rglob("*")):
+        if path.suffix.lower() not in (".exe", ".dll") or not path.is_file():
+            continue
+        debug_imports = sorted(name for name in windows_imports(path) if DEBUG_CRT_DLL_RE.fullmatch(name))
+        if debug_imports:
+            violations.append(f"{path.relative_to(stage).as_posix()}: {', '.join(debug_imports)}")
+    if violations:
+        details = "\n  - ".join(violations)
+        raise RuntimeError(f"Windows package contains Debug CRT imports; use the windows-release preset:\n  - {details}")
+
+
 def make_package(source_root, windows_install, linux_install, archive, windows_only=False, require_clean=False):
     source_root = source_root.resolve()
     windows_install = windows_install.resolve()
@@ -278,6 +377,7 @@ def make_package(source_root, windows_install, linux_install, archive, windows_o
                 copy_item(linux_install / relative, stage / "linux-x86_64" / relative)
 
         scan_package_hygiene(stage)
+        verify_windows_runtime_dependencies(stage)
         if commit != "unknown":
             expected_commit = f"{commit}-dirty" if dirty else commit
             verify_windows_dll_commit(stage / "windows-x64/bin/IR_station.dll", expected_commit)

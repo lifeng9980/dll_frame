@@ -64,7 +64,7 @@ const FrameBatch &getBatch(const ExecutionContext &ctx, const std::string &slot)
 {
     const auto it = ctx.batches.find(slot);
     require(it != ctx.batches.end(), IR_BAD_ARGUMENT, "Missing runtime batch slot: " + slot);
-    return it->second;
+    return *it->second;
 }
 
 const DoubleMap &getMap(const ExecutionContext &ctx, const std::string &slot)

@@ -864,11 +864,16 @@ bool PluginMetricProvider::isValidPluginMethodName(std::string_view methodName) 
 }
 
 int32_t PluginMetricProvider::loadLibrary(const std::filesystem::path &libraryPath,
-                                          std::string *errOut)
+                                          bool requireQuerySymbol, std::string *errOut)
 {
     std::error_code ec;
-    const std::filesystem::path absPath = std::filesystem::weakly_canonical(libraryPath, ec);
-    const std::filesystem::path &targetPath = ec ? libraryPath : absPath;
+    const auto absPath = std::filesystem::absolute(libraryPath, ec);
+    if (ec) {
+        setError(errOut, "Cannot resolve absolute plugin path: " + pathToUtf8(libraryPath));
+        return IR_IO_ERROR;
+    }
+    const auto canonicalPath = std::filesystem::weakly_canonical(absPath, ec);
+    const auto &targetPath = ec ? absPath : canonicalPath;
     const std::string targetUtf8 = pathToUtf8(targetPath);
 
     if (!std::filesystem::is_regular_file(targetPath, ec)) {
@@ -884,24 +889,18 @@ int32_t PluginMetricProvider::loadLibrary(const std::filesystem::path &libraryPa
             return IR_IO_ERROR;
     }
 
-    IRPluginQueryFn queryFn = nullptr;
 #if defined(_WIN32)
-    const FARPROC rawSym = GetProcAddress(lib->native, IR_PLUGIN_QUERY_SYMBOL);
-    if (rawSym == nullptr) {
-        setError(errOut, "Plugin missing symbol '" IR_PLUGIN_QUERY_SYMBOL "': " + targetUtf8);
-        return IR_UNSUPPORTED;
-    }
-    queryFn = reinterpret_cast<IRPluginQueryFn>(rawSym);
+    const auto rawSym = GetProcAddress(lib->native, IR_PLUGIN_QUERY_SYMBOL);
 #else
-    dlerror();
-    void *rawSym = dlsym(lib->native, IR_PLUGIN_QUERY_SYMBOL);
-    const char *symErr = dlerror();
-    if (rawSym == nullptr || symErr != nullptr) {
+    const auto rawSym = dlsym(lib->native, IR_PLUGIN_QUERY_SYMBOL);
+#endif
+    if (rawSym == nullptr) {
+        if (!requireQuerySymbol)
+            return IR_OK;
         setError(errOut, "Plugin missing symbol '" IR_PLUGIN_QUERY_SYMBOL "': " + targetUtf8);
         return IR_UNSUPPORTED;
     }
-    queryFn = reinterpret_cast<IRPluginQueryFn>(rawSym);
-#endif
+    const auto queryFn = reinterpret_cast<IRPluginQueryFn>(rawSym);
 
     const IRMetricPlugin *list = nullptr;
     uint32_t count = 0;
@@ -979,7 +978,7 @@ int32_t PluginMetricProvider::loadFromDirectory(const std::filesystem::path &plu
     std::sort(files.begin(), files.end());
 
     for (const auto &file : files) {
-        const int32_t st = loadLibrary(file, errOut);
+        const int32_t st = loadLibrary(file, false, errOut);
         if (st != IR_OK)
             return st;
     }
@@ -997,7 +996,7 @@ int32_t PluginMetricProvider::loadConfiguredPaths(const std::vector<std::string>
             if (st != IR_OK)
                 return st;
         } else if (std::filesystem::is_regular_file(p, ec)) {
-            const int32_t st = loadLibrary(p, errOut);
+            const int32_t st = loadLibrary(p, true, errOut);
             if (st != IR_OK)
                 return st;
         } else {

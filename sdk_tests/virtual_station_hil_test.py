@@ -9,15 +9,18 @@ import json
 import math
 import os
 from pathlib import Path
+import signal
 import socket
 import subprocess
 from tempfile import TemporaryDirectory
+import time
 import urllib.request
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "simulators"))
 
 from ir_virtual_station import build_host_blackbody_json, build_station_json  # noqa: E402
+from raw_replay_cli_test import write_raw_replay_fixture  # noqa: E402
 
 IR_PCN7LT = 2
 IR_IT6332A = 4
@@ -118,7 +121,7 @@ def query_doc058_fn116(host: str, port: int) -> str:
         return frame[2:].decode("ascii")
 
 
-def verify_serial_map_config_builders():
+def verify_serial_map_config_builders(raw_dir):
     endpoints = {
         "blackbody": {"port": "COM21", "client_port": "COM20", "baud_rate": 9600, "stop_bits": 1},
         "power": {"port": "COM11", "client_port": "COM10", "baud_rate": 115200, "stop_bits": 1},
@@ -127,7 +130,7 @@ def verify_serial_map_config_builders():
         "detector": {"port": "COM17", "client_port": "COM16", "baud_rate": 115200, "stop_bits": 1},
         "cooler": {"port": "COM19", "client_port": "COM18", "baud_rate": 9600, "stop_bits": 2},
     }
-    st = build_station_json(endpoints, REPO_ROOT / "examples/data/tc002a_640")
+    st = build_station_json(endpoints, raw_dir)
     assert st["devices"]["bb"]["kind"] == "dcn1000"
     assert st["devices"]["bb"]["connection"]["port"] == "COM20"
     assert st["devices"]["supply"]["connection"]["port"] == "COM10"
@@ -146,14 +149,61 @@ def verify_serial_map_config_builders():
     assert tcp_bb["connection"]["port"] == 21010
 
 
+def verify_cli_cancel(cli, work, station, control_url):
+    recipe = json.loads((REPO_ROOT / "examples/recipes/noise_blackbody.json").read_text(encoding="utf-8"))
+    recipe["steps"][0]["timeout_ms"] = 15000
+    recipe_path = work / "cancel.json"
+    recipe_path.write_text(json.dumps(recipe), encoding="utf-8")
+    output = work / "cancel-out"
+    http_json(f"{control_url}/fault", {"blackbody_unstable": True})
+
+    # CTest can be launched without a console. CTRL_BREAK requires a shared console.
+    kernel = c.WinDLL("kernel32", use_last_error=True)
+    process_ids = (c.c_uint32 * 1)()
+    owns_console = kernel.GetConsoleProcessList(process_ids, len(process_ids)) == 0
+    if owns_console:
+        if not kernel.AllocConsole():
+            raise c.WinError(c.get_last_error())
+        kernel.GetConsoleWindow.restype = c.c_void_p
+        c.windll.user32.ShowWindow(c.c_void_p(kernel.GetConsoleWindow()), 0)
+    try:
+        with subprocess.Popen(
+            [str(cli), "--run", "--station", str(station), "--recipe", str(recipe_path),
+             "--output", str(output)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        ) as proc:
+            try:
+                deadline = time.monotonic() + 8.0
+                while proc.poll() is None and time.monotonic() < deadline:
+                    state = http_json(f"{control_url}/state")
+                    if math.isclose(state["blackbody"]["target_c"], 32.0, abs_tol=1e-6):
+                        proc.send_signal(signal.CTRL_BREAK_EVENT)
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise AssertionError("CLI did not reach the blackbody stabilization step")
+                stdout, stderr = proc.communicate(timeout=8)
+                assert proc.returncode == 8, (proc.returncode, stdout, stderr)
+                assert "run_status=CANCELLED" in stdout.splitlines(), stdout
+                assert "completed_frames=0" in stdout.splitlines(), stdout
+                assert "status=8" in stderr and "cleanup_status=0" in stderr, stderr
+                record = json.loads((output / "result.json").read_text(encoding="utf-8"))
+                assert record["run_status"] == "CANCELLED", record
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+    finally:
+        if owns_console:
+            kernel.FreeConsole()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("library", type=Path)
     parser.add_argument("cli", type=Path)
     parser.add_argument("--fixture-parent", type=Path, default=None)
     args = parser.parse_args()
-
-    verify_serial_map_config_builders()
 
     assert c.sizeof(PowerReading) == 40
     assert c.sizeof(DetectorCurrentReading) == 24
@@ -164,7 +214,9 @@ def main():
         work = Path(tmp)
         station_path = work / "station.json"
         host_bb_path = work / "host_blackbody.json"
-        raw_dir = REPO_ROOT / "examples/data/tc002a_640"
+        raw_dir = work / "replay"
+        write_raw_replay_fixture(raw_dir)
+        verify_serial_map_config_builders(raw_dir)
         recipe_path = REPO_ROOT / "examples/recipes/virtual_station_hil.json"
 
         sim_cmd = [
@@ -280,19 +332,19 @@ def main():
                 check(sdk.IR_CloseDevice, h_dmm)
                 check(sdk.IR_CloseDevice, h_pwr)
 
-            # Step B: full Schema v2 CLI execution with all 6 instruments
+            # Step B: full recipe CLI execution with all 6 instruments
             cli_out = work / "hil-v2-out"
             rc_check = subprocess.run(
                 [str(args.cli), "--check", "--station", str(station_path),
-                 "--recipe", str(recipe_path), "--output", str(cli_out)],
-                capture_output=True, text=True, check=False,
+                 "--recipe", str(recipe_path)],
+                capture_output=True, encoding="utf-8", check=False,
             )
             assert rc_check.returncode == 0 and rc_check.stdout.strip() == "recipe=VALID", (rc_check.returncode, rc_check.stdout, rc_check.stderr)
 
             rc_run = subprocess.run(
                 [str(args.cli), "--run", "--station", str(station_path),
                  "--recipe", str(recipe_path), "--output", str(cli_out)],
-                capture_output=True, text=True, check=False,
+                capture_output=True, encoding="utf-8", check=False,
             )
             assert rc_run.returncode == 0, (rc_run.returncode, rc_run.stdout, rc_run.stderr)
             record = json.loads((cli_out / "result.json").read_text(encoding="utf-8"))
@@ -316,6 +368,8 @@ def main():
             assert snap["oven"]["mode"] == "STANDBY", snap["oven"]
             assert math.isclose(snap["blackbody"]["target_c"], 25.0, abs_tol=1e-6), snap["blackbody"]
             assert snap["detector"]["registers"].get("0x65") == "08", snap["detector"]
+            if os.name == "nt":
+                verify_cli_cancel(args.cli, work, station_path, control_url)
         finally:
             if control_url:
                 try:
