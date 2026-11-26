@@ -14,26 +14,27 @@ IR SDK 面向 Windows x64 与 Ubuntu 24.04 x86-64 使用同一份源码和公共
 | 层 | 核心入口 | 能力说明 |
 |---|---|---|
 | 仪器控制 | `IR_OpenDevice`、`IR_ListSerialPorts` | 黑体（PCN7-LT TCP / DCN1000 串口）、IT6332A 电源（TCP / 串口、`IR_WaitPowerCurrentStable` 启动冲击确认与稳态电流等待）、GWS STEN 烘箱（`IR_SetOven`/`IR_ReadOven`/`IR_StopOven`/`IR_WaitOvenStable`）、Keithley DMM6500 SCPI（`IR_SetDmmMode`/`IR_ReadDmm`）、探测器 `0xCC` 串口（`IR_SetDetectorTiming`/`IR_SetDetectorGpol`/`IR_SetDetectorRegister`/`IR_MeasureDetectorCurrent`）与制冷机 Modbus RTU（`IR_COOLER_MODBUS`，默认 `8N2`） |
-| 原始采集 | `IR_ListCaptureDevices`、`IR_OpenFrames`、`IR_ReadFrames` | RAW16 离线回放（`IR_RAW_REPLAY`）、DirectShow（`IR_DIRECTSHOW`）、V4L2（`IR_V4L2`）；`IR_FlushFrames` 支撑不停流多 Burst 采集；`IR_TryReadLatestFrame` / `IR_GetCaptureStats` 提供无阻塞预览与有界 `FrameQueue` 诊断 |
-| 指标计算 | `IR_analysis` 独立动态库 | `IR_FrameStatisticsU16`、`IR_ROIMeanU16`、`IR_Noise3D*`、`IR_Gb*` / `IR_Gjb*`、`IR_FlickerDetectU16`、两点 NUC、`15×15` 盒式/高斯空间滤波、算术扣噪/阈值掩码、1D/2D FFT（`IR_Fft2dMagnitudeF64`）与 `IR_GjbEvaluateBurstMetrics` |
+| 原始采集 | `IR_ListCaptureDevices`、`IR_OpenFrames`、`IR_ReadFrames` | RAW16 / RAW32_LE 离线回放（`IR_RAW_REPLAY`）、U16 DirectShow（`IR_DIRECTSHOW`）、U16 V4L2（`IR_V4L2`）；`IR_FlushFrames` 支撑不停流多 Burst 采集；`IR_TryReadLatestFrame` / `IR_GetCaptureStats` 提供无阻塞预览与有界 `FrameQueue` 诊断 |
+| 指标计算 | `IR_analysis` 独立动态库 | `IR_FrameStatistics`、`IR_ROIMean`、`IR_FrameStatisticsNuc`、Noise3D 帧计算、`IR_ChannelSpectrum` 与 `IR_FlickerDetect` 通过 `IRArrayView` 接收 U16/U32 紧密帧数组；GB/GJB、两点 NUC、`15×15` 盒式/高斯空间滤波、算术扣噪/阈值掩码、1D/2D FFT（`IR_Fft2dMagnitudeF64`）与 `IR_GjbEvaluateBurstMetrics` |
 | 流程编排 | `IR_CheckRecipeJson`、`IR_RunRecipeJson` | 统一 `schemav` 流程格式（多温点/多条件、跨步像元图与掩码引用、`flush_frames`、可选 `save_raw`、`repeat_burst` 周期无存盘温漂、16 项内置算子、`IR_plugin_abi.h` 外部算子插件、`step_records` 逐步耗时及 `safety.blackbody_standby`/`safety.oven_standby` 待机收尾） |
 
 ## 线程与设备占用
 
 一个进程同时打开一个采集源。打开、启动、读取（`IR_ReadFrames`）、冲刷（`IR_FlushFrames`）、停止、关闭和同步流程由同一工作线程调用，并发操作采集流返回 `IR_BUSY`；实时源由有界 `FrameQueue`（默认 64 帧，可通过 `IR_SetFrameQueueCapacity` 调整）在后台泵线程持续拉帧，UI 或监控线程可随时调用 `IR_TryReadLatestFrame` 与 `IR_GetCaptureStats` 无阻塞获取最新帧与队列状态。离线 `IR_analysis` 调用可在其他线程使用各自输出缓冲区并行执行。
 
-`IR_RunRecipeJson` 为 C / C# / Python 提供统一的 UTF-8 工位与流程 JSON 入口，采用 `schemav` 格式（`schemav` 默认 `1`，可省略）。`IR_CheckRecipeJson` 做静态预检；运行入口先按实际画幅核对批次容量与 ROI，准备成功后才打开并预约配方引用的仪器。跨线程调用 `IR_RequestStop` 可安全中止流程并执行待机收尾。只要输出目录校验通过（且非 `IR_BUSY`），即便执行失败或被取消，SDK 也会写入诊断版 `result.json`（含 `run_status`、`error_status`、`failed_stage_name`、`step_records` 与 `total_duration_ms`）。
+`IR_RunRecipeJson` 为 C / C# / Python 提供统一的 UTF-8 工位与流程 JSON 入口，采用 `schemav` 格式（`schemav` 默认 `1`，可省略）。`IR_CheckRecipeJson` 做静态预检；运行入口先按实际画幅核对批次容量与 ROI，准备成功后才打开并预约配方引用的仪器。跨线程调用 `IR_RequestStop` 可安全中止流程并执行待机收尾。本次运行可独占并写入输出目录时，执行失败或取消也会生成诊断版 `result.json`（含 `run_status`、`error_status`、`failed_stage_name`、`step_records` 与 `total_duration_ms`）。`IR_BUSY` 仅返回状态。
 
 ## 支持边界与标准差口径
 
 | 能力 | Windows x64 | Linux x86_64（源码级） | 说明 |
 |---|---|---|---|
-| RAW16 回放与实时采集 | 已验证（回放/队列/预览）；DirectShow 实机待验 | 源码支持（RAW16/V4L2） | 仅接受 16 位原始格式，不做 RGB/YUV 转换 |
+| RAW16 / RAW32_LE 回放与 U16 实时采集 | 已验证（回放/队列/预览）；DirectShow 实机待验 | 源码支持（RAW16 / RAW32_LE 回放、U16 V4L2） | RAW32_LE 仅用于离线小端 U32 存储；不代表硬件支持某种 20-bit 传输编码；不做 RGB/YUV 转换 |
 | 仪器控制与虚拟工位 | TCP 与 6 路 `com0com` HIL 全通过；真机待验 | 源码支持（Asio TCP/串口/PTY） | 覆盖 PCN7-LT/DCN1000/IT6332A/GWS STEN/DMM6500/0xCC 探测器/Modbus 制冷机 |
 | PCIe-1433 NI-IMAQ | 暂不支持（返回 `IR_UNSUPPORTED`） | 暂不支持 | 枚举编号 `IR_NI_IMAQ = 4` 已预留 |
 | 内置分析算子与外部插件 | 离线与小数组全通过（`<= 1e-8 DN`） | 源码支持 | 零 Qt/OpenCV；`IR_plugin_abi.h` 支持 `plugin:<ns>.<name>` 动态插件 |
 
 - **标准差口径**：JSON 配方 `temporal_noise` 输出的 `temporal_noise_dn` 采用逐像元**样本标准差**（`sample_std = 1`，分母 `N - 1`）；GB/GJB 噪声图 `vn` 采用**总体标准差**（`sample_std = 0`，分母 `N`）。
+- **高位宽物理指标**：U32 通用图像算子可处理超过 65535 的 DN；当前 GB/GJB 配方指标仍使用现有物理量模型，因此 `valid_bits > 16` 或 U32 位宽未知时会在预检阶段拒绝执行。不得由 `valid_bits` 自动推导 `digital_full`、ADC 满量程或探测器饱和点。
 - **参考 RAW16 复算误差**：`TC002A (640×512, 100帧)` 与 NumPy 最大误差 `6.86e-13 DN`；`S07-H1A (1280×1024, 1000帧)` 最大误差 `2.08e-11 DN`。
 
 ## 第三方组件与运行环境

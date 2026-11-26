@@ -1,5 +1,6 @@
 #pragma once
 #include "IR_status.h"
+#include "IR_types.h"
 
 #if defined(_WIN32) && defined(IR_ANALYSIS_BUILD)
 #define IR_ANALYSIS_API __declspec(dllexport)
@@ -12,30 +13,34 @@
 #endif
 
 #ifdef __cplusplus
+#define IR_ANALYSIS_NOEXCEPT noexcept
+#else
+#define IR_ANALYSIS_NOEXCEPT
+#endif
+
+#ifdef __cplusplus
 extern "C" {
 #endif
 /* 版本字符串为 UTF-8，由库持有，库卸载前有效。 */
-IR_ANALYSIS_API const char *IR_AnalysisVersion(void);
+IR_ANALYSIS_API const char *IR_AnalysisVersion(void) IR_ANALYSIS_NOEXCEPT;
 
-/* 输入帧在调用期间有效，按 [帧][行][列] 紧密排列，容量按元素计。
+/* 输入帧在调用期间有效，按 [帧][行][列] 紧密排列，支持 U16 和 U32。
  * sample_std=1 计算样本标准差（帧数至少 2），0 计算总体标准差（帧数至少 1）。
  * mean_map、std_map 各需 rows*cols 个 double，summary 需 2 个 double。
  * 输出单位均为 DN，summary 依次是全图均值、各像元时域标准差的全图均值。
  * 输入和输出缓冲区由调用方提供且不重叠，失败时输出无效。
  * 此调用同步等待计算完成，可在应用的工作线程执行。错误文本的约定见 IR_status.h。
  */
-IR_ANALYSIS_API int32_t IR_FrameStatisticsU16(const uint16_t *frames, int64_t frame_elements,
-    int32_t frame_count, int32_t rows, int32_t cols, int32_t sample_std, double *mean_map,
-    double *std_map, int64_t pixel_capacity, double *summary, int32_t summary_count,
-    char *err, int32_t err_bytes);
+IR_ANALYSIS_API int32_t IR_FrameStatistics(const IRArrayView *input, int32_t sample_std,
+    double *mean_map, double *std_map, int64_t pixel_capacity, double *summary, int32_t summary_count,
+    char *err, int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
 /* 计算所有输入帧中矩形 ROI 的像元均值，输出单位 DN。
- * 输入为紧密排列的 [帧][行][列] uint16_t 数据；x/y 为左上角坐标，宽高必须大于 0 且位于图像内。
+ * frames 为紧密排列的 [帧][行][列] U16 或 U32 数据；x/y 为左上角坐标，宽高必须大于 0 且位于图像内。
  * 可用于离线数据或采集后的同一帧组；调用同步完成，输入由调用方持有且调用期间不可修改。
  */
-IR_ANALYSIS_API int32_t IR_ROIMeanU16(const uint16_t *frames, int64_t frame_elements,
-    int32_t frame_count, int32_t rows, int32_t cols, int32_t x, int32_t y,
-    int32_t roi_width, int32_t roi_height, double *mean_dn, char *err, int32_t err_bytes);
+IR_ANALYSIS_API int32_t IR_ROIMean(const IRArrayView *frames, int32_t x, int32_t y,
+    int32_t roi_width, int32_t roi_height, double *mean_dn, char *err, int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
 /* ======================== 三维噪声 (3D Noise, DN 两阶段) ======================== */
 
@@ -149,10 +154,9 @@ typedef struct IRNoise3DComputeParams
     double invalid_fill;
 } IRNoise3DComputeParams;
 
-/* nuc_frames 与 meta 可为 NULL；其余输出指针必须非 NULL 且容量充足。 */
+/* meta 可为 NULL；其余输出指针必须非 NULL 且容量充足。 */
 typedef struct IRNoise3DComputeOutputs
 {
-    uint16_t *nuc_frames;
     double *scalars;
     double *hist;
     double *hist_meta;
@@ -160,7 +164,6 @@ typedef struct IRNoise3DComputeOutputs
     double *map_ti;
     double *map_tj;
     double *meta;
-    int64_t nuc_frames_capacity;
     int64_t hist_capacity;
     int64_t map_ij_capacity;
     int64_t map_ti_capacity;
@@ -187,20 +190,16 @@ IR_ANALYSIS_API int32_t IR_Noise3DBuildCalibDn(
     const IRNoise3DCalibParams *params,
     const IRNoise3DCalibOutputs *outputs,
     char *err,
-    int32_t err_bytes);
+    int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
 /* 3D 噪声帧组计算（第二阶段）：
- * org_frames 为紧密 [帧][行][列] uint16_t (frame_count >= 2，总样本 <= 10^9)；total_blind_mask 中 0=有效、非0=盲元。
+ * org_frames 为紧密 [帧][行][列] U16 或 U32 (至少 2 帧，总样本 <= 10^9)；total_blind_mask 中 0=有效、非0=盲元。
  * 要求总有效像元 >= 2 且每行、每列至少包含 1 个有效像元。
  * ORG 模式下 k_map、b_map 可传 NULL 且 calib_map_capacity=0；NUC 模式下二者必填且有限。
- * 盲元在 map_ij 写入 invalid_fill，若提供 nuc_frames 则盲元位置写入 clamp(b_avg)。调用同步完成。
+ * NUC 统计在 double 域完成，不对校正帧量化。调用同步完成。
  */
 IR_ANALYSIS_API int32_t IR_Noise3DComputeFramesDn(
-    const uint16_t *org_frames,
-    int64_t frame_elements,
-    int32_t frame_count,
-    int32_t rows,
-    int32_t cols,
+    const IRArrayView *org_frames,
     const uint8_t *total_blind_mask,
     int64_t mask_capacity,
     const double *k_map,
@@ -209,7 +208,7 @@ IR_ANALYSIS_API int32_t IR_Noise3DComputeFramesDn(
     const IRNoise3DComputeParams *params,
     const IRNoise3DComputeOutputs *outputs,
     char *err,
-    int32_t err_bytes);
+    int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
 /* ======================== 国标 (GB) 与国军标 (GJB) 评价 ======================== */
 
@@ -414,9 +413,9 @@ IR_ANALYSIS_API int32_t IR_GbProcessBadPixels(
     IRGbBadPixelSummary *summary,
     const IRGbBadPixelMasks *masks,
     char *err,
-    int32_t err_bytes);
+    int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
-/* GB 全流程评价：输入冷/热黑体均值图 v1_map、v2_map 及噪声图 vn_map（DN，建议由 IR_FrameStatisticsU16 传入 sample_std=0 即分母 N）。
+/* GB 全流程评价：输入冷/热黑体均值图 v1_map、v2_map 及噪声图 vn_map（DN，建议由 IR_FrameStatistics 传入 sample_std=0 即分母 N）。
  * 计算去盲元前指标、短路/断路盲元、迭代盲元筛选、簇等级及去盲元后指标。masks 可为 NULL。调用同步完成。
  */
 IR_ANALYSIS_API int32_t IR_GbEvaluateMaps(
@@ -431,7 +430,7 @@ IR_ANALYSIS_API int32_t IR_GbEvaluateMaps(
     IRGbSummary *summary,
     const IRGbBadPixelMasks *masks,
     char *err,
-    int32_t err_bytes);
+    int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
 /* 直接对响应率图、信号电压图 T1/T2、噪声电压图与 NETD 图执行 GJB 迭代盲元筛选与方块/簇统计。masks 可为 NULL。 */
 IR_ANALYSIS_API int32_t IR_GjbProcessBadPixels(
@@ -447,7 +446,7 @@ IR_ANALYSIS_API int32_t IR_GjbProcessBadPixels(
     IRGjbBadPixelSummary *summary,
     const IRGjbBadPixelMasks *masks,
     char *err,
-    int32_t err_bytes);
+    int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
 /* GJB 全流程评价：输入 v1_map、v2_map、噪声图 vn_map（建议 sample_std=0 分母 N 口径）及两点校正验证图 vm_map（DN）。
  * 计算去盲元前指标、k1..k4 盲元迭代、中心/边缘簇、3x3 中心块与 4x4 全图块，以及去盲元后指标与 RFPN。masks 可为 NULL。
@@ -465,7 +464,7 @@ IR_ANALYSIS_API int32_t IR_GjbEvaluateMaps(
     IRGjbSummary *summary,
     const IRGjbBadPixelMasks *masks,
     char *err,
-    int32_t err_bytes);
+    int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
 /* ======================== 可组合基础算子与温漂轻量指标 ======================== */
 
@@ -595,7 +594,7 @@ IR_ANALYSIS_API int32_t IR_BuildTwoPointNucF64(
     double *out_summary,
     int32_t summary_count,
     char *err,
-    int32_t err_bytes);
+    int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
 /* 对二维浮点图应用仿射映射 out = k * in + b。 */
 IR_ANALYSIS_API int32_t IR_ApplyAffineMapF64(
@@ -607,19 +606,15 @@ IR_ANALYSIS_API int32_t IR_ApplyAffineMapF64(
     int64_t pixel_capacity,
     double *out_map,
     char *err,
-    int32_t err_bytes);
+    int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
-/* 无损 NUC 与可选减暗场帧统计：单遍 Welford 计算 val = k*raw + b - dark。
+/* 无损 U16/U32 原始帧的 NUC 与可选减暗场统计：单遍 Welford 计算 val = k*raw + b - dark。
  * sample_std=0 计算总体标准差（分母 N，frame_count>=1），1 计算样本标准差（分母 N-1，frame_count>=2）。
  * k_map/b_map 须同为 NULL 或同非 NULL；dark_map 与 valid_mask 可为 NULL。
  * summary 需至少 2 个 double，按 valid_mask（若非 NULL）汇总均值与噪声均值。
  */
-IR_ANALYSIS_API int32_t IR_FrameStatisticsNucU16(
-    const uint16_t *frames,
-    int64_t frame_elements,
-    int32_t frame_count,
-    int32_t rows,
-    int32_t cols,
+IR_ANALYSIS_API int32_t IR_FrameStatisticsNuc(
+    const IRArrayView *frames,
     int32_t sample_std,
     const double *k_map,
     const double *b_map,
@@ -631,7 +626,7 @@ IR_ANALYSIS_API int32_t IR_FrameStatisticsNucU16(
     double *summary,
     int32_t summary_count,
     char *err,
-    int32_t err_bytes);
+    int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
 /* 像元图统计摘要（均值、总体/样本标准差、min/max/span 与分位跨度）。
  * roi_w==0 且 roi_h==0 表示全图；valid_mask 可为 NULL。0 <= p_low <= p_high <= 100。
@@ -650,7 +645,7 @@ IR_ANALYSIS_API int32_t IR_MapSummaryF64(
     double p_high,
     IRMapSummary *summary,
     char *err,
-    int32_t err_bytes);
+    int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
 /* 掩码感知空间低频/高频分解：仅聚合 valid_mask==1 且有限的邻域像元，边界自动裁剪。
  * filter_kind 支持 IR_SPATIAL_FILTER_BOX_MEAN（盒式均值）与 IR_SPATIAL_FILTER_GAUSSIAN（归一化可分离高斯核）。
@@ -669,7 +664,7 @@ IR_ANALYSIS_API int32_t IR_SpatialLowHighPassF64(
     double *out_low_map,
     double *out_high_map,
     char *err,
-    int32_t err_bytes);
+    int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
 /* 像元图二元算术与噪声扣除：op 见 IRMapBinaryOp；VARIANCE_SUBTRACT 计算 sqrt(max(0, a^2 - param * b^2))。 */
 IR_ANALYSIS_API int32_t IR_MapBinaryOpF64(
@@ -682,7 +677,7 @@ IR_ANALYSIS_API int32_t IR_MapBinaryOpF64(
     double param,
     double *out_map,
     char *err,
-    int32_t err_bytes);
+    int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
 /* 按指定阈值模式对像元图生成通过掩码（1=通过，0=未通过/非有限/非基础有效）。
  * base_valid_mask、out_pass_count、out_fail_count 可为 NULL。
@@ -700,7 +695,7 @@ IR_ANALYSIS_API int32_t IR_ThresholdMaskF64(
     int32_t *out_pass_count,
     int32_t *out_fail_count,
     char *err,
-    int32_t err_bytes);
+    int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
 /* 布尔掩码组合：op 见 IRMaskOp；IR_MASK_NOT 时 mask_b 可为 NULL。out_nonzero_count 可为 NULL。 */
 IR_ANALYSIS_API int32_t IR_MaskCombine(
@@ -713,7 +708,7 @@ IR_ANALYSIS_API int32_t IR_MaskCombine(
     uint8_t *out_mask,
     int32_t *out_nonzero_count,
     char *err,
-    int32_t err_bytes);
+    int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
 /* 1D 实信号单边 FFT（任意 length >= 2，零第三方依赖）：
  * detrend_mean != 0 时先去均值再加窗；out_bins_capacity >= length/2 + 1。
@@ -730,19 +725,15 @@ IR_ANALYSIS_API int32_t IR_ComputeRfft1D(
     double *out_psd,
     int32_t out_bins_capacity,
     char *err,
-    int32_t err_bytes);
+    int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
-/* 多通道图像时间序列频谱分析（对齐按列/按行交叉读出通道）。
- * out_channel_amplitudes 必填，容量 >= channel_count * (frame_count/2 + 1)；
- * out_freqs_hz (容量 >= frame_count/2+1)、out_channel_series (容量 >= channel_count*frame_count)、
+/* 多通道图像时间序列频谱分析（U16/U32输入，对齐按列/按行交叉读出通道）。
+ * out_channel_amplitudes 必填，容量 >= channel_count * (frames->frames/2 + 1)；
+ * out_freqs_hz (容量 >= frames->frames/2+1)、out_channel_series (容量 >= channel_count*frames->frames)、
  * out_temporal_means / out_temporal_stds (容量 >= channel_count) 均可为 NULL。
  */
-IR_ANALYSIS_API int32_t IR_ChannelSpectrumU16(
-    const uint16_t *frames,
-    int64_t frame_elements,
-    int32_t frame_count,
-    int32_t rows,
-    int32_t cols,
+IR_ANALYSIS_API int32_t IR_ChannelSpectrum(
+    const IRArrayView *frames,
     int32_t axis,
     int32_t channel_count,
     double sample_rate_hz,
@@ -757,7 +748,7 @@ IR_ANALYSIS_API int32_t IR_ChannelSpectrumU16(
     double *out_temporal_stds,
     int32_t channel_stats_capacity,
     char *err,
-    int32_t err_bytes);
+    int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
 /* 单 Burst 轻量 GJB/温漂评价：输入单组均值图与总体噪声图（NUC 前或 NUC 后）+ 固定有效掩码与标定上下文，
  * 直接输出空域非均匀性、扣除噪声后的空间起伏 / RFPN、估算 NETD/NEP、动态范围与可选 LRNU/HRNU。
@@ -772,7 +763,7 @@ IR_ANALYSIS_API int32_t IR_GjbEvaluateBurstMetrics(
     const IRGjbDriftContext *ctx,
     IRGjbBurstMetrics *metrics,
     char *err,
-    int32_t err_bytes);
+    int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
 /* ======================== 闪烁像元（闪元 / RTS）检测 ======================== */
 
@@ -789,18 +780,14 @@ typedef struct IRFlickerSummary
 } IRFlickerSummary;
 
 /* 闪元检测（逐帧总体标准差阈值统计）：
- * frames 为紧密 [帧][行][列] uint16_t（frame_count >= 1）；若同时提供 k_map 与 b_map 则在库内执行 NUC (k*raw+b)。
+ * frames 为紧密 [帧][行][列] U16 或 U32（至少 1 帧）；若同时提供 k_map 与 b_map 则在库内执行 NUC (k*raw+b)。
  * 跳过 valid_mask==0、原始值==0、或校正后非有限/==0 的像元；仅对当帧观察到的有效像元计算均值与总体标准差 sigma，
  * 若 |val - frame_mean| > std_dev_multiplier * frame_sigma，则该像元超限次数 +1；
  * 若总观察有效像元超限次数 > exceed_count_threshold（0 <= threshold < frame_count），标记为闪元（out_flicker_mask=1）。
  * out_exceed_count_map、out_flicker_mask、out_frame_means、out_frame_sigmas 均可为 NULL。
  */
-IR_ANALYSIS_API int32_t IR_FlickerDetectU16(
-    const uint16_t *frames,
-    int64_t frame_elements,
-    int32_t frame_count,
-    int32_t rows,
-    int32_t cols,
+IR_ANALYSIS_API int32_t IR_FlickerDetect(
+    const IRArrayView *frames,
     const double *k_map,
     const double *b_map,
     const uint8_t *valid_mask,
@@ -814,7 +801,7 @@ IR_ANALYSIS_API int32_t IR_FlickerDetectU16(
     double *out_frame_sigmas,
     int32_t frame_stats_capacity,
     char *err,
-    int32_t err_bytes);
+    int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 /* ======================== 二维 FFT / 空域频谱 ======================== */
 
 typedef struct IRFft2dSummary
@@ -854,8 +841,10 @@ IR_ANALYSIS_API int32_t IR_Fft2dMagnitudeF64(
     double *out_magnitude_map,
     double *out_power_map,
     char *err,
-    int32_t err_bytes);
+    int32_t err_bytes) IR_ANALYSIS_NOEXCEPT;
 
 #ifdef __cplusplus
 }
 #endif
+
+#undef IR_ANALYSIS_NOEXCEPT

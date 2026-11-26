@@ -23,54 +23,55 @@ public:
     static void validateCapacity(int32_t capacity);
 
     void setIdleCapacity(int32_t capacity);
-    void configure(IRGeometry geometry, int32_t capacity);
-    void resetSession(IRGeometry geometry, int32_t capacity, bool running);
-    void beginStartSession(IRGeometry geometry, int32_t capacity);
+    void configure(IRGeometry geometry, int32_t dataType, int32_t capacity);
+    void resetSession(IRGeometry geometry, int32_t dataType, int32_t capacity, bool running);
+    void beginStartSession(IRGeometry geometry, int32_t dataType, int32_t capacity);
     void resumeSession();
     void resetClosed();
     void setRunning(bool running);
 
-    void push(const uint16_t *pixels, const IRFrameStamp &stamp);
-    void publishPulledFrame(const uint16_t *pixels, const IRFrameStamp &stamp, bool delivered);
+    void push(const void *pixels, const IRFrameStamp &stamp);
+    void publishPulledFrame(const void *pixels, const IRFrameStamp &stamp, bool delivered);
     void recordDelivered();
 
-    PopStatus pop(uint16_t *outPixels, IRFrameStamp &outStamp, int32_t timeoutMs,
+    PopStatus pop(void *outPixels, IRFrameStamp &outStamp, int32_t timeoutMs,
                   const std::function<bool()> &stopRequested,
                   int32_t &terminalCode, std::string &terminalMessage);
 
     void clearMeasurementQueue();
-    void setTerminalError(int32_t code, std::string message);
+    void setTerminalError(int32_t code, const char *message);
     void markStopped();
     void wakeWaiters();
 
-    void tryReadLatest(uint16_t *pixels, int64_t pixelCapacity, IRGeometry *geometry,
-                       IRFrameStamp *stamp, int32_t &hasFrame);
+    void tryReadLatest(IRFrameBatchView &batch);
     IRCaptureStats stats();
 
 private:
     friend struct FrameQueueTestAccess;
-    void recordPreviewLocked(const uint16_t *pixels, const IRFrameStamp &stamp, int64_t pxCount);
+    void recordPreviewLocked(const void *pixels, const IRFrameStamp &stamp, int64_t pxCount);
 
     // Strictly separate leaf locks: never acquire queueMutex_ and previewMutex_ simultaneously.
     std::mutex queueMutex_;
     std::condition_variable queueCv_;
-    IRGeometry queueGeometry_{};
     int64_t queuePixelCount_{0};
+    uint64_t queueFrameBytes_{0};
     int32_t capacity_{kDefaultCapacity};
-    std::vector<uint16_t> pool_;
+    std::vector<uint8_t> pool_;
     std::vector<IRFrameStamp> stamps_;
     int32_t head_{0};
     int32_t count_{0};
     uint64_t droppedSinceLastPush_{0};
     int32_t terminalStatus_{IR_OK};
-    std::string terminalMessage_;
+    std::array<char, 1024> terminalMessage_{};
     bool stopped_{false};
 
     std::mutex previewMutex_;
     IRGeometry previewGeometry_{};
+    int32_t previewDataType_{IR_TYPE_U16};
     int64_t previewPixelCount_{0};
+    uint64_t previewFrameBytes_{0};
     bool hasLatest_{false};
-    std::vector<uint16_t> latestPixels_;
+    std::vector<uint8_t> latestPixels_;
     IRFrameStamp latestStamp_{};
     std::atomic<uint64_t> framesReceived_{0};
     std::atomic<uint64_t> framesDelivered_{0};

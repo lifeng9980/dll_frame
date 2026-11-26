@@ -1,5 +1,6 @@
 #pragma once
 #include "api_common.h"
+#include "IR_types.h"
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -8,6 +9,36 @@
 
 namespace ir::analysis
 {
+
+inline int64_t validateRawArrayView(const IRArrayView *input)
+{
+    ir::api::needed(input, 1, 1);
+    ir::api::needed(input->data, 1, 1);
+    const int64_t pixelCount = ir::api::pixels(input->height, input->width);
+    const int64_t elementCount = ir::api::stackSize(pixelCount, input->frames);
+    size_t elementBytes = 0;
+    switch (input->data_type)
+    {
+    case IR_TYPE_U16: elementBytes = sizeof(uint16_t); break;
+    case IR_TYPE_U32: elementBytes = sizeof(uint32_t); break;
+    default: throw ir::api::Error(IR_UNSUPPORTED, "Raw pixel algorithms support U16 and U32 input");
+    }
+    ir::api::require(static_cast<uint64_t>(elementCount) <= UINT64_MAX / elementBytes &&
+                         input->byte_size >= static_cast<uint64_t>(elementCount) * elementBytes,
+                     IR_BUFFER_TOO_SMALL, "Input array byte_size is too small");
+    ir::api::require(reinterpret_cast<uintptr_t>(input->data) % elementBytes == 0,
+                     IR_BAD_ARGUMENT, "Input array is not aligned for its data type");
+    return pixelCount;
+}
+
+template <typename Callback>
+void dispatchRawArrayView(const IRArrayView &input, Callback &&callback)
+{
+    if (input.data_type == IR_TYPE_U16)
+        callback(static_cast<const uint16_t *>(input.data));
+    else
+        callback(static_cast<const uint32_t *>(input.data));
+}
 
 struct Rect2D
 {

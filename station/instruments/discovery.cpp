@@ -298,7 +298,7 @@ std::vector<std::pair<std::string, std::string>> enumerateV4l2DevicesImpl()
 
 extern "C" int32_t IR_ListSerialPorts(char *json_out, int32_t capacity,
     int32_t *required_bytes, char *err, int32_t err_bytes)
-{
+noexcept{
     if (required_bytes)
         *required_bytes = 0;
     return guarded(err, err_bytes, [&] {
@@ -316,7 +316,7 @@ extern "C" int32_t IR_ListSerialPorts(char *json_out, int32_t capacity,
 
 extern "C" int32_t IR_ListCaptureDevices(int32_t backend, char *json_out, int32_t capacity,
     int32_t *required_bytes, char *err, int32_t err_bytes)
-{
+noexcept{
     if (required_bytes)
         *required_bytes = 0;
     return guarded(err, err_bytes, [&] {

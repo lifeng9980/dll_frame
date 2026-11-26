@@ -26,6 +26,27 @@ class IRCalcParameters(c.Structure):
     ]
 
 
+class IRArrayView(c.Structure):
+    _fields_ = [
+        ("data", c.c_void_p),
+        ("byte_size", c.c_uint64),
+        ("data_type", c.c_int32),
+        ("width", c.c_int32),
+        ("height", c.c_int32),
+        ("frames", c.c_int32),
+    ]
+
+
+IR_TYPE_U16 = 2
+IR_TYPE_U32 = 3
+
+
+def make_array_view(frames, width: int, height: int, frame_count: int,
+                    data_type: int = IR_TYPE_U16) -> IRArrayView:
+    return IRArrayView(c.cast(frames, c.c_void_p), c.sizeof(frames), data_type,
+                       width, height, frame_count)
+
+
 class IRGbCriteria(c.Structure):
     _fields_ = [
         ("response_upper", c.c_double),
@@ -206,7 +227,6 @@ class IRNoise3DComputeParams(c.Structure):
 
 class IRNoise3DComputeOutputs(c.Structure):
     _fields_ = [
-        ("nuc_frames", c.POINTER(c.c_uint16)),
         ("scalars", c.POINTER(c.c_double)),
         ("hist", c.POINTER(c.c_double)),
         ("hist_meta", c.POINTER(c.c_double)),
@@ -214,7 +234,6 @@ class IRNoise3DComputeOutputs(c.Structure):
         ("map_ti", c.POINTER(c.c_double)),
         ("map_tj", c.POINTER(c.c_double)),
         ("meta", c.POINTER(c.c_double)),
-        ("nuc_frames_capacity", c.c_int64),
         ("hist_capacity", c.c_int64),
         ("map_ij_capacity", c.c_int64),
         ("map_ti_capacity", c.c_int64),
@@ -385,13 +404,14 @@ def verify_abi_sizes() -> None:
         (IRGjbBurstMetrics, 168),
         (IRFlickerSummary, 48),
         (IRFft2dSummary, 64),
+        (IRArrayView, 32),
     ]
     if c.sizeof(c.c_void_p) == 8:
         expected.extend([
             (IRGbBadPixelMasks, 64),
             (IRGjbBadPixelMasks, 64),
             (IRNoise3DCalibOutputs, 64),
-            (IRNoise3DComputeOutputs, 120),
+            (IRNoise3DComputeOutputs, 104),
         ])
     for cls, size in expected:
         if c.sizeof(cls) != size:
@@ -413,14 +433,14 @@ def main() -> int:
         analysis.IR_AnalysisVersion.restype = c.c_char_p
 
         bindings = [
-            ("IR_FrameStatisticsU16", [
-                c.POINTER(c.c_uint16), c.c_int64, c.c_int32, c.c_int32, c.c_int32, c.c_int32,
+            ("IR_FrameStatistics", [
+                c.POINTER(IRArrayView), c.c_int32,
                 c.POINTER(c.c_double), c.POINTER(c.c_double), c.c_int64,
                 c.POINTER(c.c_double), c.c_int32, *err_args,
             ]),
-            ("IR_ROIMeanU16", [
-                c.POINTER(c.c_uint16), c.c_int64, c.c_int32, c.c_int32, c.c_int32,
-                c.c_int32, c.c_int32, c.c_int32, c.c_int32, c.POINTER(c.c_double), *err_args,
+            ("IR_ROIMean", [
+                c.POINTER(IRArrayView), c.c_int32, c.c_int32, c.c_int32, c.c_int32,
+                c.POINTER(c.c_double), *err_args,
             ]),
             ("IR_GbProcessBadPixels", [
                 c.POINTER(c.c_double), c.POINTER(c.c_double), c.POINTER(c.c_double),
@@ -451,7 +471,7 @@ def main() -> int:
                 c.POINTER(IRNoise3DCalibParams), c.POINTER(IRNoise3DCalibOutputs), *err_args,
             ]),
             ("IR_Noise3DComputeFramesDn", [
-                c.POINTER(c.c_uint16), c.c_int64, c.c_int32, c.c_int32, c.c_int32,
+                c.POINTER(IRArrayView),
                 c.POINTER(c.c_uint8), c.c_int64, c.POINTER(c.c_double), c.POINTER(c.c_double), c.c_int64,
                 c.POINTER(IRNoise3DComputeParams), c.POINTER(IRNoise3DComputeOutputs), *err_args,
             ]),
@@ -464,8 +484,8 @@ def main() -> int:
                 c.POINTER(c.c_double), c.POINTER(c.c_double), c.POINTER(c.c_double),
                 c.c_int32, c.c_int32, c.c_int64, c.POINTER(c.c_double), *err_args,
             ]),
-            ("IR_FrameStatisticsNucU16", [
-                c.POINTER(c.c_uint16), c.c_int64, c.c_int32, c.c_int32, c.c_int32, c.c_int32,
+            ("IR_FrameStatisticsNuc", [
+                c.POINTER(IRArrayView), c.c_int32,
                 c.POINTER(c.c_double), c.POINTER(c.c_double), c.POINTER(c.c_double), c.POINTER(c.c_uint8),
                 c.POINTER(c.c_double), c.POINTER(c.c_double), c.c_int64,
                 c.POINTER(c.c_double), c.c_int32, *err_args,
@@ -496,9 +516,8 @@ def main() -> int:
                 c.POINTER(c.c_double), c.c_int32, c.c_double, c.c_int32, c.c_int32,
                 c.POINTER(c.c_double), c.POINTER(c.c_double), c.POINTER(c.c_double), c.c_int32, *err_args,
             ]),
-            ("IR_ChannelSpectrumU16", [
-                c.POINTER(c.c_uint16), c.c_int64, c.c_int32, c.c_int32, c.c_int32,
-                c.c_int32, c.c_int32, c.c_double, c.c_int32,
+            ("IR_ChannelSpectrum", [
+                c.POINTER(IRArrayView), c.c_int32, c.c_int32, c.c_double, c.c_int32,
                 c.POINTER(c.c_double), c.c_int32, c.POINTER(c.c_double), c.c_int64,
                 c.POINTER(c.c_double), c.c_int64, c.POINTER(c.c_double), c.POINTER(c.c_double), c.c_int32,
                 *err_args,
@@ -508,8 +527,8 @@ def main() -> int:
                 c.c_int32, c.c_int32, c.c_int64,
                 c.POINTER(IRGjbDriftContext), c.POINTER(IRGjbBurstMetrics), *err_args,
             ]),
-            ("IR_FlickerDetectU16", [
-                c.POINTER(c.c_uint16), c.c_int64, c.c_int32, c.c_int32, c.c_int32,
+            ("IR_FlickerDetect", [
+                c.POINTER(IRArrayView),
                 c.POINTER(c.c_double), c.POINTER(c.c_double), c.POINTER(c.c_uint8),
                 c.c_double, c.c_int32, c.POINTER(IRFlickerSummary),
                 c.POINTER(c.c_int32), c.POINTER(c.c_uint8), c.c_int64,
@@ -534,11 +553,22 @@ def main() -> int:
         v1_map = (c.c_double * 4)()
         vn_map = (c.c_double * 4)()
         stat_summary = (c.c_double * 2)()
-        st = analysis.IR_FrameStatisticsU16(
-            t1_frames, 8, 2, 2, 2, 0, v1_map, vn_map, 4, stat_summary, 2, err, len(err)
+        t1_view = make_array_view(t1_frames, 2, 2, 2)
+        st = analysis.IR_FrameStatistics(
+            c.byref(t1_view), 0, v1_map, vn_map, 4, stat_summary, 2, err, len(err)
         )
         if st != 0 or abs(vn_map[0] - 4.0) > 1e-12:
-            raise RuntimeError(f"IR_FrameStatisticsU16 failed: st={st} {err.value.decode()}")
+            raise RuntimeError(f"IR_FrameStatistics failed: st={st} {err.value.decode()}")
+
+        wide_frames = (c.c_uint32 * 2)(70000, 70002)
+        wide_view = make_array_view(wide_frames, 1, 1, 2, IR_TYPE_U32)
+        wide_mean = (c.c_double * 1)()
+        wide_std = (c.c_double * 1)()
+        st = analysis.IR_FrameStatistics(
+            c.byref(wide_view), 0, wide_mean, wide_std, 1, stat_summary, 2, err, len(err)
+        )
+        if st != 0 or wide_mean[0] != 70001.0 or wide_std[0] != 1.0:
+            raise RuntimeError(f"IR_FrameStatistics U32 failed: st={st} {err.value.decode()}")
 
         v2_map = (c.c_double * 4)(30000.0, 30000.0, 30000.0, 30000.0)
         vm_map = (c.c_double * 4)(30100.0, 30100.0, 30100.0, 30100.0)
@@ -590,11 +620,12 @@ def main() -> int:
         map_ti = (c.c_double * 4)()
         map_tj = (c.c_double * 4)()
         c_out = IRNoise3DComputeOutputs(
-            None, scalars, hist, hist_meta, map_ij, map_ti, map_tj, None,
-            0, 16, 4, 4, 4, 16, 12, 0, 0
+            scalars, hist, hist_meta, map_ij, map_ti, map_tj, None,
+            16, 4, 4, 4, 16, 12, 0, 0
         )
+        n3d_view = make_array_view(n3d_frames, 2, 2, 2)
         st = analysis.IR_Noise3DComputeFramesDn(
-            n3d_frames, 8, 2, 2, 2, total_b, 4, None, None, 0,
+            c.byref(n3d_view), total_b, 4, None, None, 0,
             c.byref(c_params), c.byref(c_out), err, len(err)
         )
         if st != 0 or not math.isfinite(scalars[7]):
@@ -623,12 +654,13 @@ def main() -> int:
         mean15 = (c.c_double * 225)()
         vn15 = (c.c_double * 225)()
         nuc_stat_sum = (c.c_double * 2)()
-        st = analysis.IR_FrameStatisticsNucU16(
-            burst_frames, 450, 2, 15, 15, 0, k15, b15, None, None,
+        burst_view = make_array_view(burst_frames, 15, 15, 2)
+        st = analysis.IR_FrameStatisticsNuc(
+            c.byref(burst_view), 0, k15, b15, None, None,
             mean15, vn15, 225, nuc_stat_sum, 2, err, len(err)
         )
         if st != 0 or abs(mean15[0] - 30100.0) > 1e-12 or abs(vn15[0] - 1.0) > 1e-12:
-            raise RuntimeError(f"IR_FrameStatisticsNucU16 failed: st={st} {err.value.decode()}")
+            raise RuntimeError(f"IR_FrameStatisticsNuc failed: st={st} {err.value.decode()}")
 
         low15 = (c.c_double * 225)()
         high15 = (c.c_double * 225)()
@@ -694,13 +726,14 @@ def main() -> int:
         )
         flick_sum = IRFlickerSummary()
         flick_mask = (c.c_uint8 * 4)()
-        st = analysis.IR_FlickerDetectU16(
-            flick_frames, 16, 4, 1, 4, None, None, None,
+        flick_view = make_array_view(flick_frames, 4, 1, 4)
+        st = analysis.IR_FlickerDetect(
+            c.byref(flick_view), None, None, None,
             1.5, 2, c.byref(flick_sum), None, flick_mask, 4,
             None, None, 0, err, len(err)
         )
         if st != 0 or flick_sum.flicker_count != 1 or flick_mask[3] != 1:
-            raise RuntimeError(f"IR_FlickerDetectU16 failed: st={st} {err.value.decode()}")
+            raise RuntimeError(f"IR_FlickerDetect failed: st={st} {err.value.decode()}")
 
         fft2d_in = (c.c_double * 16)(
             *[10.0 + math.cos(2.0 * math.pi * col / 4.0) for _row in range(4) for col in range(4)]

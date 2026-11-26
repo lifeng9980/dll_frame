@@ -13,10 +13,11 @@ class FrameSource {
 public:
     virtual ~FrameSource() = default;
     virtual IRGeometry geometry() const = 0;
+    virtual int32_t dataType() const noexcept { return IR_TYPE_U16; }
     virtual bool isLive() const noexcept { return true; }
     virtual uint64_t bufferedBytes() const noexcept { return 0; }
     virtual void start() = 0;
-    virtual void read(uint16_t *pixels, IRFrameStamp &stamp, int timeoutMs) = 0;
+    virtual void read(void *pixels, IRFrameStamp &stamp, int timeoutMs) = 0;
     virtual void flush() {}
     virtual void stop() = 0;
 };
@@ -38,9 +39,9 @@ public:
     std::thread::id owner;
     int backend{};
     bool running{};
-    IRGeometry open(int backend, const char *name, int validBits);
-    IRGeometry open(int backend, const char *name, int validBits,
-                    int32_t queueCapacity, uint64_t memoryLimitBytes);
+    IRFrameSourceInfo open(int backend, const char *name, int validBits);
+    IRFrameSourceInfo open(int backend, const char *name, int validBits,
+                           int32_t queueCapacity, uint64_t memoryLimitBytes);
     void close();
     void checkOperationAccess() const;
     void checkOwner() const;
@@ -54,8 +55,7 @@ public:
     void checkStop() const;
     void start();
     void stop();
-    void read(int count, int timeoutMs, uint16_t *pixels, int64_t capacity,
-              IRFrameStamp *stamps, int stampCapacity, int &completed);
+    void read(int timeoutMs, IRFrameBatchView &batch);
     void flush(int32_t discardFrames, int32_t timeoutMs, int32_t &discarded);
     void setQueueCapacity(int32_t capacity);
     uint64_t bufferedBytes() const;
@@ -66,7 +66,7 @@ private:
 
     void startPump();
     void stopPump();
-    void pumpLoop();
+    void pumpLoop(void *frame);
 
     enum class StopState { idle, active, requested };
     mutable std::mutex operationMutex_;

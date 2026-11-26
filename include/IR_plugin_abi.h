@@ -9,7 +9,7 @@
  * Lifetimes:
  * - out_list and IRMetricPlugin descriptor strings must remain valid until library unload.
  * - IRPrepareCallbacks, IRHostCallbacks, and params_json are valid only during the call.
- * - IRSlotView::data, stamps, and alloc_* pointers are valid only during execute().
+ * - IRSlotView array and opaque pointers, stamps, and alloc_* pointers are valid only during execute().
  */
 
 #include <stddef.h>
@@ -25,7 +25,7 @@
 #define IR_PLUGIN_EXPORT
 #endif
 
-#define IR_PLUGIN_ABI_VERSION 1u
+#define IR_PLUGIN_ABI_VERSION 2u
 #define IR_PLUGIN_QUERY_SYMBOL "ir_plugin_query"
 
 #ifdef __cplusplus
@@ -48,13 +48,15 @@ typedef enum IRPluginLogLevel {
 
 typedef struct IRSlotView {
     int32_t slot_kind;
-    int32_t width;
-    int32_t height;
-    int32_t frames;
+    /* Populated for Batch, Map, and Mask slots. */
+    IRArrayView array;
+    /* Effective raw code bit width for Batch; zero for derived arrays and opaque slots. */
     int32_t valid_bits;
-    const void *data;
-    size_t byte_size;
+    /* Present only for Batch; NULL for maps, masks, and opaque slots. */
     const IRFrameStamp *stamps;
+    /* Populated only for non-array slots such as DriftContext. */
+    const void *opaque_data;
+    uint64_t opaque_byte_size;
 } IRSlotView;
 
 typedef struct IRPrepareCallbacks {

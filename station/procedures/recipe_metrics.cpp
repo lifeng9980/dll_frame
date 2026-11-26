@@ -4,6 +4,7 @@
 #include <climits>
 #include <cmath>
 #include <memory>
+#include <set>
 
 namespace ir::procedures::recipe {
 using namespace ir::api;
@@ -183,6 +184,22 @@ const MetricSpec *findBuiltinMethod(const std::string &method) noexcept
     return nullptr;
 }
 
+void validateOutputBindings(const Json &inputs, const Json &outputs, const std::string &path)
+{
+    const auto outputPath = path + ".outputs";
+    std::set<std::string> boundSlots;
+    for (const auto &[key, _] : outputs.items()) {
+        const auto slot = stringField(outputs, key.c_str(), outputPath);
+        const bool aliasesInput = std::any_of(inputs.begin(), inputs.end(), [&](const Json &input) {
+            return input.is_string() && input.get_ref<const std::string &>() == slot;
+        });
+        require(!aliasesInput, IR_BAD_ARGUMENT,
+                outputPath + "." + key + " aliases input slot '" + slot + "'");
+        require(boundSlots.insert(slot).second, IR_BAD_ARGUMENT,
+                outputPath + "." + key + " binds duplicate output slot '" + slot + "'");
+    }
+}
+
 } // namespace
 
 Json normalizeInputsObject(const Json &fields, const char *defaultInputKey,
@@ -219,6 +236,7 @@ AnalysisStep prepareAnalysis(StepRef ref, const Json &fields, const std::string 
         const Json params = fields.contains("params") ? objectField(fields, "params", path) : Json::object();
         const Json outputs = fields.contains("outputs") ? objectField(fields, "outputs", path) : Json::object();
 
+        validateOutputBindings(normalizedInputs, outputs, path);
         auto prepared = found->prepare(stepName, normalizedInputs, params, outputs, knownSlots, path);
         require(reqVersion == prepared.version, IR_BAD_ARGUMENT,
                 path + ".version=" + std::to_string(reqVersion) + " does not match method version " +

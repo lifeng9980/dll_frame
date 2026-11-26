@@ -137,7 +137,7 @@ public:
         }
     }
 
-    void read(uint16_t *pixels, IRFrameStamp &stamp, int timeoutMs) override
+    void read(void *pixels, IRFrameStamp &stamp, int timeoutMs) override
     {
         require(streaming_, IR_BAD_ARGUMENT, "Start V4L2 capture before reading frames");
         const auto deadline = std::chrono::steady_clock::now() +

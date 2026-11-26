@@ -12,19 +12,20 @@ int main(int argc, char **argv)
     const uint16_t frames[] = {20, 22};
     double mean, noise, summary[2];
     char error[512];
-    int status = IR_FrameStatisticsU16(frames, 2, 2, 1, 1, 1,
-        &mean, &noise, 1, summary, 2, error, sizeof error);
+    const IRArrayView input = {frames, sizeof frames, IR_TYPE_U16, 1, 1, 2};
+    int status = IR_FrameStatistics(&input, 1, &mean, &noise,
+        1, summary, 2, error, sizeof error);
     if (status || mean != 21 || fabs(noise - sqrt(2.0)) > 1e-12) {
         fprintf(stderr, "Analysis: %s\n", error);
         return 1;
     }
-    IRGeometry g;
-    status = IR_OpenFrames(0, "test", 0, &g, error, sizeof error);
+    IRFrameSourceInfo source_info;
+    status = IR_OpenFrames(0, "test", 0, &source_info, error, sizeof error);
     if (status != IR_UNSUPPORTED || IR_CloseFrames(error, sizeof error)) {
         fprintf(stderr, "Station: %s\n", error);
         return 1;
     }
-    status = IR_OpenFrames(IR_NI_IMAQ, "img0", 0, &g, error, sizeof error);
+    status = IR_OpenFrames(IR_NI_IMAQ, "img0", 0, &source_info, error, sizeof error);
     if (status != IR_UNSUPPORTED) {
         fprintf(stderr, "Reserved NI-IMAQ backend: %s\n", error);
         return 1;
@@ -42,11 +43,11 @@ int main(int argc, char **argv)
     if (strcmp(IR_PLUGIN_QUERY_SYMBOL, "ir_plugin_query") != 0 ||
         sizeof(IRRecipeStepEvent) != 56 ||
         sizeof(IRRecipeRunOptions) != 24 ||
-        sizeof(IRSlotView) != 48 ||
+        sizeof(IRSlotView) != 72 ||
         sizeof(IRPrepareCallbacks) != 32 ||
         sizeof(IRHostCallbacks) != 64 ||
         sizeof(IRMetricPlugin) != 48 ||
-        IR_PLUGIN_ABI_VERSION != 1u) {
+        IR_PLUGIN_ABI_VERSION != 2u) {
         fprintf(stderr, "Unexpected recipe/plugin ABI size or symbol\n");
         return 1;
     }
@@ -61,7 +62,6 @@ int main(int argc, char **argv)
         }
     }
     IRCaptureStats stats = {0};
-    int32_t has_frame = -1;
     uint16_t dummy_px = 0;
     status = IR_SetFrameQueueCapacity(64, error, sizeof error);
     if (status != IR_OK) {
@@ -73,9 +73,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "GetCaptureStats: status=%d cap=%d err=%s\n", status, stats.queue_capacity, error);
         return 1;
     }
-    status = IR_TryReadLatestFrame(&dummy_px, 1, &g, NULL, &has_frame, error, sizeof error);
-    if (status != IR_OK || has_frame != 0) {
-        fprintf(stderr, "TryReadLatestFrame: status=%d has_frame=%d err=%s\n", status, has_frame, error);
+    IRFrameBatchView latest = {{&dummy_px, sizeof dummy_px, IR_TYPE_U16, 0, 0, 1}, 0, NULL, 0};
+    status = IR_TryReadLatestFrame(&latest, error, sizeof error);
+    if (status != IR_OK || latest.pixels.frames != 0) {
+        fprintf(stderr, "TryReadLatestFrame: status=%d frames=%d err=%s\n",
+            status, latest.pixels.frames, error);
         return 1;
     }
     const char *analysis_version = IR_AnalysisVersion();

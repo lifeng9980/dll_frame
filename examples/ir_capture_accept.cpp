@@ -82,6 +82,42 @@ struct FramesGuard {
     }
 };
 
+class PixelBuffer {
+public:
+    void resize(int32_t dataType, size_t pixels)
+    {
+        dataType_ = dataType;
+        if (dataType == IR_TYPE_U16) {
+            pixels16_.resize(pixels);
+            pixels32_.clear();
+        } else if (dataType == IR_TYPE_U32) {
+            pixels32_.resize(pixels);
+            pixels16_.clear();
+        } else {
+            throw std::runtime_error("Unsupported capture pixel type");
+        }
+    }
+
+    void *data() noexcept
+    {
+        return dataType_ == IR_TYPE_U32
+            ? static_cast<void *>(pixels32_.data())
+            : static_cast<void *>(pixels16_.data());
+    }
+
+    uint64_t byteSize() const noexcept
+    {
+        return dataType_ == IR_TYPE_U32
+            ? static_cast<uint64_t>(pixels32_.size()) * sizeof(uint32_t)
+            : static_cast<uint64_t>(pixels16_.size()) * sizeof(uint16_t);
+    }
+
+private:
+    int32_t dataType_{IR_TYPE_U16};
+    std::vector<uint16_t> pixels16_;
+    std::vector<uint32_t> pixels32_;
+};
+
 struct Arguments {
     bool listMode = false;
     std::string backendName;
@@ -226,13 +262,14 @@ int runAcceptMode(const Arguments &args)
     char err[2048]{};
     StopSignalGuard stopGuard;
     FramesGuard guard;
-    IRGeometry geom{};
-    int32_t st = IR_OpenFrames(backend, source.c_str(), args.validBits, &geom, err, sizeof err);
+    IRFrameSourceInfo sourceInfo{};
+    int32_t st = IR_OpenFrames(backend, source.c_str(), args.validBits, &sourceInfo, err, sizeof err);
     if (st != IR_OK) {
         std::fprintf(stderr, "IR_OpenFrames status=%d: %s\n", st, err);
         return st;
     }
     guard.open = true;
+    const auto geom = sourceInfo.geometry;
 
     if (args.queueCapacity > 0) {
         st = IR_SetFrameQueueCapacity(args.queueCapacity, err, sizeof err);
@@ -247,8 +284,9 @@ int runAcceptMode(const Arguments &args)
         std::fprintf(stderr, "Invalid geometry or batch frame count\n");
         return IR_BAD_ARGUMENT;
     }
-    const int64_t batchElements = framePixels * args.frames;
-    std::vector<uint16_t> pixels(static_cast<size_t>(batchElements), 0);
+    const int64_t batchPixels = framePixels * args.frames;
+    PixelBuffer pixels;
+    pixels.resize(sourceInfo.data_type, static_cast<size_t>(batchPixels));
     std::vector<IRFrameStamp> stamps(static_cast<size_t>(args.frames));
 
     std::atomic<bool> previewStop{false};
@@ -259,27 +297,30 @@ int runAcceptMode(const Arguments &args)
     std::thread previewThread;
     if (args.previewMs > 0) {
         previewThread = std::thread([&] {
-            std::vector<uint16_t> prevBuf(static_cast<size_t>(framePixels), 0);
+            PixelBuffer prevBuf;
+            prevBuf.resize(sourceInfo.data_type, static_cast<size_t>(framePixels));
             while (!previewStop.load(std::memory_order_acquire)) {
                 previewPolls.fetch_add(1, std::memory_order_relaxed);
-                IRGeometry pg{};
                 IRFrameStamp ps{};
-                int32_t hasFrame = 0;
+                IRFrameBatchView preview{{prevBuf.data(), prevBuf.byteSize(), sourceInfo.data_type,
+                                          geom.width, geom.height, 1},
+                                         geom.valid_bits, &ps, 1};
                 char pErr[512]{};
                 int32_t pst = IR_TryReadLatestFrame(
-                    prevBuf.data(), static_cast<int64_t>(prevBuf.size()),
-                    &pg, &ps, &hasFrame, pErr, sizeof pErr);
-                if (pst == IR_BUFFER_TOO_SMALL && pg.width > 0 && pg.height > 0) {
-                    const int64_t need = int64_t(pg.width) * pg.height;
-                    prevBuf.resize(static_cast<size_t>(need), 0);
+                    &preview, pErr, sizeof pErr);
+                if (pst == IR_BUFFER_TOO_SMALL && preview.pixels.width > 0 && preview.pixels.height > 0) {
+                    const int64_t need = int64_t(preview.pixels.width) * preview.pixels.height;
+                    prevBuf.resize(preview.pixels.data_type, static_cast<size_t>(need));
+                    preview.pixels.data = prevBuf.data();
+                    preview.pixels.byte_size = prevBuf.byteSize();
+                    preview.pixels.frames = 1;
                     pst = IR_TryReadLatestFrame(
-                        prevBuf.data(), static_cast<int64_t>(prevBuf.size()),
-                        &pg, &ps, &hasFrame, pErr, sizeof pErr);
+                        &preview, pErr, sizeof pErr);
                 }
                 if (pst != IR_OK) {
                     if (previewErrors.fetch_add(1, std::memory_order_relaxed) == 0)
                         previewErrorText = pErr[0] ? pErr : ("status=" + std::to_string(pst));
-                } else if (hasFrame != 0) {
+                } else if (preview.pixels.frames != 0) {
                     previewHits.fetch_add(1, std::memory_order_relaxed);
                 }
                 const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(args.previewMs);
@@ -334,9 +375,11 @@ int runAcceptMode(const Arguments &args)
                 }
             }
 
-            int32_t completed = 0;
-            st = IR_ReadFrames(args.frames, args.timeoutMs, pixels.data(), batchElements,
-                               stamps.data(), args.frames, &completed, err, sizeof err);
+            IRFrameBatchView batch{{pixels.data(), pixels.byteSize(), sourceInfo.data_type,
+                                    geom.width, geom.height, args.frames},
+                                   geom.valid_bits, stamps.data(), args.frames};
+            st = IR_ReadFrames(args.timeoutMs, &batch, err, sizeof err);
+            const int32_t completed = batch.pixels.frames;
             totalFrames += completed;
             lastCompleted = completed;
             for (int32_t i = 0; i < completed; ++i) {
@@ -397,11 +440,13 @@ int runAcceptMode(const Arguments &args)
         std::vector<double> meanMap(static_cast<size_t>(framePixels), 0.0);
         std::vector<double> stdMap(static_cast<size_t>(framePixels), 0.0);
         double summary[2]{};
-        const int32_t statSt = IR_FrameStatisticsU16(
-            pixels.data(), batchElements, lastCompleted, geom.height, geom.width, 0,
-            meanMap.data(), stdMap.data(), framePixels, summary, 2, err, sizeof err);
+        const IRArrayView input{pixels.data(), pixels.byteSize(), sourceInfo.data_type,
+            geom.width, geom.height, lastCompleted};
+        const int32_t statSt = IR_FrameStatistics(
+            &input, 0, meanMap.data(), stdMap.data(), framePixels,
+            summary, 2, err, sizeof err);
         if (statSt != IR_OK) {
-            std::fprintf(stderr, "IR_FrameStatisticsU16 status=%d: %s\n", statSt, err);
+            std::fprintf(stderr, "IR_FrameStatistics status=%d: %s\n", statSt, err);
             return statSt;
         }
         meanDn = summary[0];
@@ -422,7 +467,8 @@ int runAcceptMode(const Arguments &args)
     const uint64_t lastSeq = lastCompleted > 0 ? stamps[static_cast<size_t>(lastCompleted - 1)].sequence : 0;
 
     std::cout << "status=0\n"
-              << "width=" << geom.width << " height=" << geom.height << " valid_bits=" << geom.valid_bits << '\n'
+              << "width=" << geom.width << " height=" << geom.height << " valid_bits=" << geom.valid_bits
+              << " data_type=" << sourceInfo.data_type << '\n'
               << "cycles_completed=" << cyclesCompleted << " total_frames=" << totalFrames
               << " elapsed_s=" << std::setprecision(6) << elapsedSec
               << " estimated_fps=" << std::setprecision(3) << stats.estimated_fps << '\n'
@@ -444,7 +490,8 @@ int runAcceptMode(const Arguments &args)
             {"analysis_version", IR_AnalysisVersion()},
             {"backend", args.backendName},
             {"source", source},
-            {"geometry", {{"width", geom.width}, {"height", geom.height}, {"valid_bits", geom.valid_bits}}},
+            {"geometry", {{"width", geom.width}, {"height", geom.height},
+                           {"valid_bits", geom.valid_bits}, {"data_type", sourceInfo.data_type}}},
             {"cycles_completed", cyclesCompleted},
             {"total_frames", totalFrames},
             {"elapsed_s", elapsedSec},

@@ -6,17 +6,37 @@
 #include <nlohmann/json.hpp>
 #include <functional>
 #include <initializer_list>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <map>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <stdexcept>
 #include <variant>
 #include <vector>
 
 namespace ir::procedures::recipe {
 using Json = nlohmann::json;
+
+inline uint64_t pixelElementBytes(int32_t dataType) noexcept
+{
+    return dataType == IR_TYPE_U16 ? sizeof(uint16_t)
+        : dataType == IR_TYPE_U32 ? sizeof(uint32_t) : 0;
+}
+
+inline const char *pixelDataTypeName(int32_t dataType) noexcept
+{
+    return dataType == IR_TYPE_U16 ? "U16"
+        : dataType == IR_TYPE_U32 ? "U32" : "unknown";
+}
+
+inline const char *pixelFormatName(int32_t dataType) noexcept
+{
+    return dataType == IR_TYPE_U16 ? "RAW16_LE"
+        : dataType == IR_TYPE_U32 ? "RAW32_LE" : "unknown";
+}
 
 struct DeviceConfig {
     int kind{};
@@ -57,12 +77,74 @@ struct PowerStep {
     bool offAfterRun{};
 };
 
+using PixelStorage = std::variant<std::vector<uint16_t>, std::vector<uint32_t>>;
+
 // 只有采集写入像素。指标和归档都以 const 引用使用完整批次。
 struct FrameBatch {
     IRGeometry geometry{};
-    std::vector<uint16_t> pixels;
+    PixelStorage pixels{std::vector<uint16_t>{}};
     std::vector<IRFrameStamp> stamps;
+
+    int32_t dataType() const noexcept
+    {
+        return pixels.index() == 0 ? IR_TYPE_U16
+            : pixels.index() == 1 ? IR_TYPE_U32 : 0;
+    }
+
+    void resizePixels(int32_t type, std::size_t elements)
+    {
+        switch (type) {
+        case IR_TYPE_U16:
+            if (!std::holds_alternative<std::vector<uint16_t>>(pixels))
+                pixels.emplace<std::vector<uint16_t>>();
+            std::get<std::vector<uint16_t>>(pixels).resize(elements);
+            return;
+        case IR_TYPE_U32:
+            if (!std::holds_alternative<std::vector<uint32_t>>(pixels))
+                pixels.emplace<std::vector<uint32_t>>();
+            std::get<std::vector<uint32_t>>(pixels).resize(elements);
+            return;
+        default:
+            throw std::invalid_argument("Recipe capture supports U16 or U32 pixel storage");
+        }
+    }
+
+    uint64_t pixelCapacityBytes() const noexcept
+    {
+        if (const auto *values = std::get_if<std::vector<uint16_t>>(&pixels))
+            return static_cast<uint64_t>(values->capacity()) * sizeof(uint16_t);
+        if (const auto *values = std::get_if<std::vector<uint32_t>>(&pixels))
+            return static_cast<uint64_t>(values->capacity()) * sizeof(uint32_t);
+        return 0;
+    }
 };
+
+inline IRArrayView frameBatchArrayView(const FrameBatch &batch) noexcept
+{
+    if (const auto *values = std::get_if<std::vector<uint16_t>>(&batch.pixels)) {
+        return {values->data(), static_cast<uint64_t>(values->size()) * sizeof(uint16_t),
+                IR_TYPE_U16, batch.geometry.width, batch.geometry.height,
+                static_cast<int32_t>(batch.stamps.size())};
+    }
+    if (const auto *values = std::get_if<std::vector<uint32_t>>(&batch.pixels))
+        return {values->data(), static_cast<uint64_t>(values->size()) * sizeof(uint32_t),
+                IR_TYPE_U32, batch.geometry.width, batch.geometry.height,
+                static_cast<int32_t>(batch.stamps.size())};
+    return {nullptr, 0, 0, batch.geometry.width, batch.geometry.height,
+            static_cast<int32_t>(batch.stamps.size())};
+}
+
+inline IRMutableArrayView mutableFrameBatchArrayView(FrameBatch &batch, int32_t frames) noexcept
+{
+    if (auto *values = std::get_if<std::vector<uint16_t>>(&batch.pixels)) {
+        return {values->data(), static_cast<uint64_t>(values->size()) * sizeof(uint16_t),
+                IR_TYPE_U16, batch.geometry.width, batch.geometry.height, frames};
+    }
+    if (auto *values = std::get_if<std::vector<uint32_t>>(&batch.pixels))
+        return {values->data(), static_cast<uint64_t>(values->size()) * sizeof(uint32_t),
+                IR_TYPE_U32, batch.geometry.width, batch.geometry.height, frames};
+    return {nullptr, 0, 0, batch.geometry.width, batch.geometry.height, frames};
+}
 
 struct Limit {
     std::string metric;
@@ -106,7 +188,7 @@ struct ExecutionContext {
         };
         for (const auto &[name, batch] : batches) {
             (void)name;
-            add(batch.pixels.capacity(), sizeof(uint16_t));
+            add(batch.pixelCapacityBytes(), 1);
             add(batch.stamps.capacity(), sizeof(IRFrameStamp));
         }
         for (const auto &[name, map] : maps) {
@@ -290,13 +372,14 @@ struct ExternalMetricResolver {
 StationConfig parseStation(const char *text);
 RecipeConfig parseRecipe(const char *text, const StationConfig &station,
                          const ExternalMetricResolver *externalMetrics = nullptr);
-void runRecipe(ir::acquisition::Capture &capture, const StationConfig &station,
-               const RecipeConfig &recipe, const char *directory, IRRecipeResult &result,
-               const IRRecipeRunOptions *options = nullptr);
+void runRecipe(const char *stationJson,
+               const std::function<RecipeConfig(const StationConfig &)> &prepareRecipe,
+               const char *directory, IRRecipeResult &result, const IRRecipeRunOptions *options);
 
 uint64_t addBytes(uint64_t total, uint64_t additional);
 uint64_t multiplyBytes(uint64_t count, uint64_t itemBytes);
-uint64_t batchStorageBytes(IRGeometry geometry, int32_t frames, int64_t maxBatchBytes);
+uint64_t batchStorageBytes(IRGeometry geometry, int32_t frames, int32_t dataType,
+                           int64_t maxBatchBytes);
 void requireWithinMemoryLimit(uint64_t required, uint64_t limit);
 
 // 设备和指标配置共用字段读取与错误位置。

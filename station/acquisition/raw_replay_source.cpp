@@ -20,8 +20,12 @@ public:
 };
 struct Geometry
 {
-    int width{}, height{}, stride{}, bitDepth{16};
+    int width{}, height{}, stride{}, bitDepth{16}, dataType{IR_TYPE_U16};
     bool bigEndian{};
+    uint64_t bytesPerPixel() const
+    {
+        return dataType == IR_TYPE_U32 ? sizeof(uint32_t) : sizeof(uint16_t);
+    }
     uint64_t frameBytes() const
     {
         return uint64_t(stride) * height;
@@ -32,7 +36,7 @@ struct Table
     fs::path path;
     std::vector<std::string> headings;
     std::vector<uint64_t> offsets;
-    std::optional<Geometry> geometry;
+    Geometry geometry;
     uint64_t bytes{};
     fs::file_time_type modified{};
     std::optional<bool> inverted;
@@ -59,12 +63,13 @@ struct Metadata
 File inspect(const fs::path &target);
 void checkUnchanged(const File &);
 Metadata metadataAt(const File &, uint64_t index, std::istream &input);
-std::vector<uint16_t> decode(const uint8_t *, size_t, const Geometry &);
+void decode(const uint8_t *, size_t, const Geometry &, void *pixels);
 } // namespace ir::raw
 
 #include <cmath>
 
 #include <algorithm>
+#include <bit>
 #include <cctype>
 #include <charconv>
 #include <cstdint>
@@ -87,9 +92,12 @@ constexpr uint64_t maxIndexBytes = 64 * 1024 * 1024;
 
 Geometry validateGeometry(Geometry g)
 {
-    if (g.width <= 0 || g.height <= 0 || g.width > INT32_MAX / 2 ||
-        uint64_t(g.width) * g.height > INT32_MAX || g.stride < g.width * 2 || g.stride % 2 ||
-        g.bitDepth < 0 || g.bitDepth > 16 || g.frameBytes() > INT32_MAX)
+    const int bytesPerPixel = static_cast<int>(g.bytesPerPixel());
+    if ((g.dataType != IR_TYPE_U16 && g.dataType != IR_TYPE_U32) ||
+        g.width <= 0 || g.height <= 0 || g.width > INT32_MAX / bytesPerPixel ||
+        uint64_t(g.width) * g.height > INT32_MAX || g.stride < g.width * bytesPerPixel ||
+        g.stride % bytesPerPixel || g.bitDepth < 0 || g.bitDepth > bytesPerPixel * 8 ||
+        g.frameBytes() > INT32_MAX)
         throw AppError("Invalid RAW width/height/stride/depth or frame size");
     return g;
 }
@@ -177,11 +185,11 @@ std::optional<int64_t> millis(const std::map<std::string, std::string> &row, con
         throw AppError("Recorded time exceeds int64 nanoseconds");
     return static_cast<int64_t>(std::round(ns));
 }
-Metadata parseMetadata(std::map<std::string, std::string> row)
+Metadata parseMetadata(std::map<std::string, std::string> row, int expectedStorageBits)
 {
     if (const auto storage = number<int>(row, "storage_bits"))
-        if (*storage != 16)
-            throw AppError("Only 16-bit RAW storage is supported");
+        if ((*storage != 16 && *storage != 32) || *storage != expectedStorageBits)
+            throw AppError("storage_bits conflicts with RAW pixel type");
     Metadata m;
     m.fields = std::move(row);
     m.applicationSequence = number<uint64_t>(m.fields, "application_sequence");
@@ -222,6 +230,38 @@ Metadata parseMetadata(std::map<std::string, std::string> row)
     (void)number<uint64_t>(m.fields, "frame_index");
     return m;
 }
+Geometry fromMean(const fs::path &path);
+
+Geometry parseLayout(const std::map<std::string, std::string> &row, Geometry current)
+{
+    const auto text = [&](const char *key) {
+        const auto it = row.find(key);
+        return it == row.end() ? std::string() : it->second;
+    };
+    std::string format = text("pixel_format"), endian = text("endianness");
+    for (auto &c : format)
+        c = char(std::toupper(static_cast<unsigned char>(c)));
+    for (auto &c : endian)
+        c = char(std::tolower(static_cast<unsigned char>(c)));
+    if (!format.empty() && format != "RAW16" && format != "RAW16_LE" &&
+        format != "RAW16_BE" && format != "RAW32_LE")
+        throw AppError("Unsupported pixel_format in frames.csv");
+    if (!endian.empty() && endian != "little" && endian != "big")
+        throw AppError("Unsupported endianness in frames.csv");
+
+    current.dataType = format == "RAW32_LE" ? IR_TYPE_U32 : IR_TYPE_U16;
+    const int bytesPerPixel = static_cast<int>(current.bytesPerPixel());
+    if (current.width <= 0 || current.width > INT32_MAX / bytesPerPixel)
+        throw AppError("RAW width exceeds bounds for pixel type");
+    current.stride = number<int>(row, "stride_bytes").value_or(current.width * bytesPerPixel);
+    current.bitDepth = number<int>(row, "bit_depth").value_or(bytesPerPixel * 8);
+    current.bigEndian = endian == "big" || (endian.empty() && format == "RAW16_BE");
+    if (((format == "RAW16_LE" || format == "RAW32_LE") && current.bigEndian) ||
+        (format == "RAW16_BE" && !current.bigEndian))
+        throw AppError("RAW format and byte order conflict");
+    return validateGeometry(current);
+}
+
 std::shared_ptr<Table> readTable(const fs::path &path)
 {
     std::ifstream input(path, std::ios::binary);
@@ -244,6 +284,7 @@ std::shared_ptr<Table> readTable(const fs::path &path)
     const bool geometryColumns = unique.count("width") && unique.count("height");
     if (unique.count("width") != unique.count("height"))
         throw AppError("frames.csv missing width/height pair");
+    const Geometry fallback = geometryColumns ? Geometry{} : fromMean(path.parent_path() / "mean.csv");
     for (;;)
     {
         const auto offset = input.tellg();
@@ -254,45 +295,25 @@ std::shared_ptr<Table> readTable(const fs::path &path)
         if (table->offsets.size() >= maxIndexBytes / sizeof(uint64_t))
             throw AppError("frames.csv metadata index budget exceeded");
         const auto row = fields(*table, line);
+        Geometry current = fallback;
         if (geometryColumns)
         {
-            Geometry current;
             current.width = required<int>(row, "width");
             current.height = required<int>(row, "height");
-            if (current.width <= 0 || current.width > INT32_MAX / 2)
-                throw AppError("RAW width exceeds bounds");
-            current.stride = number<int>(row, "stride_bytes").value_or(current.width * 2);
-            current.bitDepth = number<int>(row, "bit_depth").value_or(16);
-            const auto text = [&](const char *key) {
-                const auto it = row.find(key);
-                return it == row.end() ? std::string() : it->second;
-            };
-            std::string format = text("pixel_format"), endian = text("endianness");
-            for (auto &c : format)
-                c = char(std::toupper(static_cast<unsigned char>(c)));
-            for (auto &c : endian)
-                c = char(std::tolower(static_cast<unsigned char>(c)));
-            if (!format.empty() && format != "RAW16" && format != "RAW16_LE" && format != "RAW16_BE")
-                throw AppError("Unsupported pixel_format in frames.csv");
-            if (!endian.empty() && endian != "little" && endian != "big")
-                throw AppError("Unsupported endianness in frames.csv");
-            current.bigEndian = endian == "big" || (endian.empty() && format == "RAW16_BE");
-            if ((format == "RAW16_LE" && current.bigEndian) || (format == "RAW16_BE" && !current.bigEndian))
-                throw AppError("RAW format and byte order conflict");
-            current = validateGeometry(current);
-            if (table->geometry)
-            {
-                const auto &first = *table->geometry;
-                if (first.width != current.width || first.height != current.height ||
-                    first.stride != current.stride || first.bitDepth != current.bitDepth ||
-                    first.bigEndian != current.bigEndian)
-                    throw AppError("frames.csv geometry changes between rows");
-            }
-            else
-                table->geometry = current;
+        }
+        current = parseLayout(row, current);
+        if (table->offsets.empty())
+            table->geometry = current;
+        else
+        {
+            const auto &first = table->geometry;
+            if (first.width != current.width || first.height != current.height ||
+                first.stride != current.stride || first.bitDepth != current.bitDepth ||
+                first.dataType != current.dataType || first.bigEndian != current.bigEndian)
+                throw AppError("frames.csv geometry changes between rows");
         }
         {
-            const auto m = parseMetadata(row);
+            const auto m = parseMetadata(row, static_cast<int>(current.bytesPerPixel()) * 8);
             if (m.inverted)
             {
                 if (table->inverted && *table->inverted != *m.inverted)
@@ -366,8 +387,8 @@ File inspect(const fs::path &target)
     const auto csv = f.rawPath.parent_path() / "frames.csv";
     if (fs::is_regular_file(csv))
         f.table = readTable(csv);
-    if (f.table && f.table->geometry)
-        f.geometry = *f.table->geometry;
+    if (f.table)
+        f.geometry = f.table->geometry;
     else
         f.geometry = fromMean(f.rawPath.parent_path() / "mean.csv");
     f.bytes = fs::file_size(f.rawPath);
@@ -399,24 +420,32 @@ Metadata metadataAt(const File &f, uint64_t index, std::istream &input)
     std::string line;
     if (!recordLine(input, line))
         throw AppError("Cannot read indexed frames.csv row");
-    return parseMetadata(fields(*f.table, line));
+    return parseMetadata(fields(*f.table, line),
+                         f.geometry.dataType == IR_TYPE_U32 ? 32 : 16);
 }
-std::vector<uint16_t> decode(const uint8_t *bytes, size_t count, const Geometry &g)
+void decode(const uint8_t *bytes, size_t count, const Geometry &g, void *pixels)
 {
-    if (!bytes || count != g.frameBytes())
+    if (!bytes || !pixels || count != g.frameBytes())
         throw AppError("Incomplete RAW frame");
-    std::vector<uint16_t> pixels(size_t(g.width) * g.height);
     for (int row = 0; row < g.height; ++row)
     {
         const auto *data = bytes + size_t(row) * g.stride;
-        auto *out = pixels.data() + size_t(row) * g.width;
-        if (!g.bigEndian)
-            std::memcpy(out, data, size_t(g.width) * 2);
-        else
+        if (g.dataType == IR_TYPE_U16) {
+            auto *out = static_cast<uint16_t *>(pixels) + size_t(row) * g.width;
+            if (!g.bigEndian)
+                std::memcpy(out, data, size_t(g.width) * sizeof(uint16_t));
+            else
+                for (int col = 0; col < g.width; ++col)
+                    out[col] = uint16_t((uint16_t(data[col * 2]) << 8) | data[col * 2 + 1]);
+        } else {
+            auto *out = static_cast<uint32_t *>(pixels) + size_t(row) * g.width;
             for (int col = 0; col < g.width; ++col)
-                out[col] = uint16_t((uint16_t(data[col * 2]) << 8) | data[col * 2 + 1]);
+                out[col] = uint32_t(data[col * 4]) |
+                           (uint32_t(data[col * 4 + 1]) << 8) |
+                           (uint32_t(data[col * 4 + 2]) << 16) |
+                           (uint32_t(data[col * 4 + 3]) << 24);
+        }
     }
-    return pixels;
 }
 } // namespace ir::raw
 
@@ -429,17 +458,17 @@ class ReplaySource final : public FrameSource {
     std::ifstream metadata_;
     std::vector<uint8_t> scratch_;
     uint64_t next_{};
-    void readPixels(uint16_t *out)
+    void readPixels(void *out)
     {
         const auto &g = file_.geometry;
         const auto size = std::streamsize(g.frameBytes());
-        if (!g.bigEndian && g.stride == g.width * 2) {
+        if (!g.bigEndian && std::endian::native == std::endian::little &&
+            g.stride == g.width * static_cast<int>(g.bytesPerPixel())) {
             require(bool(pixels_.read(reinterpret_cast<char *>(out), size)), IR_IO_ERROR, "Incomplete RAW frame");
         } else {
             scratch_.resize(size_t(size));
             require(bool(pixels_.read(reinterpret_cast<char *>(scratch_.data()), size)), IR_IO_ERROR, "Incomplete RAW frame");
-            const auto frame = raw::decode(scratch_.data(), size_t(size), g);
-            std::copy(frame.begin(), frame.end(), out);
+            raw::decode(scratch_.data(), size_t(size), g, out);
         }
     }
 public:
@@ -449,7 +478,15 @@ public:
         const auto &g = file_.geometry;
         return {g.width, g.height, g.bitDepth};
     }
+    int32_t dataType() const noexcept override { return file_.geometry.dataType; }
     bool isLive() const noexcept override { return false; }
+    uint64_t bufferedBytes() const noexcept override
+    {
+        const auto &g = file_.geometry;
+        const bool directRead = !g.bigEndian && std::endian::native == std::endian::little &&
+            g.stride == g.width * static_cast<int>(g.bytesPerPixel());
+        return directRead ? 0 : g.frameBytes();
+    }
     void start() override {
         try { raw::checkUnchanged(file_); }
         catch (const raw::AppError &e) { throw Error(IR_IO_ERROR, e.what()); }
@@ -467,7 +504,7 @@ public:
         pixels_.close();
         if (metadata_.is_open()) metadata_.close();
     }
-    void read(uint16_t *out, IRFrameStamp &s, int) override {
+    void read(void *out, IRFrameStamp &s, int) override {
         require(next_ < file_.frames, IR_END_OF_STREAM, "End of RAW capture");
         try {
             const auto m = raw::metadataAt(file_, next_, metadata_);

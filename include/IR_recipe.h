@@ -9,7 +9,7 @@ extern "C" {
  * 两个 JSON 参数均为 UTF-8。此接口可供 C、C# 和 Python 在运行前校验配置。
  */
 IR_STATION_API int32_t IR_CheckRecipeJson(const char *station_json_utf8,
-    const char *recipe_json_utf8, char *err, int32_t err_bytes);
+    const char *recipe_json_utf8, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
 typedef enum IRRecipeStage {
     IR_RECIPE_STAGE_NONE = 0,
@@ -60,8 +60,8 @@ typedef struct IRRecipeRunOptions {
 } IRRecipeRunOptions;
 
 /* 在当前线程执行一份有序流程。测量后在 new_output_directory 中写入 frames.raw、
- * frames.csv（如有 save_raw）和 result.json（失败或取消时也会写入诊断 result.json）。
- * 路径必须是现存父目录下尚不存在的新目录，字符串使用 UTF-8。
+ * frames.csv（如有 save_raw）和 result.json。路径必须是现存父目录下尚不存在的新目录，字符串使用 UTF-8。
+ * 本次运行可独占并写入目录时，失败或取消也会写入诊断 result.json。IR_BUSY 仅返回状态。
  * options 可传 NULL；非 NULL 时可接收步骤级运行事件回调（IRRecipeStepCallback）。
  * IR_OK 表示测量完整完成；产品限值未满足时仍返回 IR_OK，result.json 的 run_status 为 NG。
  * 设备只在本配方引用时连接。同一进程一次只运行一条配方，其间其他采集调用返回 IR_BUSY。
@@ -70,7 +70,7 @@ typedef struct IRRecipeRunOptions {
  */
 IR_STATION_API int32_t IR_RunRecipeJson(const char *station_json_utf8,
     const char *recipe_json_utf8, const char *new_output_directory_utf8,
-    const IRRecipeRunOptions *options, IRRecipeResult *result, char *err, int32_t err_bytes);
+    const IRRecipeRunOptions *options, IRRecipeResult *result, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
 #ifdef __cplusplus
 }

@@ -448,7 +448,7 @@ void testGjbClustersBlocksAndRfpn()
 
 void testRaw16PopulationStdIntegrationAndValidation()
 {
-    // Verify end-to-end: RAW16 frames -> IR_FrameStatisticsU16(sample_std=0) -> IR_GbEvaluateMaps / IR_GjbEvaluateMaps
+    // Verify end-to-end: RAW16 frames -> IR_FrameStatistics(sample_std=0) -> IR_GbEvaluateMaps / IR_GjbEvaluateMaps
     // Frame 0: all 200; Frame 1: all 208 -> mean=204, population std (N) = 4, sample std (N-1) = 4*sqrt(2)
     const int32_t rows = 4, cols = 4;
     const int64_t n = int64_t(rows) * cols;
@@ -461,11 +461,14 @@ void testRaw16PopulationStdIntegrationAndValidation()
     std::vector<double> tmpMean(static_cast<size_t>(n), 0.0);
     double summaryPop[2]{}, summarySample[2]{};
     char err[256]{};
+    const IRArrayView input{t1Frames.data(),
+        static_cast<uint64_t>(t1Frames.size()) * sizeof(uint16_t), IR_TYPE_U16,
+        cols, rows, 2};
 
-    CHECK(IR_FrameStatisticsU16(t1Frames.data(), n * 2, 2, rows, cols, 0,
-                                v1Mean.data(), vnPop.data(), n, summaryPop, 2, err, sizeof err) == IR_OK);
-    CHECK(IR_FrameStatisticsU16(t1Frames.data(), n * 2, 2, rows, cols, 1,
-                                tmpMean.data(), vnSample.data(), n, summarySample, 2, err, sizeof err) == IR_OK);
+    CHECK(IR_FrameStatistics(&input, 0, v1Mean.data(), vnPop.data(), n,
+                             summaryPop, 2, err, sizeof err) == IR_OK);
+    CHECK(IR_FrameStatistics(&input, 1, tmpMean.data(), vnSample.data(), n,
+                             summarySample, 2, err, sizeof err) == IR_OK);
     CHECK_NEAR(summaryPop[1], 4.0, 1e-12);
     CHECK_NEAR(summarySample[1], 4.0 * std::sqrt(2.0), 1e-12);
 

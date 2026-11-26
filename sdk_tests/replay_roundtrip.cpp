@@ -89,8 +89,10 @@ int main()
         const auto saved = fixture.path() / pathFromUtf8("保存帧");
         const auto unknownBits = fixture.path() / pathFromUtf8("有效位未知");
         const auto unknownBitsSaved = fixture.path() / pathFromUtf8("有效位未知_往返");
+        const auto widePixels = fixture.path() / pathFromUtf8("RAW32高位宽");
         fs::create_directories(original);
         fs::create_directories(unknownBits);
+        fs::create_directories(widePixels);
 
         // Different rows and byte patterns expose row order, padding, endian, and valid-bit errors.
         const std::array<uint16_t, 12> input{0x101, 0x203, 0xffff, 0x401, 0x802, 0xffff,
@@ -107,27 +109,38 @@ int main()
             "frame_index,width,height,stride_bytes,pixel_format,bit_depth,endianness\n"
             "0,2,2,4,RAW16_LE,0,little\n1,2,2,4,RAW16_LE,0,little\n");
 
+        const std::array<uint32_t, 4> wideInput{70010, 0xABCDE, 0x10001, 0xFFFFF};
+        std::array<uint8_t, sizeof(wideInput)> wideBytes{};
+        for (size_t i = 0; i < wideInput.size(); ++i) {
+            for (size_t b = 0; b < sizeof(uint32_t); ++b)
+                wideBytes[i * sizeof(uint32_t) + b] = uint8_t(wideInput[i] >> (b * 8));
+        }
+        writeFile(widePixels / "frames.raw", wideBytes.data(), wideBytes.size());
+        writeText(widePixels / "frames.csv",
+            "frame_index,width,height,stride_bytes,pixel_format,bit_depth,endianness\n"
+            "0,2,2,8,RAW32_LE,20,little\n");
+
         char error[1024]{};
-        IRGeometry geometry{};
+        IRFrameSourceInfo sourceInfo{};
         const auto missing = utf8(fixture.path() / pathFromUtf8("不存在的采集目录"));
-        check(IR_OpenFrames(IR_RAW_REPLAY, missing.c_str(), 0, &geometry, error, sizeof error) == IR_IO_ERROR,
+        check(IR_OpenFrames(IR_RAW_REPLAY, missing.c_str(), 0, &sourceInfo, error, sizeof error) == IR_IO_ERROR,
               "missing UTF-8 path");
         check(std::string(error).find(missing) != std::string::npos,
               "missing path diagnostic preserves UTF-8");
 
         const auto inputPath = utf8(original);
         auto open = [&](const std::string &name) {
-            check(IR_OpenFrames(IR_RAW_REPLAY, name.c_str(), 0, &geometry, error, sizeof error) == IR_OK, error);
-            check(geometry.width == 2 && geometry.height == 2 && geometry.valid_bits == 12, "geometry");
+            check(IR_OpenFrames(IR_RAW_REPLAY, name.c_str(), 0, &sourceInfo, error, sizeof error) == IR_OK, error);
+            check(sourceInfo.data_type == IR_TYPE_U16 && sourceInfo.geometry.width == 2 &&
+                  sourceInfo.geometry.height == 2 && sourceInfo.geometry.valid_bits == 12, "geometry");
         };
         auto read = [&] {
             check(IR_StartFrames(error, sizeof error) == IR_OK, error);
             uint16_t pixels[12]{};
             IRFrameStamp stamps[3]{};
-            int32_t completed{};
-            check(IR_ReadFrames(3, 0, pixels, 12, stamps, 3, &completed,
-                                error, sizeof error) == IR_END_OF_STREAM, "EOF");
-            check(completed == 2, "partial count");
+            IRFrameBatchView batch{{pixels, sizeof pixels, IR_TYPE_U16, 2, 2, 3}, 0, stamps, 3};
+            check(IR_ReadFrames(0, &batch, error, sizeof error) == IR_END_OF_STREAM, "EOF");
+            check(batch.pixels.frames == 2, "partial count");
             const uint16_t expected[]{0x101, 0x203, 0x401, 0x802, 0x103, 0x207, 0x407, 0x80a};
             check(std::equal(std::begin(expected), std::end(expected), pixels), "pixel order or padding");
             check(stamps[0].sequence == 10 && stamps[1].driver_sequence == 100 &&
@@ -139,6 +152,57 @@ int main()
         open(inputPath);
         read();
         check(IR_CloseFrames(error, sizeof error) == IR_OK, error);
+
+        const auto widePath = utf8(widePixels);
+        const auto readWide = [&] {
+            check(IR_OpenFrames(IR_RAW_REPLAY, widePath.c_str(), 0, &sourceInfo, error, sizeof error) == IR_OK, error);
+            check(sourceInfo.data_type == IR_TYPE_U32 && sourceInfo.geometry.valid_bits == 20 &&
+                  sourceInfo.geometry.width == 2 && sourceInfo.geometry.height == 2, "RAW32 source info");
+            check(IR_StartFrames(error, sizeof error) == IR_OK, error);
+            std::array<uint32_t, 8> wideOutput{};
+            IRFrameStamp wideStamps[2]{};
+            IRFrameBatchView wideBatch{{wideOutput.data(), sizeof wideOutput, IR_TYPE_U32, 2, 2, 2},
+                                       0, wideStamps, 2};
+            check(IR_ReadFrames(0, &wideBatch, error, sizeof error) == IR_END_OF_STREAM,
+                  "one RAW32 frame at EOF");
+            check(wideBatch.pixels.frames == 1 && wideBatch.valid_bits == 20 &&
+                  std::equal(wideInput.begin(), wideInput.end(), wideOutput.begin()),
+                  "RAW32 high values survive replay");
+            std::array<uint32_t, 4> previewPixels{};
+            IRFrameStamp previewStamp{};
+            IRFrameBatchView previewBatch{{previewPixels.data(), sizeof previewPixels, IR_TYPE_U32, 2, 2, 1},
+                                          0, &previewStamp, 1};
+            check(IR_TryReadLatestFrame(&previewBatch, error, sizeof error) == IR_OK, error);
+            check(previewBatch.pixels.frames == 1 && previewPixels == wideInput,
+                  "RAW32 preview preserves type and values");
+            check(IR_StopFrames(error, sizeof error) == IR_OK, error);
+            check(IR_CloseFrames(error, sizeof error) == IR_OK, error);
+        };
+        readWide();
+        writeText(widePixels / "mean.csv", "70010,703710\n65537,1048575\n");
+        writeText(widePixels / "frames.csv", "frame_index,pixel_format,bit_depth\n0,RAW32_LE,20\n");
+        readWide();
+
+        std::array<uint8_t, 24> paddedWide{};
+        paddedWide.fill(0xff);
+        std::copy_n(wideBytes.begin(), 8, paddedWide.begin());
+        std::copy_n(wideBytes.begin() + 8, 8, paddedWide.begin() + 12);
+        writeFile(widePixels / "frames.raw", paddedWide.data(), paddedWide.size());
+        writeText(widePixels / "frames.csv",
+            "pixel_format,bit_depth,stride_bytes,endianness,storage_bits\nRAW32_LE,20,12,little,32\n");
+        readWide();
+        writeText(widePixels / "frames.csv", "pixel_format,storage_bits\nRAW32_LE,16\n");
+        check(IR_OpenFrames(IR_RAW_REPLAY, widePath.c_str(), 0, &sourceInfo, error, sizeof error) == IR_IO_ERROR &&
+              std::string(error).find("storage_bits conflicts") != std::string::npos,
+              "reject storage width inconsistent with explicit RAW32");
+        writeText(widePixels / "frames.csv", "pixel_format,endianness\nRAW32_LE,big\n");
+        check(IR_OpenFrames(IR_RAW_REPLAY, widePath.c_str(), 0, &sourceInfo, error, sizeof error) == IR_IO_ERROR &&
+              std::string(error).find("byte order conflict") != std::string::npos,
+              "reject byte order inconsistent with explicit RAW32_LE");
+        writeText(widePixels / "frames.csv", "frame_index,pixel_format\n0,RAW20\n");
+        check(IR_OpenFrames(IR_RAW_REPLAY, widePath.c_str(), 0, &sourceInfo, error, sizeof error) == IR_IO_ERROR &&
+              std::string(error).find("Unsupported pixel_format") != std::string::npos,
+              "reject an unsupported encoding even when sizes come from mean.csv");
 
         const std::string outputPath = utf8(saved);
         const std::string stationJson = std::string("{\"schemav\":1,\"acquisition\":{\"backend\":\"raw_replay\",\"source\":\"") +
@@ -159,8 +223,8 @@ int main()
         check(IR_CloseFrames(error, sizeof error) == IR_OK, error);
 
         const auto unknownPath = utf8(unknownBits);
-        check(IR_OpenFrames(IR_RAW_REPLAY, unknownPath.c_str(), 0, &geometry, error, sizeof error) == IR_OK, error);
-        check(geometry.valid_bits == 0, "unknown valid bits");
+        check(IR_OpenFrames(IR_RAW_REPLAY, unknownPath.c_str(), 0, &sourceInfo, error, sizeof error) == IR_OK, error);
+        check(sourceInfo.geometry.valid_bits == 0, "unknown valid bits");
         check(IR_CloseFrames(error, sizeof error) == IR_OK, error);
 
         const std::string unknownStationJson = std::string("{\"schemav\":1,\"acquisition\":{\"backend\":\"raw_replay\",\"source\":\"") +
@@ -168,9 +232,9 @@ int main()
         const auto unknownSavedPath = utf8(unknownBitsSaved);
         check(IR_RunRecipeJson(unknownStationJson.c_str(), recipeJson.c_str(), unknownSavedPath.c_str(),
                                nullptr, &rr, error, sizeof error) == IR_OK, error);
-        check(IR_OpenFrames(IR_RAW_REPLAY, unknownSavedPath.c_str(), 0, &geometry,
+        check(IR_OpenFrames(IR_RAW_REPLAY, unknownSavedPath.c_str(), 0, &sourceInfo,
                             error, sizeof error) == IR_OK, error);
-        check(geometry.valid_bits == 0, "saved unknown valid bits");
+        check(sourceInfo.geometry.valid_bits == 0, "saved unknown valid bits");
         check(IR_CloseFrames(error, sizeof error) == IR_OK, error);
 
         open(outputPath);
@@ -178,9 +242,10 @@ int main()
         IR_RequestStop();
         uint16_t pixels[4]{};
         IRFrameStamp stamp{};
-        int32_t completed{};
-        check(IR_ReadFrames(1, 0, pixels, 4, &stamp, 1, &completed,
-                            error, sizeof error) == IR_CANCELLED && completed == 0,
+        IRFrameBatchView cancelledBatch{{pixels, sizeof pixels, IR_TYPE_U16, 2, 2, 1},
+                                        12, &stamp, 1};
+        check(IR_ReadFrames(0, &cancelledBatch, error, sizeof error) == IR_CANCELLED &&
+              cancelledBatch.pixels.frames == 0,
               "cancel read");
         check(IR_CloseFrames(error, sizeof error) == IR_OK, error);
         return 0;

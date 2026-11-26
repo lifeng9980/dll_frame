@@ -247,7 +247,7 @@ extern "C" IR_STATION_API int32_t IR_WaitBlackbodyStable(
     IRHandle handle, double target_c, double tolerance_c,
     int32_t stable_window_ms, int32_t timeout_ms, int32_t require_device_stable,
     IRBlackbodyReading *reading, char *err, int32_t err_bytes)
-{
+noexcept{
     if (reading) *reading = IRBlackbodyReading{};
     return ir::api::guarded(err, err_bytes, [&] {
         ir::api::require(handle != 0, IR_INVALID_HANDLE, "Invalid blackbody handle");
@@ -270,7 +270,7 @@ extern "C" IR_STATION_API int32_t IR_WaitOvenStable(
     IRHandle handle, double target_c, double tolerance_c,
     int32_t stable_window_ms, int32_t timeout_ms, int32_t require_no_alarm,
     IROvenReading *reading, char *err, int32_t err_bytes)
-{
+noexcept{
     if (reading) *reading = IROvenReading{};
     return ir::api::guarded(err, err_bytes, [&] {
         ir::api::require(handle != 0, IR_INVALID_HANDLE, "Invalid oven handle");
@@ -293,7 +293,7 @@ extern "C" IR_STATION_API int32_t IR_WaitPowerCurrentStable(
     IRHandle handle, int32_t channel,
     const IRPowerCurrentStableSpec *spec, IRPowerReading *reading,
     char *err, int32_t err_bytes)
-{
+noexcept{
     if (reading) *reading = IRPowerReading{};
     return ir::api::guarded(err, err_bytes, [&] {
         ir::api::require(handle != 0, IR_INVALID_HANDLE, "Invalid power handle");

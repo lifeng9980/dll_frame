@@ -5,7 +5,8 @@
 
 static int check_abi_sizes(void)
 {
-    if (sizeof(IRCalcParameters) != 80 ||
+    if (sizeof(IRArrayView) != 32 ||
+        sizeof(IRCalcParameters) != 80 ||
         sizeof(IRGbCriteria) != 56 ||
         sizeof(IRGbBadPixelSummary) != 104 ||
         sizeof(IRGbSummary) != 264 ||
@@ -25,7 +26,7 @@ static int check_abi_sizes(void)
     }
     if (sizeof(void *) == 8) {
         if (sizeof(IRNoise3DCalibOutputs) != 64 ||
-            sizeof(IRNoise3DComputeOutputs) != 120 ||
+            sizeof(IRNoise3DComputeOutputs) != 104 ||
             sizeof(IRGbBadPixelMasks) != 64 ||
             sizeof(IRGjbBadPixelMasks) != 64) {
             fprintf(stderr, "Unexpected x64 pointer struct size in IR_analysis.h\n");
@@ -67,11 +68,40 @@ int main(void)
     double v1_map[4] = {0};
     double vn_map[4] = {0};
     double stats_summary[2] = {0};
-    int32_t status = IR_FrameStatisticsU16(
-        t1_frames, 8, 2, 2, 2, 0,
+    const IRArrayView t1_view = {t1_frames, sizeof t1_frames, IR_TYPE_U16, 2, 2, 2};
+    int32_t status = IR_FrameStatistics(
+        &t1_view, 0,
         v1_map, vn_map, 4, stats_summary, 2, err, (int32_t)sizeof err);
     if (status != IR_OK || fabs(vn_map[0] - 4.0) > 1e-12) {
-        fprintf(stderr, "IR_FrameStatisticsU16 failed: status=%d err=%s\n", status, err);
+        fprintf(stderr, "IR_FrameStatistics failed: status=%d err=%s\n", status, err);
+        return 1;
+    }
+
+    const uint32_t wide_frames[8] = {
+        70000, 70000, 70000, 70000,
+        70002, 70002, 70002, 70002
+    };
+    const IRArrayView wide_view = {wide_frames, sizeof wide_frames, IR_TYPE_U32, 2, 2, 2};
+    double wide_mean[4] = {0}, wide_std[4] = {0}, wide_summary[2] = {0};
+    status = IR_FrameStatistics(&wide_view, 0, wide_mean, wide_std, 4,
+                                wide_summary, 2, err, (int32_t)sizeof err);
+    if (status != IR_OK || fabs(wide_mean[0] - 70001.0) > 1e-12 ||
+        fabs(wide_std[0] - 1.0) > 1e-12) {
+        fprintf(stderr, "IR_FrameStatistics U32 failed: status=%d err=%s\n", status, err);
+        return 1;
+    }
+    IRArrayView short_view = wide_view;
+    short_view.byte_size -= sizeof(uint32_t);
+    if (IR_FrameStatistics(&short_view, 0, wide_mean, wide_std, 4,
+                           wide_summary, 2, err, (int32_t)sizeof err) != IR_BUFFER_TOO_SMALL) {
+        fprintf(stderr, "IR_FrameStatistics accepted a short input buffer\n");
+        return 1;
+    }
+    IRArrayView unsupported_view = wide_view;
+    unsupported_view.data_type = IR_TYPE_F64;
+    if (IR_FrameStatistics(&unsupported_view, 0, wide_mean, wide_std, 4,
+                           wide_summary, 2, err, (int32_t)sizeof err) != IR_UNSUPPORTED) {
+        fprintf(stderr, "IR_FrameStatistics accepted an unsupported input type\n");
         return 1;
     }
 
@@ -129,6 +159,7 @@ int main(void)
     }
 
     const uint16_t n3d_frames[8] = {10, 20, 30, 40, 14, 22, 38, 42};
+    const IRArrayView n3d_view = {n3d_frames, sizeof n3d_frames, IR_TYPE_U16, 2, 2, 2};
     const IRNoise3DComputeParams compute_params = {IR_NOISE3D_MODE_ORG, 1, 4, 0, 0.0, -999.0};
     double scalars[IR_NOISE3D_SCALAR_COUNT] = {0};
     double hist[IR_NOISE3D_HIST_GROUP_COUNT * 4] = {0};
@@ -148,7 +179,7 @@ int main(void)
     compute_out.scalars_capacity = IR_NOISE3D_SCALAR_COUNT;
     compute_out.hist_meta_capacity = IR_NOISE3D_HIST_GROUP_COUNT * 3;
 
-    status = IR_Noise3DComputeFramesDn(n3d_frames, 8, 2, 2, 2,
+    status = IR_Noise3DComputeFramesDn(&n3d_view,
                                        total_blind, 4, NULL, NULL, 0,
                                        &compute_params, &compute_out,
                                        err, (int32_t)sizeof err);
@@ -185,11 +216,12 @@ int main(void)
     }
 
     double mean15[225] = {0}, vn15[225] = {0}, nuc_stat_sum[2] = {0};
-    status = IR_FrameStatisticsNucU16(burst_frames, 450, 2, 15, 15, 0,
-                                     k15, b15, NULL, NULL, mean15, vn15, 225,
-                                     nuc_stat_sum, 2, err, (int32_t)sizeof err);
+    const IRArrayView burst_view = {burst_frames, sizeof burst_frames, IR_TYPE_U16, 15, 15, 2};
+    status = IR_FrameStatisticsNuc(&burst_view, 0, k15, b15, NULL, NULL,
+                                   mean15, vn15, 225, nuc_stat_sum, 2,
+                                   err, (int32_t)sizeof err);
     if (status != IR_OK || fabs(mean15[0] - 30100.0) > 1e-12 || fabs(vn15[0] - 1.0) > 1e-12) {
-        fprintf(stderr, "IR_FrameStatisticsNucU16 failed: status=%d err=%s\n", status, err);
+        fprintf(stderr, "IR_FrameStatisticsNuc failed: status=%d err=%s\n", status, err);
         return 1;
     }
 
@@ -259,12 +291,13 @@ int main(void)
         ch_frames[t * 4 + 3] = c1;
     }
     double ch_freqs[5] = {0}, ch_series[16] = {0}, ch_amps[10] = {0}, ch_means[2] = {0}, ch_stds[2] = {0};
-    status = IR_ChannelSpectrumU16(ch_frames, 32, 8, 2, 2, IR_SPECTRUM_AXIS_COLUMNS, 2,
-                                  80.0, IR_WINDOW_RECTANGULAR,
-                                  ch_freqs, 5, ch_series, 16, ch_amps, 10,
-                                  ch_means, ch_stds, 2, err, (int32_t)sizeof err);
+    const IRArrayView channel_view = {ch_frames, sizeof ch_frames, IR_TYPE_U16, 2, 2, 8};
+    status = IR_ChannelSpectrum(&channel_view, IR_SPECTRUM_AXIS_COLUMNS, 2,
+                                80.0, IR_WINDOW_RECTANGULAR,
+                                ch_freqs, 5, ch_series, 16, ch_amps, 10,
+                                ch_means, ch_stds, 2, err, (int32_t)sizeof err);
     if (status != IR_OK || fabs(ch_amps[1] - 100.0) > 1.5 || fabs(ch_amps[5 + 1]) > 1e-9) {
-        fprintf(stderr, "IR_ChannelSpectrumU16 failed: status=%d err=%s\n", status, err);
+        fprintf(stderr, "IR_ChannelSpectrum failed: status=%d err=%s\n", status, err);
         return 1;
     }
     const int fft_ok = 1;
@@ -298,11 +331,12 @@ int main(void)
     };
     IRFlickerSummary flick = {0};
     uint8_t flick_mask[4] = {0};
-    status = IR_FlickerDetectU16(flick_frames, 16, 4, 1, 4, NULL, NULL, NULL,
-                                 1.5, 2, &flick, NULL, flick_mask, 4,
-                                 NULL, NULL, 0, err, (int32_t)sizeof err);
+    const IRArrayView flick_view = {flick_frames, sizeof flick_frames, IR_TYPE_U16, 4, 1, 4};
+    status = IR_FlickerDetect(&flick_view, NULL, NULL, NULL,
+                              1.5, 2, &flick, NULL, flick_mask, 4,
+                              NULL, NULL, 0, err, (int32_t)sizeof err);
     if (status != IR_OK || flick.flicker_count != 1 || flick_mask[3] != 1) {
-        fprintf(stderr, "IR_FlickerDetectU16 failed: status=%d err=%s\n", status, err);
+        fprintf(stderr, "IR_FlickerDetect failed: status=%d err=%s\n", status, err);
         return 1;
     }
     const int flicker_ok = 1;
@@ -331,20 +365,29 @@ int main(void)
     const int fft2d_ok = 1;
 
     const uint16_t roi_frames[] = {20, 40, 60, 80, 22, 42, 62, 82};
+    const IRArrayView roi_view = {roi_frames, sizeof roi_frames, IR_TYPE_U16, 2, 2, 2};
     double roi_mean = 0.0;
-    status = IR_ROIMeanU16(roi_frames, 8, 2, 2, 2, 0, 0, 1, 2, &roi_mean, err, (int32_t)sizeof err);
+    status = IR_ROIMean(&roi_view, 0, 0, 1, 2, &roi_mean, err, (int32_t)sizeof err);
     if (status != IR_OK || fabs(roi_mean - 41.0) > 1e-12) {
-        fprintf(stderr, "IR_ROIMeanU16 left ROI failed: status=%d mean=%.17g err=%s\n", status, roi_mean, err);
+        fprintf(stderr, "IR_ROIMean left ROI failed: status=%d mean=%.17g err=%s\n", status, roi_mean, err);
         return 1;
     }
-    status = IR_ROIMeanU16(roi_frames, 8, 2, 2, 2, 0, 0, 2, 2, &roi_mean, err, (int32_t)sizeof err);
+    status = IR_ROIMean(&roi_view, 0, 0, 2, 2, &roi_mean, err, (int32_t)sizeof err);
     if (status != IR_OK || fabs(roi_mean - 51.0) > 1e-12) {
-        fprintf(stderr, "IR_ROIMeanU16 full image failed: status=%d mean=%.17g err=%s\n", status, roi_mean, err);
+        fprintf(stderr, "IR_ROIMean full image failed: status=%d mean=%.17g err=%s\n", status, roi_mean, err);
         return 1;
     }
-    status = IR_ROIMeanU16(roi_frames, 8, 2, 2, 2, 1, 0, 2, 1, &roi_mean, err, (int32_t)sizeof err);
+    status = IR_ROIMean(&roi_view, 1, 0, 2, 1, &roi_mean, err, (int32_t)sizeof err);
     if (status != IR_BAD_ARGUMENT) {
-        fprintf(stderr, "IR_ROIMeanU16 outside ROI should be rejected, got status=%d\n", status);
+        fprintf(stderr, "IR_ROIMean outside ROI should be rejected, got status=%d\n", status);
+        return 1;
+    }
+
+    const uint32_t roi20_frames[] = {70000, 80000, 90000, 100000, 71000, 81000, 91000, 101000};
+    const IRArrayView roi20_view = {roi20_frames, sizeof roi20_frames, IR_TYPE_U32, 2, 2, 2};
+    status = IR_ROIMean(&roi20_view, 0, 0, 1, 2, &roi_mean, err, (int32_t)sizeof err);
+    if (status != IR_OK || fabs(roi_mean - 80500.0) > 1e-12) {
+        fprintf(stderr, "IR_ROIMean U32 failed: status=%d mean=%.17g err=%s\n", status, roi_mean, err);
         return 1;
     }
 

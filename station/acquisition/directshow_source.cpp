@@ -59,17 +59,18 @@ struct ISampleGrabber : IUnknown {
 
 std::string hresultText(HRESULT result)
 {
-    char *systemMessage = nullptr;
-    FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
-                       FORMAT_MESSAGE_IGNORE_INSERTS,
-                   nullptr, static_cast<DWORD>(result), 0,
-                   reinterpret_cast<char *>(&systemMessage), 0, nullptr);
+    wchar_t systemMessage[512]{};
+    const DWORD length = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr, static_cast<DWORD>(result), 0, systemMessage, 512, nullptr);
     std::ostringstream text;
     text << "HRESULT=0x" << std::hex << std::uppercase
          << static_cast<unsigned long>(result);
-    if (systemMessage) {
-        text << ": " << systemMessage;
-        LocalFree(systemMessage);
+    if (length != 0) {
+        char utf8[sizeof(systemMessage) * 2]{};
+        const int bytes = WideCharToMultiByte(CP_UTF8, 0, systemMessage, static_cast<int>(length),
+                                             utf8, sizeof utf8, nullptr, nullptr);
+        if (bytes > 0)
+            text << ": " << std::string_view(utf8, static_cast<size_t>(bytes));
     }
     return text.str();
 }
@@ -304,7 +305,7 @@ public:
         running_ = true;
     }
 
-    void read(uint16_t *pixels, IRFrameStamp &stamp, int timeoutMs) override
+    void read(void *pixels, IRFrameStamp &stamp, int timeoutMs) override
     {
         require(running_, IR_BAD_ARGUMENT, "Start DirectShow capture before reading frames");
         const auto deadline = std::chrono::steady_clock::now() +

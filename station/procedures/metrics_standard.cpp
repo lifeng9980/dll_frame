@@ -58,15 +58,18 @@ PreparedMetric prepGbEvaluate(const std::string &name, const Json &inputs, const
             checkMapSize(v1, n, g, "gb_evaluate.v1_map");
             checkMapSize(v2, n, g, "gb_evaluate.v2_map");
             checkMapSize(vn, n, g, "gb_evaluate.vn_map");
+            const auto validBytes = validOut.empty() ? 0 : slotAllocationBytes(ctx.masks, validOut, n);
+            const auto badBytes = badOut.empty() ? 0 : slotAllocationBytes(ctx.masks, badOut, n);
+            requireAdditionalBytes(runCtx, addBytes(validBytes, badBytes));
             std::optional<SlotBufferWriter<ByteMask>> validWriter, badWriter;
             IRGbBadPixelMasks masks{};
             masks.pixel_capacity = n;
             if (!validOut.empty()) {
-                validWriter.emplace(ctx.masks, validOut, g, n, validOut != badOut, true);
+                validWriter.emplace(ctx.masks, validOut, g, n, true);
                 masks.valid_mask = validWriter->data();
             }
             if (!badOut.empty()) {
-                badWriter.emplace(ctx.masks, badOut, g, n, badOut != validOut, true);
+                badWriter.emplace(ctx.masks, badOut, g, n, true);
                 masks.total_bad_mask = badWriter->data();
             }
             IRGbSummary gb{};
@@ -74,8 +77,6 @@ PreparedMetric prepGbEvaluate(const std::string &name, const Json &inputs, const
             checkStatus(IR_GbEvaluateMaps(v1.data.data(), v2.data.data(), vn.data.data(),
                 g.height, g.width, n, &cp, &crit, &gb,
                 (!validOut.empty() || !badOut.empty()) ? &masks : nullptr, err, sizeof err), err);
-            if (validWriter) validWriter->commit();
-            if (badWriter) badWriter->commit();
             recordScalarOutputs(ctx, name, outs, {
                 gb.before_avg_snr, gb.after_avg_netd_mk, gb.after_response_nonuniformity_pct,
                 double(gb.bad_pixels.total_bad_count), gb.bad_pixels.total_bad_rate_pct,
@@ -143,15 +144,20 @@ PreparedMetric prepGjbEvaluate(const std::string &name, const Json &inputs, cons
             checkMapSize(vn, n, g, "gjb_evaluate.vn_map");
             checkMapSize(vm, n, g, "gjb_evaluate.vm_map");
 
+            const auto validBytes = validOut.empty() ? 0 : slotAllocationBytes(ctx.masks, validOut, n);
+            const auto badBytes = badOut.empty() ? 0 : slotAllocationBytes(ctx.masks, badOut, n);
+            const auto ctxBytes = !ctxOut.empty() && !ctx.driftContexts.contains(ctxOut)
+                ? sizeof(IRGjbDriftContext) : 0;
+            requireAdditionalBytes(runCtx, addBytes(addBytes(validBytes, badBytes), ctxBytes));
             std::optional<SlotBufferWriter<ByteMask>> validWriter, badWriter;
             IRGjbBadPixelMasks masks{};
             masks.pixel_capacity = n;
             if (!validOut.empty()) {
-                validWriter.emplace(ctx.masks, validOut, g, n, validOut != badOut, true);
+                validWriter.emplace(ctx.masks, validOut, g, n, true);
                 masks.valid_mask = validWriter->data();
             }
             if (!badOut.empty()) {
-                badWriter.emplace(ctx.masks, badOut, g, n, badOut != validOut, true);
+                badWriter.emplace(ctx.masks, badOut, g, n, true);
                 masks.total_bad_mask = badWriter->data();
             }
             IRGjbSummary gjb{};
@@ -159,8 +165,6 @@ PreparedMetric prepGjbEvaluate(const std::string &name, const Json &inputs, cons
             checkStatus(IR_GjbEvaluateMaps(v1.data.data(), v2.data.data(), vn.data.data(), vm.data.data(),
                 g.height, g.width, n, &cp, &crit, &gjb,
                 (!validOut.empty() || !badOut.empty()) ? &masks : nullptr, err, sizeof err), err);
-            if (validWriter) validWriter->commit();
-            if (badWriter) badWriter->commit();
             if (!ctxOut.empty()) {
                 IRGjbDriftContext dctx{};
                 dctx.volts_per_count = gjb.volts_per_count;
@@ -352,12 +356,18 @@ PreparedMetric prepNoise3dCompute(const std::string &name, const Json &inputs, c
             }
 
             const int32_t frameCount = int32_t(b.stamps.size());
+            const auto histSize = static_cast<size_t>(IR_NOISE3D_HIST_GROUP_COUNT) * histInterval;
+            constexpr size_t histMetaSize = IR_NOISE3D_HIST_GROUP_COUNT * 3;
+            const auto mapTISize = static_cast<size_t>(frameCount) * g.height;
+            const auto mapTJSize = static_cast<size_t>(frameCount) * g.width;
+            requireAdditionalBytes(runCtx, multiplyBytes(
+                histSize + histMetaSize + static_cast<size_t>(n) + mapTISize + mapTJSize, sizeof(double)));
             double scalars[IR_NOISE3D_SCALAR_COUNT]{};
-            std::vector<double> hist(static_cast<size_t>(IR_NOISE3D_HIST_GROUP_COUNT) * histInterval);
-            std::vector<double> histMeta(static_cast<size_t>(IR_NOISE3D_HIST_GROUP_COUNT) * 3);
+            std::vector<double> hist(histSize);
+            std::vector<double> histMeta(histMetaSize);
             std::vector<double> mapIJ(static_cast<size_t>(n));
-            std::vector<double> mapTI(static_cast<size_t>(frameCount) * g.height);
-            std::vector<double> mapTJ(static_cast<size_t>(frameCount) * g.width);
+            std::vector<double> mapTI(mapTISize);
+            std::vector<double> mapTJ(mapTJSize);
 
             IRNoise3DComputeOutputs out{};
             out.scalars = scalars;
@@ -375,8 +385,9 @@ PreparedMetric prepNoise3dCompute(const std::string &name, const Json &inputs, c
 
             const IRNoise3DComputeParams cp{mode, threadCount, histInterval, 0, resolvedBAvg, invalidFill};
             char err[1024]{};
-            checkStatus(IR_Noise3DComputeFramesDn(b.pixels.data(), int64_t(b.pixels.size()),
-                frameCount, g.height, g.width, blind.data.data(), n, kPtr, bPtr, kPtr ? n : 0,
+            const IRArrayView input = frameBatchArrayView(b);
+            checkStatus(IR_Noise3DComputeFramesDn(&input,
+                blind.data.data(), n, kPtr, bPtr, kPtr ? n : 0,
                 &cp, &out, err, sizeof err), err);
             recordScalarOutputs(ctx, name, outs, {
                 scalars[IR_NOISE3D_SCALAR_DELTA_T],
@@ -429,14 +440,17 @@ PreparedMetric prepChannelSpectrum(const std::string &name, const Json &inputs, 
             const auto &b = getBatch(ctx, framesSlot);
             const auto g = b.geometry;
             const int32_t frameCount = int32_t(b.stamps.size());
+            const IRArrayView input = frameBatchArrayView(b);
             const int32_t bins = frameCount / 2 + 1;
+            const auto ampCount = static_cast<size_t>(channels) * bins;
+            requireAdditionalBytes(runCtx, multiplyBytes(
+                static_cast<size_t>(bins) + ampCount + static_cast<size_t>(channels) * 2, sizeof(double)));
             std::vector<double> freqs(static_cast<size_t>(bins));
-            std::vector<double> amps(static_cast<size_t>(channels) * bins);
+            std::vector<double> amps(ampCount);
             std::vector<double> tMeans(static_cast<size_t>(channels));
             std::vector<double> tStds(static_cast<size_t>(channels));
             char err[1024]{};
-            checkStatus(IR_ChannelSpectrumU16(b.pixels.data(), int64_t(b.pixels.size()),
-                frameCount, g.height, g.width, axis, channels, fsHz, winKind,
+            checkStatus(IR_ChannelSpectrum(&input, axis, channels, fsHz, winKind,
                 freqs.data(), bins, nullptr, 0, amps.data(), int64_t(amps.size()),
                 tMeans.data(), tStds.data(), channels, err, sizeof err), err);
             int32_t bestK = 0;
@@ -485,6 +499,7 @@ PreparedMetric prepFlickerDetect(const std::string &name, const Json &inputs, co
             ExecutionContext &ctx = runCtx.ctx;
             const auto &b = getBatch(ctx, framesSlot);
             const auto g = b.geometry;
+            const IRArrayView input = frameBatchArrayView(b);
             const auto n = pixels(g.height, g.width);
             const double *kPtr = nullptr;
             const double *bPtr = nullptr;
@@ -505,18 +520,16 @@ PreparedMetric prepFlickerDetect(const std::string &name, const Json &inputs, co
             std::optional<SlotBufferWriter<ByteMask>> outWriter;
             uint8_t *outMaskPtr = nullptr;
             if (!flickerOut.empty()) {
-                outWriter.emplace(ctx.masks, flickerOut, g, n, flickerOut != maskSlot);
+                requireAdditionalBytes(runCtx, slotAllocationBytes(ctx.masks, flickerOut, n));
+                outWriter.emplace(ctx.masks, flickerOut, g, n);
                 outMaskPtr = outWriter->data();
             }
             IRFlickerSummary summary{};
             char err[1024]{};
-            checkStatus(IR_FlickerDetectU16(b.pixels.data(), int64_t(b.pixels.size()),
-                int32_t(b.stamps.size()), g.height, g.width,
+            checkStatus(IR_FlickerDetect(&input,
                 kPtr, bPtr, maskPtr, mult, exceedThresh,
                 &summary, nullptr, outMaskPtr, n, nullptr, nullptr, 0,
                 err, sizeof err), err);
-            if (outWriter)
-                outWriter->commit();
             recordScalarOutputs(ctx, name, outs, {
                 static_cast<double>(summary.flicker_count),
                 static_cast<double>(summary.valid_pixel_count),
@@ -567,15 +580,18 @@ PreparedMetric prepFft2d(const std::string &name, const Json &inputs, const Json
                 checkMaskSize(vm, n, g, "fft2d.valid_mask");
                 maskPtr = vm.data.data();
             }
+            const auto magBytes = magOut.empty() ? 0 : slotAllocationBytes(ctx.maps, magOut, n);
+            const auto pwrBytes = pwrOut.empty() ? 0 : slotAllocationBytes(ctx.maps, pwrOut, n);
+            requireAdditionalBytes(runCtx, addBytes(magBytes, pwrBytes));
             std::optional<SlotBufferWriter<DoubleMap>> magWriter, pwrWriter;
             double *magPtr = nullptr;
             double *pwrPtr = nullptr;
             if (!magOut.empty()) {
-                magWriter.emplace(ctx.maps, magOut, g, n, magOut != mapSlot && magOut != pwrOut);
+                magWriter.emplace(ctx.maps, magOut, g, n);
                 magPtr = magWriter->data();
             }
             if (!pwrOut.empty()) {
-                pwrWriter.emplace(ctx.maps, pwrOut, g, n, pwrOut != mapSlot && pwrOut != magOut);
+                pwrWriter.emplace(ctx.maps, pwrOut, g, n);
                 pwrPtr = pwrWriter->data();
             }
             IRFft2dSummary summary{};
@@ -583,10 +599,6 @@ PreparedMetric prepFft2d(const std::string &name, const Json &inputs, const Json
             checkStatus(IR_Fft2dMagnitudeF64(m.data.data(), maskPtr, g.height, g.width, n,
                 winKind, detrend ? 1 : 0, shiftDc ? 1 : 0,
                 &summary, magPtr, pwrPtr, err, sizeof err), err);
-            if (magWriter)
-                magWriter->commit();
-            if (pwrWriter)
-                pwrWriter->commit();
             recordScalarOutputs(ctx, name, outs, {
                 summary.dc_magnitude,
                 summary.peak_ac_magnitude,

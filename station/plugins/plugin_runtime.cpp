@@ -9,6 +9,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <set>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -225,6 +226,12 @@ int32_t toAbiSlotKind(ir::procedures::recipe::SlotKind kind) noexcept
     return 0;
 }
 
+extern "C" {
+static int32_t cbRequireInputSlot(void *, const char *, int32_t, int32_t, int32_t *) noexcept;
+static int32_t cbBindOutputSlot(void *, const char *, int32_t, int32_t, int32_t *) noexcept;
+static int32_t cbDeclareScalarOutput(void *, const char *, const char *) noexcept;
+}
+
 class PrepareCallbackBridge {
 public:
     PrepareCallbackBridge(const LoadedMetricPlugin &plugin,
@@ -236,6 +243,8 @@ public:
           inputsJson_(inputsJson),
           outputsJson_(outputsJson),
           knownSlots_(knownSlots),
+          inputSlots_(knownSlots),
+          outputSlots_(knownSlots),
           stepPath_(stepPath)
     {
         vtable_.prepare_ctx = this;
@@ -276,35 +285,22 @@ public:
                              stepPath_ + ".outputs contains unexpected key '" + key +
                                  "' for plugin " + plugin_.methodName);
         }
+        for (const auto &outputBinding : binding_.outputs) {
+            const auto &output = outputBinding.second;
+            for (const auto &[inputKey, input] : binding_.inputs) {
+                ir::api::require(output.first != input.first, IR_BAD_ARGUMENT,
+                                 stepPath_ + ".outputs slot '" + output.first +
+                                     "' aliases input '" + inputKey + "' in the same plugin step");
+            }
+        }
+        knownSlots_ = std::move(outputSlots_);
         return std::move(binding_);
     }
 
 private:
-    static PrepareCallbackBridge *self(void *ctx) noexcept
-    {
-        return static_cast<PrepareCallbackBridge *>(ctx);
-    }
-
-    static int32_t cbRequireInputSlot(void *ctx, const char *inputKey, int32_t expectedSlotKind,
-                                      int32_t required, int32_t *outIsBound) noexcept
-    {
-        if (!ctx) return IR_NULL_POINTER;
-        return self(ctx)->handleRequireInputSlot(inputKey, expectedSlotKind, required, outIsBound);
-    }
-
-    static int32_t cbBindOutputSlot(void *ctx, const char *outputKey, int32_t slotKind,
-                                    int32_t required, int32_t *outIsBound) noexcept
-    {
-        if (!ctx) return IR_NULL_POINTER;
-        return self(ctx)->handleBindOutputSlot(outputKey, slotKind, required, outIsBound);
-    }
-
-    static int32_t cbDeclareScalarOutput(void *ctx, const char *suffixUtf8,
-                                         const char *unitUtf8) noexcept
-    {
-        if (!ctx) return IR_NULL_POINTER;
-        return self(ctx)->handleDeclareScalarOutput(suffixUtf8, unitUtf8);
-    }
+    friend int32_t cbRequireInputSlot(void *, const char *, int32_t, int32_t, int32_t *) noexcept;
+    friend int32_t cbBindOutputSlot(void *, const char *, int32_t, int32_t, int32_t *) noexcept;
+    friend int32_t cbDeclareScalarOutput(void *, const char *, const char *) noexcept;
 
     int32_t recordCallbackError(int32_t code, const std::string &msg) noexcept
     {
@@ -313,9 +309,10 @@ private:
 
     int32_t recordCallbackError(int32_t code, const char *msg) noexcept
     {
-        if (firstCallbackErrorCode_ == IR_OK)
+        if (firstCallbackErrorCode_ == IR_OK) {
             firstCallbackErrorCode_ = code;
-        ir::api::copyText(lastError_, sizeof(lastError_), msg ? msg : "Plugin prepare callback failed");
+            ir::api::copyText(lastError_, sizeof(lastError_), msg ? msg : "Plugin prepare callback failed");
+        }
         return code;
     }
 
@@ -332,8 +329,8 @@ private:
         try {
             queriedInputs_.insert(inputKey);
             std::string slotName = (required != 0)
-                ? ir::procedures::recipe::requireInputSlot(inputsJson_, inputKey, slotKind, knownSlots_, stepPath_)
-                : ir::procedures::recipe::optionalInputSlot(inputsJson_, inputKey, slotKind, knownSlots_, stepPath_);
+                ? ir::procedures::recipe::requireInputSlot(inputsJson_, inputKey, slotKind, inputSlots_, stepPath_)
+                : ir::procedures::recipe::optionalInputSlot(inputsJson_, inputKey, slotKind, inputSlots_, stepPath_);
             if (!slotName.empty()) {
                 binding_.inputs.emplace(std::string(inputKey), std::make_pair(std::move(slotName), slotKind));
                 if (outIsBound) *outIsBound = 1;
@@ -364,7 +361,7 @@ private:
         try {
             queriedOutputs_.insert(outputKey);
             std::string slotName = ir::procedures::recipe::bindOutputSlot(
-                outputsJson_, outputKey, kind, required != 0, knownSlots_, stepPath_);
+                outputsJson_, outputKey, kind, required != 0, outputSlots_, stepPath_);
             if (!slotName.empty()) {
                 if (!boundOutputSlotNames_.insert(slotName).second) {
                     return recordCallbackError(
@@ -415,6 +412,8 @@ private:
     const ir::procedures::recipe::Json &inputsJson_;
     const ir::procedures::recipe::Json &outputsJson_;
     std::map<std::string, ir::procedures::recipe::SlotKind> &knownSlots_;
+    std::map<std::string, ir::procedures::recipe::SlotKind> inputSlots_;
+    std::map<std::string, ir::procedures::recipe::SlotKind> outputSlots_;
     const std::string &stepPath_;
     PluginStepBinding binding_;
     std::set<std::string> queriedInputs_;
@@ -425,6 +424,38 @@ private:
     char lastError_[1024]{};
     IRPrepareCallbacks vtable_{};
 };
+
+extern "C" {
+static int32_t cbRequireInputSlot(void *ctx, const char *inputKey, int32_t expectedSlotKind,
+                                  int32_t required, int32_t *outIsBound) noexcept
+{
+    if (!ctx) return IR_NULL_POINTER;
+    return static_cast<PrepareCallbackBridge *>(ctx)->handleRequireInputSlot(
+        inputKey, expectedSlotKind, required, outIsBound);
+}
+
+static int32_t cbBindOutputSlot(void *ctx, const char *outputKey, int32_t slotKind,
+                                int32_t required, int32_t *outIsBound) noexcept
+{
+    if (!ctx) return IR_NULL_POINTER;
+    return static_cast<PrepareCallbackBridge *>(ctx)->handleBindOutputSlot(
+        outputKey, slotKind, required, outIsBound);
+}
+
+static int32_t cbDeclareScalarOutput(void *ctx, const char *suffixUtf8, const char *unitUtf8) noexcept
+{
+    if (!ctx) return IR_NULL_POINTER;
+    return static_cast<PrepareCallbackBridge *>(ctx)->handleDeclareScalarOutput(suffixUtf8, unitUtf8);
+}
+
+static int32_t cbHasSlot(void *, const char *) noexcept;
+static int32_t cbGetSlot(void *, const char *, IRSlotView *) noexcept;
+static int32_t cbAllocDoubleMap(void *, const char *, int32_t, int32_t, double **) noexcept;
+static int32_t cbAllocByteMask(void *, const char *, int32_t, int32_t, uint8_t **) noexcept;
+static int32_t cbEmitScalar(void *, const char *, double) noexcept;
+static int32_t cbIsCancelled(void *) noexcept;
+static void cbLogMessage(void *, int32_t, const char *) noexcept;
+}
 
 class HostCallbackBridge {
 public:
@@ -466,12 +497,18 @@ public:
                 : "Measurement or acquisition cancelled";
             throw ir::api::Error(IR_CANCELLED, msg);
         }
+        if (firstCallbackErrorCode_ != IR_OK) {
+            const std::string msg = lastError_[0] != '\0'
+                ? std::string(lastError_)
+                : "Plugin ignored a failed host callback";
+            throw ir::api::Error(firstCallbackErrorCode_, msg);
+        }
         if (st != IR_OK) {
-            std::string msg = errBuf[0] != '\0'
+            const std::string msg = errBuf[0] != '\0'
                 ? std::string(errBuf)
                 : (lastError_[0] != '\0' ? std::string(lastError_)
                                          : ("Plugin execute() failed: " + plugin_.methodName));
-            throw ir::api::Error(st, std::move(msg));
+            throw ir::api::Error(st, msg);
         }
 
         for (const auto &[outKey, _] : binding_.outputs) {
@@ -494,66 +531,25 @@ public:
     }
 
 private:
-    static HostCallbackBridge *self(void *ctx) noexcept
-    {
-        return static_cast<HostCallbackBridge *>(ctx);
-    }
-
-    static int32_t cbHasSlot(void *ctx, const char *ioKey) noexcept
-    {
-        return ctx ? self(ctx)->handleHasSlot(ioKey) : 0;
-    }
-
-    static int32_t cbGetSlot(void *ctx, const char *inputKey, IRSlotView *outView) noexcept
-    {
-        return ctx ? self(ctx)->handleGetSlot(inputKey, outView) : IR_NULL_POINTER;
-    }
-
-    static int32_t cbAllocDoubleMap(void *ctx, const char *outputKey,
-                                    int32_t width, int32_t height, double **outData) noexcept
-    {
-        return ctx ? self(ctx)->handleAllocDoubleMap(outputKey, width, height, outData)
-                   : IR_NULL_POINTER;
-    }
-
-    static int32_t cbAllocByteMask(void *ctx, const char *outputKey,
-                                   int32_t width, int32_t height, uint8_t **outData) noexcept
-    {
-        return ctx ? self(ctx)->handleAllocByteMask(outputKey, width, height, outData)
-                   : IR_NULL_POINTER;
-    }
-
-    static int32_t cbEmitScalar(void *ctx, const char *suffixUtf8, double value) noexcept
-    {
-        return ctx ? self(ctx)->handleEmitScalar(suffixUtf8, value) : IR_NULL_POINTER;
-    }
-
-    static int32_t cbIsCancelled(void *ctx) noexcept
-    {
-        return ctx ? self(ctx)->handleIsCancelled() : 0;
-    }
-
-    static void cbLogMessage(void *, int32_t level, const char *messageUtf8) noexcept
-    {
-        if (!messageUtf8 || messageUtf8[0] == '\0')
-            return;
-        const char *tag = "INFO";
-        switch (level) {
-        case IR_PLUGIN_LOG_DEBUG: tag = "DEBUG"; break;
-        case IR_PLUGIN_LOG_INFO: tag = "INFO"; break;
-        case IR_PLUGIN_LOG_WARN: tag = "WARN"; break;
-        case IR_PLUGIN_LOG_ERROR: tag = "ERROR"; break;
-        default: break;
-        }
-        try {
-            std::fprintf(stderr, "[plugin][%s] %s\n", tag, messageUtf8);
-        } catch (...) {
-        }
-    }
+    friend int32_t cbHasSlot(void *, const char *) noexcept;
+    friend int32_t cbGetSlot(void *, const char *, IRSlotView *) noexcept;
+    friend int32_t cbAllocDoubleMap(void *, const char *, int32_t, int32_t, double **) noexcept;
+    friend int32_t cbAllocByteMask(void *, const char *, int32_t, int32_t, uint8_t **) noexcept;
+    friend int32_t cbEmitScalar(void *, const char *, double) noexcept;
+    friend int32_t cbIsCancelled(void *) noexcept;
 
     void setLastError(const char *msg) noexcept
     {
-        ir::api::copyText(lastError_, sizeof(lastError_), msg ? msg : "Host callback failed");
+        if (lastError_[0] == '\0')
+            ir::api::copyText(lastError_, sizeof(lastError_), msg ? msg : "Host callback failed");
+    }
+
+    void recordCallbackError(int32_t code) noexcept
+    {
+        if (firstCallbackErrorCode_ == IR_OK)
+            firstCallbackErrorCode_ = code;
+        if (lastError_[0] == '\0')
+            setLastError("Host callback failed");
     }
 
     bool cancelled() const noexcept
@@ -561,39 +557,18 @@ private:
         return runCtx_.isStopRequested && runCtx_.isStopRequested();
     }
 
-    bool isBoundInputSlot(const std::string &slotName, ir::procedures::recipe::SlotKind kind) const noexcept
-    {
-        for (const auto &[_, bound] : binding_.inputs) {
-            if (bound.first == slotName && bound.second == kind)
-                return true;
-        }
-        return false;
-    }
-
-    bool withinInflightBudget(uint64_t oldBytes, uint64_t newBytes) noexcept
-    {
-        try {
-            const uint64_t retained = runCtx_.ctx.retainedBytes();
-            const uint64_t adjustedRetained = (retained >= oldBytes) ? (retained - oldBytes) : 0;
-            const uint64_t base = ir::procedures::recipe::addBytes(runCtx_.inflightBaseBytes, adjustedRetained);
-            const uint64_t nextTotal = ir::procedures::recipe::addBytes(base, newBytes);
-            ir::procedures::recipe::requireWithinMemoryLimit(nextTotal, runCtx_.maxInflightBytes);
-            return true;
-        } catch (const ir::api::Error &e) {
-            setLastError(e.what());
-            return false;
-        } catch (...) {
-            setLastError("Failed evaluating plugin memory budget");
-            return false;
-        }
-    }
-
     int32_t handleHasSlot(const char *ioKey) noexcept
     {
         if (!isNonEmptyCString(ioKey))
             return 0;
-        return (binding_.inputs.find(ioKey) != binding_.inputs.end() ||
-                binding_.outputs.find(ioKey) != binding_.outputs.end()) ? 1 : 0;
+        try {
+            return (binding_.inputs.find(ioKey) != binding_.inputs.end() ||
+                    binding_.outputs.find(ioKey) != binding_.outputs.end()) ? 1 : 0;
+        } catch (...) {
+            setLastError("Unexpected error checking plugin slot");
+            recordCallbackError(IR_COMPUTATION_FAILED);
+            return 0;
+        }
     }
 
     int32_t handleGetSlot(const char *inputKey, IRSlotView *outView) noexcept
@@ -604,52 +579,52 @@ private:
         }
         *outView = IRSlotView{};
 
-        const auto it = binding_.inputs.find(inputKey);
-        if (it == binding_.inputs.end()) {
-            setLastError("get_slot: undeclared or unbound input_key");
-            return IR_BAD_ARGUMENT;
-        }
-        const std::string &slotName = it->second.first;
-        const auto kind = it->second.second;
-
         try {
+            const auto it = binding_.inputs.find(inputKey);
+            if (it == binding_.inputs.end()) {
+                setLastError("get_slot: undeclared or unbound input_key");
+                return IR_BAD_ARGUMENT;
+            }
+            const std::string &slotName = it->second.first;
+            const auto kind = it->second.second;
+
             outView->slot_kind = toAbiSlotKind(kind);
             switch (kind) {
             case ir::procedures::recipe::SlotKind::batch: {
                 const auto &batch = ir::procedures::recipe::getBatch(runCtx_.ctx, slotName);
-                outView->width = batch.geometry.width;
-                outView->height = batch.geometry.height;
-                outView->frames = static_cast<int32_t>(batch.stamps.size());
                 outView->valid_bits = batch.geometry.valid_bits;
-                outView->data = batch.pixels.data();
-                outView->byte_size = batch.pixels.size() * sizeof(uint16_t);
+                outView->array = ir::procedures::recipe::frameBatchArrayView(batch);
                 outView->stamps = batch.stamps.data();
                 return IR_OK;
             }
             case ir::procedures::recipe::SlotKind::double_map: {
                 const auto &map = ir::procedures::recipe::getMap(runCtx_.ctx, slotName);
-                outView->width = map.geometry.width;
-                outView->height = map.geometry.height;
-                outView->frames = 1;
-                outView->valid_bits = map.geometry.valid_bits;
-                outView->data = map.data.data();
-                outView->byte_size = map.data.size() * sizeof(double);
+                outView->array = IRArrayView{
+                    map.data.data(),
+                    static_cast<uint64_t>(map.data.size()) * sizeof(double),
+                    IR_TYPE_F64,
+                    map.geometry.width,
+                    map.geometry.height,
+                    1
+                };
                 return IR_OK;
             }
             case ir::procedures::recipe::SlotKind::byte_mask: {
                 const auto &mask = ir::procedures::recipe::getMask(runCtx_.ctx, slotName);
-                outView->width = mask.geometry.width;
-                outView->height = mask.geometry.height;
-                outView->frames = 1;
-                outView->valid_bits = mask.geometry.valid_bits;
-                outView->data = mask.data.data();
-                outView->byte_size = mask.data.size() * sizeof(uint8_t);
+                outView->array = IRArrayView{
+                    mask.data.data(),
+                    static_cast<uint64_t>(mask.data.size()) * sizeof(uint8_t),
+                    IR_TYPE_U8,
+                    mask.geometry.width,
+                    mask.geometry.height,
+                    1
+                };
                 return IR_OK;
             }
             case ir::procedures::recipe::SlotKind::drift_context: {
                 const auto &dctx = ir::procedures::recipe::getDriftContext(runCtx_.ctx, slotName);
-                outView->data = &dctx;
-                outView->byte_size = sizeof(IRGjbDriftContext);
+                outView->opaque_data = &dctx;
+                outView->opaque_byte_size = sizeof(IRGjbDriftContext);
                 return IR_OK;
             }
             }
@@ -685,37 +660,49 @@ private:
             return IR_BAD_ARGUMENT;
         }
 
-        const auto it = binding_.outputs.find(outputKey);
-        if (it == binding_.outputs.end() || it->second.second != expectedKind) {
-            setLastError("alloc output: undeclared or incompatible output_key");
-            return IR_BAD_ARGUMENT;
-        }
-        const std::string &slotName = it->second.first;
-
         try {
+            const auto it = binding_.outputs.find(outputKey);
+            if (it == binding_.outputs.end() || it->second.second != expectedKind) {
+                setLastError("alloc output: undeclared or incompatible output_key");
+                return IR_BAD_ARGUMENT;
+            }
+            const std::string &slotName = it->second.first;
+            if (allocatedOutputs_.count(outputKey) != 0) {
+                setLastError("alloc output: output_key was already allocated in this execute()");
+                return IR_BAD_ARGUMENT;
+            }
+
             const uint64_t count = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
             if (count > static_cast<uint64_t>(std::numeric_limits<size_t>::max()) / sizeof(T)) {
                 setLastError("alloc output: pixel count overflows");
                 return IR_BAD_ARGUMENT;
             }
-            const uint64_t newBytes = count * sizeof(T);
+            const size_t elements = static_cast<size_t>(count);
             const auto existingIt = container.find(slotName);
-            const uint64_t oldBytes = (existingIt != container.end())
-                ? static_cast<uint64_t>(existingIt->second.data.size()) * sizeof(T)
-                : 0;
-            if (!withinInflightBudget(oldBytes, newBytes))
-                return IR_BAD_ARGUMENT;
+            const bool needsAllocation =
+                existingIt == container.end() || elements > existingIt->second.data.capacity();
+            ir::procedures::recipe::requireAdditionalBytes(
+                runCtx_, needsAllocation ? count * sizeof(T) : 0);
 
+            // A fresh sized vector avoids geometric growth. The old buffer stays live
+            // until the new allocation succeeds, so the peak includes both buffers.
+            std::vector<T> replacement;
+            if (needsAllocation)
+                replacement = std::vector<T>(elements);
             auto &slot = container[slotName];
-            const bool inPlaceAlias = isBoundInputSlot(slotName, expectedKind) &&
-                                      slot.data.size() == static_cast<size_t>(count);
-            slot.geometry = IRGeometry{width, height, runCtx_.ctx.geometry.valid_bits};
-            slot.data.resize(static_cast<size_t>(count));
-            if (!inPlaceAlias)
+            if (needsAllocation) {
+                slot.data = std::move(replacement);
+            } else {
+                slot.data.resize(elements);
                 std::fill(slot.data.begin(), slot.data.end(), T{});
+            }
+            slot.geometry = IRGeometry{width, height, runCtx_.ctx.geometry.valid_bits};
             allocatedOutputs_.insert(outputKey);
             *outData = slot.data.data();
             return IR_OK;
+        } catch (const ir::api::Error &e) {
+            setLastError(e.what());
+            return e.code;
         } catch (const std::exception &e) {
             setLastError(e.what());
             return IR_COMPUTATION_FAILED;
@@ -788,9 +775,78 @@ private:
     ir::procedures::recipe::AnalysisRunContext &runCtx_;
     std::set<std::string> allocatedOutputs_;
     std::map<std::string, double, std::less<>> emittedScalars_;
+    int32_t firstCallbackErrorCode_{IR_OK};
     char lastError_[1024]{};
     IRHostCallbacks vtable_{};
 };
+
+extern "C" {
+static int32_t cbHasSlot(void *ctx, const char *ioKey) noexcept
+{
+    return ctx ? static_cast<HostCallbackBridge *>(ctx)->handleHasSlot(ioKey) : 0;
+}
+
+static int32_t cbGetSlot(void *ctx, const char *inputKey, IRSlotView *outView) noexcept
+{
+    if (!ctx) return IR_NULL_POINTER;
+    auto *bridge = static_cast<HostCallbackBridge *>(ctx);
+    const int32_t st = bridge->handleGetSlot(inputKey, outView);
+    if (st != IR_OK) bridge->recordCallbackError(st);
+    return st;
+}
+
+static int32_t cbAllocDoubleMap(void *ctx, const char *outputKey,
+                                int32_t width, int32_t height, double **outData) noexcept
+{
+    if (!ctx) return IR_NULL_POINTER;
+    auto *bridge = static_cast<HostCallbackBridge *>(ctx);
+    const int32_t st = bridge->handleAllocDoubleMap(outputKey, width, height, outData);
+    if (st != IR_OK) bridge->recordCallbackError(st);
+    return st;
+}
+
+static int32_t cbAllocByteMask(void *ctx, const char *outputKey,
+                               int32_t width, int32_t height, uint8_t **outData) noexcept
+{
+    if (!ctx) return IR_NULL_POINTER;
+    auto *bridge = static_cast<HostCallbackBridge *>(ctx);
+    const int32_t st = bridge->handleAllocByteMask(outputKey, width, height, outData);
+    if (st != IR_OK) bridge->recordCallbackError(st);
+    return st;
+}
+
+static int32_t cbEmitScalar(void *ctx, const char *suffixUtf8, double value) noexcept
+{
+    if (!ctx) return IR_NULL_POINTER;
+    auto *bridge = static_cast<HostCallbackBridge *>(ctx);
+    const int32_t st = bridge->handleEmitScalar(suffixUtf8, value);
+    if (st != IR_OK) bridge->recordCallbackError(st);
+    return st;
+}
+
+static int32_t cbIsCancelled(void *ctx) noexcept
+{
+    return ctx ? static_cast<HostCallbackBridge *>(ctx)->handleIsCancelled() : 0;
+}
+
+static void cbLogMessage(void *, int32_t level, const char *messageUtf8) noexcept
+{
+    if (!messageUtf8 || messageUtf8[0] == '\0')
+        return;
+    const char *tag = "INFO";
+    switch (level) {
+    case IR_PLUGIN_LOG_DEBUG: tag = "DEBUG"; break;
+    case IR_PLUGIN_LOG_INFO: tag = "INFO"; break;
+    case IR_PLUGIN_LOG_WARN: tag = "WARN"; break;
+    case IR_PLUGIN_LOG_ERROR: tag = "ERROR"; break;
+    default: break;
+    }
+    try {
+        std::fprintf(stderr, "[plugin][%s] %s\n", tag, messageUtf8);
+    } catch (...) {
+    }
+}
+}
 
 } // namespace
 
@@ -885,8 +941,10 @@ int32_t PluginMetricProvider::loadLibrary(const std::filesystem::path &libraryPa
         candidateEntries.push_back(std::move(entry));
     }
 
+    std::set<std::string> candidateNames;
     for (const auto &entry : candidateEntries) {
-        if (metrics_.find(entry.methodName) != metrics_.end()) {
+        if (metrics_.find(entry.methodName) != metrics_.end() ||
+            !candidateNames.insert(entry.methodName).second) {
             setError(errOut, "Duplicate plugin method name: " + entry.methodName);
             return IR_BAD_ARGUMENT;
         }

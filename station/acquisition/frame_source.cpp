@@ -4,6 +4,8 @@
 #include <chrono>
 #include <exception>
 #include <limits>
+#include <utility>
+#include <vector>
 using namespace ir::api;
 namespace ir::acquisition {
 static_assert(sizeof(IRCaptureStats) == 64, "IRCaptureStats ABI size must be 64 bytes");
@@ -24,17 +26,60 @@ uint64_t checkedAdd(uint64_t left, uint64_t right)
     return left + right;
 }
 
+uint64_t pixelBytes(int32_t dataType);
+
 uint64_t estimateBufferedBytes(IRGeometry geometry, int32_t queueCapacity,
-                               uint64_t backendBytes)
+                               int32_t dataType, uint64_t backendBytes)
 {
     const uint64_t frameBytes = checkedMultiply(
-        static_cast<uint64_t>(pixels(geometry.height, geometry.width)), sizeof(uint16_t));
+        static_cast<uint64_t>(pixels(geometry.height, geometry.width)), pixelBytes(dataType));
     uint64_t queueBytes = checkedMultiply(
         frameBytes, static_cast<uint64_t>(queueCapacity) + 2);
     queueBytes = checkedAdd(queueBytes, checkedMultiply(
         static_cast<uint64_t>(queueCapacity), sizeof(IRFrameStamp)));
     return checkedAdd(queueBytes, backendBytes);
 }
+
+uint64_t pixelBytes(int32_t dataType)
+{
+    switch (dataType) {
+    case IR_TYPE_U16: return sizeof(uint16_t);
+    case IR_TYPE_U32: return sizeof(uint32_t);
+    default: throw Error(IR_UNSUPPORTED, "Frame sources support U16 and U32 pixels");
+    }
+}
+
+int32_t maxValidBits(int32_t dataType)
+{
+    switch (dataType) {
+    case IR_TYPE_U16: return 16;
+    case IR_TYPE_U32: return 32;
+    default: throw Error(IR_UNSUPPORTED, "Frame sources support U16 and U32 pixels");
+    }
+}
+
+class FrameScratch {
+public:
+    FrameScratch(int32_t dataType, size_t pixelCount)
+    {
+        if (dataType == IR_TYPE_U16) {
+            pixels16_.resize(pixelCount);
+        } else if (dataType == IR_TYPE_U32) {
+            pixels32_.resize(pixelCount);
+        } else {
+            throw Error(IR_UNSUPPORTED, "Frame sources support U16 and U32 pixels");
+        }
+    }
+
+    void *data() noexcept
+    {
+        return pixels32_.empty() ? static_cast<void *>(pixels16_.data()) : pixels32_.data();
+    }
+
+private:
+    std::vector<uint16_t> pixels16_;
+    std::vector<uint32_t> pixels32_;
+};
 
 }
 
@@ -44,17 +89,17 @@ std::unique_lock<std::mutex> lockCapture()
     require(lock.owns_lock(), IR_BUSY, "Another capture or measurement is active");
     return lock;
 }
-IRGeometry Capture::open(int kind, const char *name, int bits)
+IRFrameSourceInfo Capture::open(int kind, const char *name, int bits)
 {
     return open(kind, name, bits, queueCapacity_, kDefaultMemoryLimitBytes);
 }
 
-IRGeometry Capture::open(int kind, const char *name, int bits, int32_t queueCapacity,
-                         uint64_t memoryLimitBytes)
+IRFrameSourceInfo Capture::open(int kind, const char *name, int bits, int32_t queueCapacity,
+                                uint64_t memoryLimitBytes)
 {
     checkOperationAccess();
     require(!source, IR_BUSY, "A frame source is open");
-    require(name && *name && bits >= 0 && bits <= 16, IR_BAD_ARGUMENT, "Invalid source name or valid bits");
+    require(name && *name && bits >= 0 && bits <= 32, IR_BAD_ARGUMENT, "Invalid source name or valid bits");
     std::unique_ptr<FrameSource> opened;
     if (kind == IR_RAW_REPLAY) {
         opened = openReplay(name);
@@ -72,19 +117,22 @@ IRGeometry Capture::open(int kind, const char *name, int bits, int32_t queueCapa
 #endif
     else throw Error(IR_UNSUPPORTED, "Frame backend is not available on this platform");
     const auto geometry = opened->geometry();
+    const int32_t dataType = opened->dataType();
+    require(geometry.valid_bits >= 0 && geometry.valid_bits <= maxValidBits(dataType),
+            IR_BAD_ARGUMENT, "Source valid_bits exceeds its pixel type");
     const uint64_t bufferedBytes = estimateBufferedBytes(
-        geometry, queueCapacity, opened->bufferedBytes());
+        geometry, queueCapacity, dataType, opened->bufferedBytes());
     require(bufferedBytes <= memoryLimitBytes,
             IR_BAD_ARGUMENT, "Capture buffers exceed station.acquisition.max_inflight_bytes");
     std::string openedName{name};
-    frameQueue_.configure(geometry, queueCapacity);
+    frameQueue_.configure(geometry, dataType, queueCapacity);
     queueCapacity_ = queueCapacity;
     memoryLimitBytes_ = memoryLimitBytes;
     sourceName = std::move(openedName);
     source = std::move(opened);
     owner = std::this_thread::get_id();
     backend = kind;
-    return geometry;
+    return {geometry, dataType};
 }
 void Capture::close()
 {
@@ -179,10 +227,10 @@ void Capture::setQueueCapacity(int32_t capacity)
     require(!running, IR_BUSY, "Cannot change frame queue capacity while capture is running");
     if (source) {
         const uint64_t bufferedBytes = estimateBufferedBytes(
-            source->geometry(), capacity, source->bufferedBytes());
+            source->geometry(), capacity, source->dataType(), source->bufferedBytes());
         require(bufferedBytes <= memoryLimitBytes_, IR_BAD_ARGUMENT,
                 "Capture buffers exceed station.acquisition.max_inflight_bytes");
-        frameQueue_.configure(source->geometry(), capacity);
+        frameQueue_.configure(source->geometry(), source->dataType(), capacity);
     } else {
         frameQueue_.setIdleCapacity(capacity);
     }
@@ -192,13 +240,17 @@ uint64_t Capture::bufferedBytes() const
 {
     if (!source)
         return 0;
-    return estimateBufferedBytes(source->geometry(), queueCapacity_, source->bufferedBytes());
+    return estimateBufferedBytes(source->geometry(), queueCapacity_, source->dataType(), source->bufferedBytes());
 }
 void Capture::startPump()
 {
+    const auto geometry = source->geometry();
+    FrameScratch scratch(source->dataType(), static_cast<size_t>(pixels(geometry.height, geometry.width)));
     pumpStop_.store(false, std::memory_order_release);
+    pumpThread_ = std::thread([this, scratch = std::move(scratch)]() mutable {
+        pumpLoop(scratch.data());
+    });
     pumpActive_ = true;
-    pumpThread_ = std::thread([this] { pumpLoop(); });
 }
 void Capture::stopPump()
 {
@@ -209,18 +261,15 @@ void Capture::stopPump()
     pumpActive_ = false;
     frameQueue_.setRunning(false);
 }
-void Capture::pumpLoop()
+void Capture::pumpLoop(void *frame)
 {
-    const auto g = source->geometry();
-    const auto n = pixels(g.height, g.width);
-    std::vector<uint16_t> scratch(static_cast<size_t>(n), 0);
     while (!pumpStop_.load(std::memory_order_acquire)) {
         IRFrameStamp stamp{};
         try {
-            source->read(scratch.data(), stamp, 50);
+            source->read(frame, stamp, 50);
             if (pumpStop_.load(std::memory_order_acquire))
                 break;
-            frameQueue_.push(scratch.data(), stamp);
+            frameQueue_.push(frame, stamp);
         } catch (const Error &err) {
             if (pumpStop_.load(std::memory_order_acquire))
                 break;
@@ -250,17 +299,14 @@ void Capture::start()
     checkOperationAccess();
     checkStop();
     require(!running, IR_BUSY, "Source is already running");
-    frameQueue_.beginStartSession(source->geometry(), queueCapacity_);
+    frameQueue_.beginStartSession(source->geometry(), source->dataType(), queueCapacity_);
     source->start();
     running = true;
     if (source->isLive()) {
         try {
             startPump();
         } catch (...) {
-            running = false;
-            try { source->stop(); } catch (...) {}
-            frameQueue_.markStopped();
-            frameQueue_.setRunning(false);
+            try { stop(); } catch (...) {}
             throw;
         }
     }
@@ -272,22 +318,42 @@ void Capture::stop()
     running = false;
     if (wasRunning) source->stop();
 }
-void Capture::read(int count, int timeoutMs, uint16_t *out, int64_t capacity,
-                   IRFrameStamp *stamps, int stampCapacity, int &completed)
+void Capture::read(int timeoutMs, IRFrameBatchView &batch)
 {
+    const int32_t count = batch.pixels.frames;
+    batch.pixels.frames = 0;
     require(running && timeoutMs >= 0, IR_BAD_ARGUMENT, "Start source and specify a nonnegative timeout");
     const auto g = source->geometry();
     const auto n = pixels(g.height, g.width);
-    needed(out, capacity, stackSize(n, count));
-    needed(stamps, stampCapacity, count);
+    const int32_t dataType = source->dataType();
+    const uint64_t elementSize = pixelBytes(dataType);
+    require(count > 0, IR_BAD_ARGUMENT, "Specify a positive frame count");
+    require(batch.pixels.data_type == dataType, IR_BAD_ARGUMENT, "Pixel data type differs from source");
+    require(batch.pixels.width == g.width && batch.pixels.height == g.height,
+            IR_BAD_ARGUMENT, "Pixel geometry differs from source");
+    needed(batch.pixels.data, 1, 1);
+    require(reinterpret_cast<uintptr_t>(batch.pixels.data) % elementSize == 0,
+            IR_BAD_ARGUMENT, "Pixel buffer is not aligned for its data type");
+    require(static_cast<uint64_t>(n) <= std::numeric_limits<uint64_t>::max() / elementSize,
+            IR_BAD_ARGUMENT, "Frame byte size overflows");
+    const uint64_t oneFrameBytes = static_cast<uint64_t>(n) * elementSize;
+    require(static_cast<uint64_t>(count) <= std::numeric_limits<uint64_t>::max() / oneFrameBytes,
+            IR_BAD_ARGUMENT, "Batch byte size overflows");
+    const uint64_t requiredBytes = oneFrameBytes * static_cast<uint64_t>(count);
+    require(batch.pixels.byte_size >= requiredBytes, IR_BUFFER_TOO_SMALL, "Pixel buffer is too small");
+    needed(batch.stamps, batch.stamp_capacity, count);
+    batch.valid_bits = g.valid_bits;
+    auto *pixelBytes = static_cast<uint8_t *>(batch.pixels.data);
+    int completed = 0;
     while (completed < count) {
         checkStop();
+        void *frameOut = pixelBytes + static_cast<uint64_t>(completed) * oneFrameBytes;
         if (pumpActive_) {
             IRFrameStamp stamp{};
             int32_t termCode = IR_OK;
             std::string termMsg;
             const auto popStatus = frameQueue_.pop(
-                out + completed * n, stamp, timeoutMs,
+                frameOut, stamp, timeoutMs,
                 [this] { return stopState_.load() == StopState::requested; },
                 termCode, termMsg);
             switch (popStatus) {
@@ -306,14 +372,15 @@ void Capture::read(int count, int timeoutMs, uint16_t *out, int64_t capacity,
             }
             bool gap = stamp.lost_frames != 0;
             if (completed) {
-                const auto &last = stamps[completed - 1];
+                const auto &last = batch.stamps[completed - 1];
                 const auto both = last.fields & stamp.fields;
                 gap |= (both & IR_HAS_SEQUENCE) && stamp.sequence != last.sequence + 1;
                 gap |= (both & IR_HAS_DRIVER_SEQUENCE) && stamp.driver_sequence != last.driver_sequence + 1;
             }
             require(!gap, IR_FRAME_GAP, "Frame sequence discontinuity");
             frameQueue_.recordDelivered();
-            stamps[completed++] = stamp;
+            batch.stamps[completed++] = stamp;
+            batch.pixels.frames = completed;
             checkStop();
             continue;
         }
@@ -329,7 +396,7 @@ void Capture::read(int count, int timeoutMs, uint16_t *out, int64_t capacity,
             const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
             const auto wait = std::clamp<int64_t>(remaining, 0, 50);
             try {
-                source->read(out + completed * n, stamp, int(wait));
+                source->read(frameOut, stamp, int(wait));
                 break;
             } catch (const Error &error) {
                 if (error.code != IR_TIMEOUT || std::chrono::steady_clock::now() >= deadline) throw;
@@ -338,14 +405,15 @@ void Capture::read(int count, int timeoutMs, uint16_t *out, int64_t capacity,
         }
         bool gap = stamp.lost_frames != 0;
         if (completed) {
-            const auto &last = stamps[completed - 1];
+            const auto &last = batch.stamps[completed - 1];
             const auto both = last.fields & stamp.fields;
             gap |= (both & IR_HAS_SEQUENCE) && stamp.sequence != last.sequence + 1;
             gap |= (both & IR_HAS_DRIVER_SEQUENCE) && stamp.driver_sequence != last.driver_sequence + 1;
         }
         require(!gap, IR_FRAME_GAP, "Frame sequence discontinuity");
-        frameQueue_.publishPulledFrame(out + completed * n, stamp, true);
-        stamps[completed++] = stamp;
+        frameQueue_.publishPulledFrame(frameOut, stamp, true);
+        batch.stamps[completed++] = stamp;
+        batch.pixels.frames = completed;
         checkStop();
     }
 }
@@ -362,9 +430,7 @@ void Capture::flush(int32_t discardFrames, int32_t timeoutMs, int32_t &discarded
             frameQueue_.resumeSession();
             startPump();
         } catch (...) {
-            running = false;
-            frameQueue_.markStopped();
-            frameQueue_.setRunning(false);
+            try { stop(); } catch (...) {}
             throw;
         }
         if (discardFrames == 0)
@@ -372,7 +438,7 @@ void Capture::flush(int32_t discardFrames, int32_t timeoutMs, int32_t &discarded
 
         const auto g = source->geometry();
         const auto n = pixels(g.height, g.width);
-        std::vector<uint16_t> scratch(static_cast<size_t>(n), 0);
+        FrameScratch scratch(source->dataType(), static_cast<size_t>(n));
         int32_t i = 0;
         while (i < discardFrames) {
             checkStop();
@@ -411,7 +477,7 @@ void Capture::flush(int32_t discardFrames, int32_t timeoutMs, int32_t &discarded
 
     const auto g = source->geometry();
     const auto n = pixels(g.height, g.width);
-    std::vector<uint16_t> scratch(static_cast<size_t>(n), 0);
+    FrameScratch scratch(source->dataType(), static_cast<size_t>(n));
     for (int32_t i = 0; i < discardFrames; ++i) {
         checkStop();
         const auto deadline = std::chrono::steady_clock::now() +
@@ -441,8 +507,8 @@ void Capture::flush(int32_t discardFrames, int32_t timeoutMs, int32_t &discarded
 }
 using namespace ir::acquisition;
 extern "C" int32_t IR_OpenFrames(int32_t backend, const char *name, int32_t bits,
-    IRGeometry *actual, char *err, int32_t size)
-{
+    IRFrameSourceInfo *actual, char *err, int32_t size)
+noexcept{
     return guarded(err, size, [&] {
         auto lock = lockCapture();
         needed(actual, 1, 1);
@@ -450,7 +516,7 @@ extern "C" int32_t IR_OpenFrames(int32_t backend, const char *name, int32_t bits
     });
 }
 extern "C" int32_t IR_StartFrames(char *err, int32_t size)
-{
+noexcept{
     return guarded(err, size, [&] {
         auto lock = lockCapture(); auto &c = capture();
         c.checkOwner();
@@ -464,32 +530,50 @@ extern "C" int32_t IR_StartFrames(char *err, int32_t size)
         }
     });
 }
-extern "C" int32_t IR_ReadFrames(int32_t count, int32_t ms, uint16_t *out, int64_t cap,
-    IRFrameStamp *stamps, int32_t sc, int32_t *completed, char *err, int32_t size)
-{
-    if (completed) *completed = 0;
-    return guarded(err, size, [&] {
-        needed(completed, 1, 1);
+extern "C" int32_t IR_ReadFrames(int32_t ms, IRFrameBatchView *batch, char *err, int32_t size)
+noexcept{
+    const int32_t requestedFrames = batch ? batch->pixels.frames : 0;
+    IRFrameBatchView work{};
+    if (batch) {
+        work = *batch;
+        work.pixels.frames = 0;
+        batch->pixels.frames = 0;
+    }
+    const int32_t status = guarded(err, size, [&] {
+        needed(batch, 1, 1);
         auto lock = lockCapture(); auto &c = capture();
-        c.checkOwner(); c.read(count, ms, out, cap, stamps, sc, *completed);
+        c.checkOwner();
+        work.pixels.frames = requestedFrames;
+        c.read(ms, work);
     });
+    if (batch) {
+        batch->pixels.frames = work.pixels.frames;
+        batch->valid_bits = work.valid_bits;
+    }
+    return status;
 }
 extern "C" int32_t IR_FlushFrames(int32_t discard_frames, int32_t timeout_ms,
     int32_t *discarded, char *err, int32_t size)
-{
+noexcept{
     int32_t localDiscarded = 0;
     if (discarded) *discarded = 0;
     const auto status = guarded(err, size, [&] {
         auto lock = lockCapture(); auto &c = capture();
         c.checkOwner();
-        c.flush(discard_frames, timeout_ms, localDiscarded);
+        try {
+            c.flush(discard_frames, timeout_ms, localDiscarded);
+        } catch (...) {
+            if (!c.running)
+                c.endOperation();
+            throw;
+        }
     });
     if (discarded) *discarded = localDiscarded;
     return status;
 }
-extern "C" void IR_RequestStop(void) { capture().requestStop(); }
+extern "C" void IR_RequestStop(void) noexcept{ capture().requestStop(); }
 extern "C" int32_t IR_StopFrames(char *err, int32_t size)
-{
+noexcept{
     return guarded(err, size, [&] {
         auto lock = lockCapture(); auto &c = capture();
         c.checkOwner();
@@ -503,7 +587,7 @@ extern "C" int32_t IR_StopFrames(char *err, int32_t size)
     });
 }
 extern "C" int32_t IR_CloseFrames(char *err, int32_t size)
-{
+noexcept{
     return guarded(err, size, [&] {
         auto lock = lockCapture(); auto &c = capture();
         if (!c.source) return;
@@ -513,23 +597,37 @@ extern "C" int32_t IR_CloseFrames(char *err, int32_t size)
     });
 }
 extern "C" int32_t IR_SetFrameQueueCapacity(int32_t capacity, char *err, int32_t size)
-{
+noexcept{
     return guarded(err, size, [&] {
         auto lock = lockCapture();
         capture().setQueueCapacity(capacity);
     });
 }
-extern "C" int32_t IR_TryReadLatestFrame(uint16_t *pixels, int64_t pixel_capacity,
-    IRGeometry *geometry, IRFrameStamp *stamp, int32_t *has_frame, char *err, int32_t size)
-{
-    if (has_frame) *has_frame = 0;
-    return guarded(err, size, [&] {
-        needed(has_frame, 1, 1);
-        capture().frameQueue().tryReadLatest(pixels, pixel_capacity, geometry, stamp, *has_frame);
+extern "C" int32_t IR_TryReadLatestFrame(IRFrameBatchView *batch, char *err, int32_t size)
+noexcept{
+    const int32_t requestedFrames = batch ? batch->pixels.frames : 0;
+    IRFrameBatchView work{};
+    if (batch) {
+        work = *batch;
+        work.pixels.frames = 0;
+        batch->pixels.frames = 0;
+    }
+    const int32_t status = guarded(err, size, [&] {
+        needed(batch, 1, 1);
+        work.pixels.frames = requestedFrames;
+        capture().frameQueue().tryReadLatest(work);
     });
+    if (batch) {
+        batch->pixels.frames = work.pixels.frames;
+        batch->pixels.data_type = work.pixels.data_type;
+        batch->pixels.width = work.pixels.width;
+        batch->pixels.height = work.pixels.height;
+        batch->valid_bits = work.valid_bits;
+    }
+    return status;
 }
 extern "C" int32_t IR_GetCaptureStats(IRCaptureStats *stats, char *err, int32_t size)
-{
+noexcept{
     if (stats) *stats = {};
     return guarded(err, size, [&] {
         needed(stats, 1, 1);

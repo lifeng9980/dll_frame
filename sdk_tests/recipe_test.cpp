@@ -3,15 +3,27 @@
 #include "IR_station.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
+#include <exception>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace fs = std::filesystem;
 using Json = nlohmann::json;
@@ -19,6 +31,7 @@ using Json = nlohmann::json;
 namespace {
 
 int gFailures = 0;
+fs::path gTempRoot;
 
 void check(bool cond, const char *label, int line)
 {
@@ -47,7 +60,7 @@ public:
     explicit TempDirGuard(const std::string &name)
     {
         const auto suffix = std::chrono::steady_clock::now().time_since_epoch().count();
-        dir_ = fs::temp_directory_path() / ("ir_recipe_v2_test_" + name + "_" + std::to_string(suffix));
+        dir_ = gTempRoot / ("ir_recipe_v2_test_" + name + "_" + std::to_string(suffix));
         std::error_code ec;
         fs::remove_all(dir_, ec);
         fs::create_directories(dir_);
@@ -62,6 +75,37 @@ public:
 private:
     fs::path dir_;
 };
+
+fs::path testTempRoot()
+{
+#ifdef _WIN32
+    std::wstring executable(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, executable.data(),
+                                             static_cast<DWORD>(executable.size()));
+    if (length == 0 || length >= executable.size())
+        throw std::runtime_error("Cannot locate recipe_test executable");
+    executable.resize(length);
+    return fs::path(executable).parent_path().parent_path().parent_path() / "ctest-tmp";
+#else
+    return fs::temp_directory_path();
+#endif
+}
+
+template <typename Test>
+bool runTestCase(const char *name, Test &&test)
+{
+    try {
+        test();
+        return true;
+    } catch (const std::exception &e) {
+        std::cerr << name << " threw an exception: " << e.what() << '\n';
+        ++gFailures;
+    } catch (...) {
+        std::cerr << name << " threw an unknown exception\n";
+        ++gFailures;
+    }
+    return false;
+}
 
 void buildDriftFixture(const fs::path &dir, int32_t rows, int32_t cols,
                        int32_t calibFrames, int32_t burstFrames, int32_t bursts)
@@ -116,6 +160,48 @@ void buildDriftFixture(const fs::path &dir, int32_t rows, int32_t cols,
     }
 }
 
+void buildU32ReplayFixture(const fs::path &dir)
+{
+    const std::vector<uint32_t> pixels{
+        70000, 71000, 72000, 73000,
+        70002, 71002, 72002, 73002
+    };
+    {
+        std::ofstream raw(dir / "frames.raw", std::ios::binary);
+        raw.write(reinterpret_cast<const char *>(pixels.data()),
+                  std::streamsize(pixels.size() * sizeof(uint32_t)));
+    }
+    {
+        std::ofstream csv(dir / "frames.csv", std::ios::binary);
+        csv << "frame_index,width,height,stride_bytes,pixel_format,bit_depth,endianness,storage_bits\n"
+            << "0,2,2,8,RAW32_LE,20,little,32\n"
+            << "1,2,2,8,RAW32_LE,20,little,32\n";
+    }
+}
+
+void buildPaddedU32ReplayFixture(const fs::path &dir)
+{
+    const uint32_t pixels[]{70000, 71000, 72000, 73000};
+    std::array<uint8_t, 24> bytes{};
+    for (int row = 0; row < 2; ++row)
+        for (int col = 0; col < 2; ++col) {
+            const auto value = pixels[row * 2 + col];
+            const size_t offset = size_t(row) * 12 + size_t(col) * 4;
+            for (int byte = 0; byte < 4; ++byte)
+                bytes[offset + size_t(byte)] = uint8_t(value >> (byte * 8));
+        }
+    {
+        std::ofstream raw(dir / "frames.raw", std::ios::binary);
+        raw.write(reinterpret_cast<const char *>(bytes.data()),
+                  std::streamsize(bytes.size()));
+    }
+    {
+        std::ofstream csv(dir / "frames.csv", std::ios::binary);
+        csv << "frame_index,width,height,stride_bytes,pixel_format,bit_depth,endianness,storage_bits\n"
+            << "0,2,2,12,RAW32_LE,20,little,32\n";
+    }
+}
+
 Json makeStation(const fs::path &sourceDir, int32_t queueCap = 64)
 {
     return {
@@ -138,6 +224,172 @@ int countRawFiles(const fs::path &dir)
             ++count;
     }
     return count;
+}
+
+void testU32RecipeBatchAndArchive()
+{
+    TempDirGuard root("u32_recipe");
+    const auto fixture = root.path() / "fixture";
+    fs::create_directories(fixture);
+    buildU32ReplayFixture(fixture);
+
+    Json station = makeStation(fixture, 16);
+    station["acquisition"]["valid_bits"] = 20;
+    const Json recipe{
+        {"schemav", 1},
+        {"recipe_id", "u32-replay-batch"},
+        {"steps", Json::array({
+            {{"id", "capture"}, {"type", "capture"}, {"frames", 2},
+             {"frame_timeout_ms", 0}, {"output", "raw"}},
+            {{"id", "stats"}, {"type", "analyze"}, {"method", "frame_stats"},
+             {"name", "stats"}, {"input", "raw"},
+             {"outputs", {{"mean_map", "mean"}, {"std_map", "noise"}}}},
+            {{"id", "archive"}, {"type", "save_raw"}, {"input", "raw"},
+             {"subdir", "u32"}}
+        })}
+    };
+
+    const auto stationText = station.dump();
+    const auto recipeText = recipe.dump();
+    char err[2048]{};
+    CHECK(IR_CheckRecipeJson(stationText.c_str(), recipeText.c_str(), err, sizeof err) == IR_OK);
+
+    const auto output = root.path() / "out";
+    IRRecipeResult result{};
+    const auto status = IR_RunRecipeJson(stationText.c_str(), recipeText.c_str(),
+        utf8(output).c_str(), nullptr, &result, err, sizeof err);
+    if (status != IR_OK)
+        std::cerr << "U32 recipe failed status=" << status << " error=" << err << '\n';
+    CHECK(status == IR_OK);
+    if (status != IR_OK)
+        return;
+
+    const auto record = Json::parse(readText(output / "result.json"));
+    CHECK(record.at("data_type") == "U32");
+    CHECK(record.at("valid_bits") == 20);
+    CHECK(record.at("completed_frames") == 2);
+    CHECK(std::abs(record.at("metrics").at("stats.mean_dn").at("value").get<double>() - 71501.0) < 1e-9);
+    CHECK(std::abs(record.at("metrics").at("stats.noise_dn").at("value").get<double>() - 1.0) < 1e-9);
+    CHECK(record.at("saved_batches").size() == 1);
+    CHECK(record.at("saved_batches")[0].at("data_type") == "U32");
+    CHECK(record.at("saved_batches")[0].at("valid_bits") == 20);
+
+    const auto rawPath = output / "u32" / "frames.raw";
+    std::ifstream raw(rawPath, std::ios::binary);
+    std::vector<uint32_t> archived(8);
+    raw.read(reinterpret_cast<char *>(archived.data()),
+             std::streamsize(archived.size() * sizeof(uint32_t)));
+    CHECK(raw.gcount() == std::streamsize(archived.size() * sizeof(uint32_t)));
+    CHECK(archived == std::vector<uint32_t>({
+        70000, 71000, 72000, 73000,
+        70002, 71002, 72002, 73002
+    }));
+    const auto csv = readText(output / "u32" / "frames.csv");
+    CHECK(csv.find(",8,RAW32_LE,20,little,") != std::string::npos);
+}
+
+void testPaddedU32ReplayMemoryBudget()
+{
+    TempDirGuard root("u32_padded_budget");
+    const auto fixture = root.path() / "fixture";
+    fs::create_directories(fixture);
+    buildPaddedU32ReplayFixture(fixture);
+
+    Json station = makeStation(fixture, 2);
+    station["acquisition"]["valid_bits"] = 20;
+    station["acquisition"]["max_inflight_bytes"] = 223;
+    const Json recipe{
+        {"schemav", 1},
+        {"recipe_id", "u32-padded-budget"},
+        {"steps", Json::array({
+            {{"id", "capture"}, {"type", "capture"}, {"frames", 1},
+             {"frame_timeout_ms", 0}, {"output", "raw"}}
+        })}
+    };
+    char err[2048]{};
+    IRRecipeResult result{};
+    const auto tooSmall = root.path() / "too_small";
+    CHECK(IR_RunRecipeJson(station.dump().c_str(), recipe.dump().c_str(),
+        utf8(tooSmall).c_str(), nullptr, &result, err, sizeof err) == IR_BAD_ARGUMENT);
+
+    station["acquisition"]["max_inflight_bytes"] = 224;
+    const auto exact = root.path() / "exact";
+    const auto status = IR_RunRecipeJson(station.dump().c_str(), recipe.dump().c_str(),
+        utf8(exact).c_str(), nullptr, &result, err, sizeof err);
+    if (status != IR_OK)
+        std::cerr << "Padded U32 recipe failed status=" << status << " error=" << err << '\n';
+    CHECK(status == IR_OK);
+    if (status == IR_OK) {
+        const auto record = Json::parse(readText(exact / "result.json"));
+        CHECK(record.at("data_type") == "U32");
+        CHECK(record.at("completed_frames") == 1);
+    }
+}
+
+void testHighBitPhysicalMetricsRejected()
+{
+    TempDirGuard root("u32_physical_model");
+    const auto fixture = root.path() / "fixture";
+    fs::create_directories(fixture);
+    buildU32ReplayFixture(fixture);
+
+    Json station = makeStation(fixture, 2);
+    station["acquisition"]["valid_bits"] = 20;
+    const Json recipe{
+        {"schemav", 1},
+        {"recipe_id", "u32-gb-physical-model"},
+        {"steps", Json::array({
+            {{"id", "capture"}, {"type", "capture"}, {"frames", 2},
+             {"frame_timeout_ms", 0}, {"output", "raw"}},
+            {{"id", "stats"}, {"type", "analyze"}, {"method", "frame_stats"},
+             {"name", "stats"}, {"input", "raw"},
+             {"outputs", {{"mean_map", "mean"}, {"std_map", "noise"}}}},
+            {{"id", "gb"}, {"type", "analyze"}, {"method", "gb_evaluate"},
+             {"name", "gb"},
+             {"inputs", {{"v1_map", "mean"}, {"v2_map", "mean"}, {"vn_map", "noise"}}},
+             {"params", {{"t0_c", 20.0}, {"t1_c", 25.0}}}}
+        })}
+    };
+    char err[2048]{};
+    CHECK(IR_CheckRecipeJson(station.dump().c_str(), recipe.dump().c_str(),
+                             err, sizeof err) == IR_OK);
+    IRRecipeResult result{};
+    const auto output = root.path() / "out";
+    const auto status = IR_RunRecipeJson(station.dump().c_str(), recipe.dump().c_str(),
+        utf8(output).c_str(), nullptr, &result, err, sizeof err);
+    CHECK(status == IR_UNSUPPORTED);
+    CHECK(std::string(err).find("valid_bits is not digital_full") != std::string::npos);
+    CHECK(fs::is_regular_file(output / "result.json"));
+
+    const Json burstRecipe{
+        {"schemav", 1},
+        {"recipe_id", "u32-gjb-burst-physical-model"},
+        {"steps", Json::array({
+            {{"id", "loop"}, {"type", "repeat_burst"}, {"max_iterations", 1},
+             {"steps", Json::array({
+                {{"id", "capture"}, {"type", "capture"}, {"frames", 2},
+                 {"frame_timeout_ms", 0}, {"output", "raw"}},
+                {{"id", "stats"}, {"type", "analyze"}, {"method", "frame_stats"},
+                 {"name", "stats"}, {"input", "raw"},
+                 {"outputs", {{"mean_map", "mean"}, {"std_map", "noise"}}}},
+                {{"id", "burst_metric"}, {"type", "analyze"}, {"method", "gjb_burst"},
+                 {"name", "gjb"},
+                 {"inputs", {{"mean_map", "mean"}, {"vn_map", "noise"}}},
+                 {"params", {{"volts_per_count", 0.1}, {"delta_t_k", 10.0},
+                    {"ref_response_count", 1.0}, {"ref_responsivity", 1.0},
+                    {"vmax_per_count", 1.0}, {"burst_frame_count", 2},
+                    {"lrnu_kernel_size", 1}}}}
+             })}}
+        })}
+    };
+    CHECK(IR_CheckRecipeJson(station.dump().c_str(), burstRecipe.dump().c_str(),
+                             err, sizeof err) == IR_OK);
+    const auto burstOutput = root.path() / "burst_out";
+    const auto burstStatus = IR_RunRecipeJson(station.dump().c_str(), burstRecipe.dump().c_str(),
+        utf8(burstOutput).c_str(), nullptr, &result, err, sizeof err);
+    CHECK(burstStatus == IR_UNSUPPORTED);
+    CHECK(std::string(err).find("valid_bits is not digital_full") != std::string::npos);
+    CHECK(fs::is_regular_file(burstOutput / "result.json"));
 }
 
 std::vector<std::string> splitCsvLine(const std::string &line)
@@ -200,7 +452,12 @@ void testTwoPointCalibNoDiskPassAndNg()
 
     // PASS case (synthetic linear gain span 0.85..1.15 has ~9.22% response nonuniformity)
     const auto outPass = root.path() / "out_pass";
-    CHECK(IR_RunRecipeJson(stText.c_str(), makeCalibRecipe(15.0).dump().c_str(), utf8(outPass).c_str(), nullptr, &rr, err, sizeof err) == IR_OK);
+    const int32_t runStatus = IR_RunRecipeJson(stText.c_str(), makeCalibRecipe(15.0).dump().c_str(), utf8(outPass).c_str(), nullptr, &rr, err, sizeof err);
+    if (runStatus != IR_OK)
+        std::cerr << "recipe_test run failed status=" << runStatus << " error=" << err << '\n';
+    CHECK(runStatus == IR_OK);
+    if (runStatus != IR_OK)
+        return;
     CHECK(rr.cleanup_status == IR_OK && rr.completed_frames == 8);
     CHECK(countRawFiles(outPass) == 0);
     const auto recPass = Json::parse(readText(outPass / "result.json"));
@@ -461,6 +718,18 @@ void testPreflightRejections()
     };
     CHECK(IR_CheckRecipeJson(stOk.c_str(), rTypeMismatch.dump().c_str(), err, sizeof err) == IR_BAD_ARGUMENT);
 
+    Json aliasedSlot = rTypeMismatch;
+    aliasedSlot["steps"][2] = {{"id", "fft"}, {"type", "analyze"}, {"method", "fft2d"},
+                                {"input", "m"}, {"outputs", {{"magnitude_map", "m"}}}};
+    CHECK(IR_CheckRecipeJson(stOk.c_str(), aliasedSlot.dump().c_str(), err, sizeof err) == IR_BAD_ARGUMENT);
+    CHECK(std::string(err).find("aliases input slot 'm'") != std::string::npos);
+
+    Json duplicateSlot = rTypeMismatch;
+    duplicateSlot["steps"].erase(2);
+    duplicateSlot["steps"][1]["outputs"]["std_map"] = "m";
+    CHECK(IR_CheckRecipeJson(stOk.c_str(), duplicateSlot.dump().c_str(), err, sizeof err) == IR_BAD_ARGUMENT);
+    CHECK(std::string(err).find("binds duplicate output slot 'm'") != std::string::npos);
+
     // 3. save_raw inside repeat_burst
     const Json rSaveInsideLoop = {
         {"schemav", 1},
@@ -554,6 +823,24 @@ void testPreflightRejections()
     CHECK(std::string(err).find("max_inflight_bytes") != std::string::npos);
     CHECK(Json::parse(readText(outDir / "result.json")).at("run_status") == "ERROR");
 
+    const Json scratchRecipe{{"recipe_id", "frame-stats-scratch-budget"}, {"steps", Json::array({
+        {{"id", "capture"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}},
+        {{"id", "stats"}, {"type", "analyze"}, {"method", "frame_stats"}, {"input", "capture"}}
+    })}};
+    // The retained estimate includes no output slots, but frame_stats still needs two temporary maps.
+    constexpr uint64_t scratchPeak = (2 + 2 + 2) * 16 * sizeof(uint16_t) +
+        4 * sizeof(IRFrameStamp) + 2 * 16 * sizeof(double);
+    limitedStation["acquisition"]["max_inflight_bytes"] = scratchPeak - 1;
+    CHECK(IR_RunRecipeJson(limitedStation.dump().c_str(), scratchRecipe.dump().c_str(),
+                           utf8(root.path() / "scratch_reject").c_str(), nullptr, &result,
+                           err, sizeof err) == IR_BAD_ARGUMENT);
+    CHECK(result.failed_stage == IR_RECIPE_STAGE_ANALYZE && result.failed_step_index == 1);
+    CHECK(std::string(err).find("frame storage " + std::to_string(scratchPeak)) != std::string::npos);
+    limitedStation["acquisition"]["max_inflight_bytes"] = scratchPeak;
+    CHECK(IR_RunRecipeJson(limitedStation.dump().c_str(), scratchRecipe.dump().c_str(),
+                           utf8(root.path() / "scratch_fit").c_str(), nullptr, &result,
+                           err, sizeof err) == IR_OK);
+
     const auto repeatedFixture = root.path() / "repeated_capture_fixture";
     fs::create_directories(repeatedFixture);
     {
@@ -642,9 +929,9 @@ void testPreflightRejections()
     CHECK(IR_CheckRecipeJson(makeStation(fixture, 1).dump().c_str(), rSimple.dump().c_str(), err, sizeof err) == IR_BAD_ARGUMENT);
     CHECK(IR_CheckRecipeJson(makeStation(fixture, 5000).dump().c_str(), rSimple.dump().c_str(), err, sizeof err) == IR_BAD_ARGUMENT);
 
-    IRGeometry existingGeometry{};
+    IRFrameSourceInfo existingInfo{};
     CHECK(IR_OpenFrames(IR_RAW_REPLAY, utf8(fixture).c_str(), 16,
-                        &existingGeometry, err, sizeof err) == IR_OK);
+                        &existingInfo, err, sizeof err) == IR_OK);
     IRCaptureStats existingStats{};
     CHECK(IR_GetCaptureStats(&existingStats, err, sizeof err) == IR_OK);
     const int32_t existingCapacity = existingStats.queue_capacity;
@@ -866,6 +1153,104 @@ void testRunRecipeJsonExStepCallbacks()
     CHECK(log.lastFailedStatus == IR_END_OF_STREAM);
 }
 
+void testFinalRecipeFailureDiagnostics()
+{
+    TempDirGuard root("final_diagnostics");
+    const auto fixture = root.path() / "fixture";
+    fs::create_directories(fixture);
+    buildDriftFixture(fixture, 2, 2, 2, 2, 0);
+
+    const auto station = makeStation(fixture).dump();
+    const Json capture{{"id", "cap"}, {"type", "capture"}, {"frames", 2},
+                       {"frame_timeout_ms", 0}, {"output", "b"}};
+    const Json analyze{{"id", "an"}, {"type", "analyze"}, {"method", "temporal_noise"},
+                       {"input", "b"}};
+    const Json recipe{{"recipe_id", "late-failure"}, {"steps", Json::array({capture, analyze})}};
+
+    struct AtCompletion {
+        const char *stepId;
+        std::function<void()> action;
+    };
+    const auto run = [&](const Json &definition, const fs::path &output, AtCompletion event,
+                         int32_t expectedStatus, int32_t expectedStage) {
+        IRRecipeRunOptions opts{sizeof(IRRecipeRunOptions), 0,
+            [](const IRRecipeStepEvent *step, void *opaque) {
+                const auto &handler = *static_cast<AtCompletion *>(opaque);
+                if (step->event_kind == IR_STEP_EVENT_COMPLETED &&
+                    std::string_view(step->step_id_utf8) == handler.stepId)
+                    handler.action();
+            }, &event};
+        IRRecipeResult result{};
+        char error[1024]{};
+        const auto status = IR_RunRecipeJson(station.c_str(), definition.dump().c_str(),
+            utf8(output).c_str(), &opts, &result, error, sizeof error);
+        if (status != expectedStatus)
+            std::cerr << "recipe diagnostic status=" << status << " error=" << error << '\n';
+        CHECK(status == expectedStatus);
+        CHECK(result.failed_stage == expectedStage);
+        CHECK(result.cleanup_status == IR_OK);
+    };
+
+    const auto cancelledOut = root.path() / "cancelled";
+    run(recipe, cancelledOut, {"an", [] { IR_RequestStop(); }},
+        IR_CANCELLED, IR_RECIPE_STAGE_ARCHIVE);
+    const auto cancelled = Json::parse(readText(cancelledOut / "result.json"));
+    CHECK(cancelled.at("run_status") == "CANCELLED");
+    CHECK(cancelled.at("error_code") == IR_CANCELLED);
+    CHECK(cancelled.at("step_records").size() == 2);
+
+    const auto occupiedOut = root.path() / "occupied";
+    const std::string priorResult = R"({"recipe_id":"another-run"})";
+    run(recipe, occupiedOut, {"cap", [&] {
+        CHECK(fs::create_directory(occupiedOut));
+        std::ofstream(occupiedOut / "result.json", std::ios::binary) << priorResult;
+        IR_RequestStop();
+    }}, IR_CANCELLED, IR_RECIPE_STAGE_ANALYZE);
+    CHECK(readText(occupiedOut / "result.json") == priorResult);
+
+    const Json burst{{"id", "loop"}, {"type", "repeat_burst"}, {"max_iterations", 1},
+                     {"steps", Json::array({capture, analyze})}};
+    const auto originalWorkDir = root.path() / "first_workdir";
+    const auto otherWorkDir = root.path() / "second_workdir";
+    fs::create_directory(originalWorkDir);
+    fs::create_directories(otherWorkDir / "run");
+    std::ofstream(otherWorkDir / "run" / "result.json", std::ios::binary) << priorResult;
+    {
+        struct RestoreWorkDir {
+            fs::path original;
+            ~RestoreWorkDir()
+            {
+                std::error_code error;
+                fs::current_path(original, error);
+            }
+        } restore{fs::current_path()};
+        fs::current_path(originalWorkDir);
+        run(Json{{"recipe_id", "relative-burst"}, {"steps", Json::array({burst})}},
+            "run", {"loop", [&] {
+                fs::current_path(otherWorkDir);
+                IR_RequestStop();
+            }}, IR_CANCELLED, IR_RECIPE_STAGE_ARCHIVE);
+    }
+    CHECK(readText(otherWorkDir / "run" / "result.json") == priorResult);
+    const auto relative = Json::parse(readText(originalWorkDir / "run" / "result.json"));
+    CHECK(relative.at("run_status") == "CANCELLED");
+    CHECK(fs::is_regular_file(originalWorkDir / "run" / "burst_summary.csv"));
+
+    const Json save{{"id", "save"}, {"type", "save_raw"}, {"input", "b"}, {"subdir", "blocked"}};
+    const Json archiveRecipe{{"recipe_id", "archive-failure"}, {"steps", Json::array({burst, save})}};
+    const auto archiveOut = root.path() / "archiving";
+    run(archiveRecipe, archiveOut, {"save", [&] {
+        std::ofstream(archiveOut / "blocked", std::ios::binary) << "regular file";
+    }}, IR_IO_ERROR, IR_RECIPE_STAGE_ARCHIVE);
+    const auto archived = Json::parse(readText(archiveOut / "result.json"));
+    CHECK(archived.at("run_status") == "ERROR");
+    CHECK(archived.at("error_code") == IR_IO_ERROR);
+    CHECK(archived.at("step_records").size() == 2);
+    CHECK(archived.at("burst_runs").size() == 1);
+    CHECK(fs::is_regular_file(archiveOut / "burst_summary.csv"));
+    CHECK(readText(archiveOut / "blocked") == "regular file");
+}
+
 bool isIso8601UtcMillis(const std::string &value)
 {
     if (value.size() != 24) return false;
@@ -971,16 +1356,35 @@ void testSchemavProvenanceAndTemplates(const fs::path *examplesDir)
 
 int main(int argc, char **argv)
 {
-    testTwoPointCalibNoDiskPassAndNg();
-    testRepeatBurstNoDiskDrift();
-    testMultiBatchSaveRawSubdirs();
-    testRepeatBurstCancelPreservesFlushedCsv();
-    testPreflightRejections();
-    testGaussianFilterAndFlickerDetectV2();
-    testFft2dPipelineV2();
-    testRunRecipeJsonExStepCallbacks();
+    try {
+        gTempRoot = testTempRoot();
+        fs::create_directories(gTempRoot);
+    } catch (const std::exception &e) {
+        std::cerr << "recipe_test cannot prepare its temporary directory: " << e.what() << '\n';
+        return 2;
+    }
+
     const fs::path examplesDir = argc > 1 ? fs::path(argv[1]) : fs::path{};
-    testSchemavProvenanceAndTemplates(argc > 1 ? &examplesDir : nullptr);
+    bool continueTests = true;
+    auto run = [&](const char *name, const auto &test) {
+        if (continueTests)
+            continueTests = runTestCase(name, test);
+    };
+    run("testTwoPointCalibNoDiskPassAndNg", [] { testTwoPointCalibNoDiskPassAndNg(); });
+    run("testU32RecipeBatchAndArchive", [] { testU32RecipeBatchAndArchive(); });
+    run("testPaddedU32ReplayMemoryBudget", [] { testPaddedU32ReplayMemoryBudget(); });
+    run("testHighBitPhysicalMetricsRejected", [] { testHighBitPhysicalMetricsRejected(); });
+    run("testRepeatBurstNoDiskDrift", [] { testRepeatBurstNoDiskDrift(); });
+    run("testMultiBatchSaveRawSubdirs", [] { testMultiBatchSaveRawSubdirs(); });
+    run("testRepeatBurstCancelPreservesFlushedCsv", [] { testRepeatBurstCancelPreservesFlushedCsv(); });
+    run("testPreflightRejections", [] { testPreflightRejections(); });
+    run("testGaussianFilterAndFlickerDetectV2", [] { testGaussianFilterAndFlickerDetectV2(); });
+    run("testFft2dPipelineV2", [] { testFft2dPipelineV2(); });
+    run("testRunRecipeJsonExStepCallbacks", [] { testRunRecipeJsonExStepCallbacks(); });
+    run("testFinalRecipeFailureDiagnostics", [] { testFinalRecipeFailureDiagnostics(); });
+    run("testSchemavProvenanceAndTemplates", [&] {
+        testSchemavProvenanceAndTemplates(argc > 1 ? &examplesDir : nullptr);
+    });
     if (gFailures == 0)
         std::cout << "recipe_flow: ALL PASSED\n";
     return gFailures == 0 ? 0 : 1;

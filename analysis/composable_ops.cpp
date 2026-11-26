@@ -292,7 +292,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_BuildTwoPointNucF64(
     int32_t summary_count,
     char *err,
     int32_t err_bytes)
-{
+noexcept{
     return guarded(err, err_bytes, [&] {
         const int64_t n = pixels(rows, cols);
         needed(v1_map, pixel_capacity, n);
@@ -372,7 +372,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_ApplyAffineMapF64(
     double *out_map,
     char *err,
     int32_t err_bytes)
-{
+noexcept{
     return guarded(err, err_bytes, [&] {
         const int64_t n = pixels(rows, cols);
         needed(in_map, pixel_capacity, n);
@@ -384,12 +384,8 @@ extern "C" IR_ANALYSIS_API int32_t IR_ApplyAffineMapF64(
     });
 }
 
-extern "C" IR_ANALYSIS_API int32_t IR_FrameStatisticsNucU16(
-    const uint16_t *frames,
-    int64_t frame_elements,
-    int32_t frame_count,
-    int32_t rows,
-    int32_t cols,
+extern "C" IR_ANALYSIS_API int32_t IR_FrameStatisticsNuc(
+    const IRArrayView *frames,
     int32_t sample_std,
     const double *k_map,
     const double *b_map,
@@ -401,11 +397,11 @@ extern "C" IR_ANALYSIS_API int32_t IR_FrameStatisticsNucU16(
     double *summary,
     int32_t summary_count,
     char *err,
-    int32_t err_bytes)
+    int32_t err_bytes) noexcept
 {
     return guarded(err, err_bytes, [&] {
-        const int64_t n = pixels(rows, cols);
-        needed(frames, frame_elements, stackSize(n, frame_count));
+        const int64_t n = validateRawArrayView(frames);
+        const int32_t frame_count = frames->frames;
         require((sample_std == 0 || sample_std == 1) && frame_count > sample_std,
                 IR_BAD_ARGUMENT, "Invalid standard deviation convention or frame count");
         require((k_map == nullptr && b_map == nullptr) || (k_map != nullptr && b_map != nullptr),
@@ -427,23 +423,25 @@ extern "C" IR_ANALYSIS_API int32_t IR_FrameStatisticsNucU16(
         std::vector<double> m(static_cast<size_t>(n), 0.0);
         std::vector<double> m2(static_cast<size_t>(n), 0.0);
 
-        for (int32_t f = 0; f < frame_count; ++f)
-        {
-            const int64_t base = int64_t(f) * n;
-            const double invCount = 1.0 / static_cast<double>(f + 1);
-            for (int64_t p = 0; p < n; ++p)
+        dispatchRawArrayView(*frames, [&](const auto *pixels) {
+            for (int32_t f = 0; f < frame_count; ++f)
             {
-                double val = static_cast<double>(frames[base + p]);
-                if (useNuc)
-                    val = k_map[p] * val + b_map[p];
-                if (dark_map)
-                    val -= dark_map[p];
-                const size_t idx = static_cast<size_t>(p);
-                const double delta = val - m[idx];
-                m[idx] += delta * invCount;
-                m2[idx] += delta * (val - m[idx]);
+                const int64_t base = int64_t(f) * n;
+                const double invCount = 1.0 / static_cast<double>(f + 1);
+                for (int64_t p = 0; p < n; ++p)
+                {
+                    double val = static_cast<double>(pixels[base + p]);
+                    if (useNuc)
+                        val = k_map[p] * val + b_map[p];
+                    if (dark_map)
+                        val -= dark_map[p];
+                    const size_t idx = static_cast<size_t>(p);
+                    const double delta = val - m[idx];
+                    m[idx] += delta * invCount;
+                    m2[idx] += delta * (val - m[idx]);
+                }
             }
-        }
+        });
 
         const double denom = static_cast<double>(frame_count - sample_std);
         double sumMean = 0.0;
@@ -484,7 +482,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_MapSummaryF64(
     IRMapSummary *summary,
     char *err,
     int32_t err_bytes)
-{
+noexcept{
     if (summary)
         *summary = IRMapSummary{};
     return guarded(err, err_bytes, [&] {
@@ -569,7 +567,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_SpatialLowHighPassF64(
     double *out_high_map,
     char *err,
     int32_t err_bytes)
-{
+noexcept{
     return guarded(err, err_bytes, [&] {
         const int64_t n = pixels(rows, cols);
         needed(in_map, pixel_capacity, n);
@@ -608,7 +606,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_MapBinaryOpF64(
     double *out_map,
     char *err,
     int32_t err_bytes)
-{
+noexcept{
     return guarded(err, err_bytes, [&] {
         const int64_t n = pixels(rows, cols);
         needed(a_map, pixel_capacity, n);
@@ -665,7 +663,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_ThresholdMaskF64(
     int32_t *out_fail_count,
     char *err,
     int32_t err_bytes)
-{
+noexcept{
     if (out_pass_count)
         *out_pass_count = 0;
     if (out_fail_count)
@@ -740,7 +738,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_MaskCombine(
     int32_t *out_nonzero_count,
     char *err,
     int32_t err_bytes)
-{
+noexcept{
     if (out_nonzero_count)
         *out_nonzero_count = 0;
     return guarded(err, err_bytes, [&] {
@@ -794,7 +792,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_GjbEvaluateBurstMetrics(
     IRGjbBurstMetrics *metrics,
     char *err,
     int32_t err_bytes)
-{
+noexcept{
     if (metrics)
         *metrics = IRGjbBurstMetrics{};
     return guarded(err, err_bytes, [&] {

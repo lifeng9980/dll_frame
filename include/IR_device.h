@@ -31,27 +31,27 @@ typedef struct IRBlackbodyReading {
  * 设备预约只约束当前 SDK 进程内的调用；其他进程的占用由设备或驱动决定。
  */
 IR_STATION_API int32_t IR_OpenDevice(int32_t kind, const char *config_json_utf8, IRHandle *handle,
-    char *err, int32_t err_bytes);
+    char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
 /* 释放句柄。需要停止加热或修改设定温度时，由调用方先执行对应工位流程。 */
-IR_STATION_API int32_t IR_CloseDevice(IRHandle handle, char *err, int32_t err_bytes);
+IR_STATION_API int32_t IR_CloseDevice(IRHandle handle, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
 /* 写入目标温度，单位 °C。以控制器读回确认结果。
  * readback_c 由调用方提供，成功时有效。写入超时后，设备状态以随后读回为准。
  */
 IR_STATION_API int32_t IR_SetBlackbody(IRHandle handle, double target_c, double *readback_c,
-    char *err, int32_t err_bytes);
+    char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
 /* 读取黑体实际温度、设定值和设备稳定标志。reading 由调用方提供，成功时有效。 */
 IR_STATION_API int32_t IR_ReadBlackbody(IRHandle handle, IRBlackbodyReading *reading,
-    char *err, int32_t err_bytes);
+    char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
 /* 等待已打开黑体在 tolerance_c 容差内连续保持 stable_window_ms 毫秒（可选要求设备自身稳定标志）。
  * 支持从其他线程调用 IR_RequestStop() 中止等待；reading 不可为 NULL，成功时返回最后一次读数。
  */
 IR_STATION_API int32_t IR_WaitBlackbodyStable(IRHandle handle, double target_c, double tolerance_c,
     int32_t stable_window_ms, int32_t timeout_ms, int32_t require_device_stable,
-    IRBlackbodyReading *reading, char *err, int32_t err_bytes);
+    IRBlackbodyReading *reading, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
 typedef struct IRPowerReading {
     double setpoint_v;
@@ -85,31 +85,31 @@ typedef struct IRPowerCurrentStableSpec {
  */
 IR_STATION_API int32_t IR_SetPowerChannel(IRHandle handle, int32_t channel,
     double voltage_v, double current_limit_a, IRPowerReading *readback,
-    char *err, int32_t err_bytes);
+    char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 IR_STATION_API int32_t IR_SetPowerOutput(IRHandle handle, int32_t channel,
-    int32_t enabled, IRPowerReading *readback, char *err, int32_t err_bytes);
+    int32_t enabled, IRPowerReading *readback, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 IR_STATION_API int32_t IR_ReadPower(IRHandle handle, int32_t channel,
-    IRPowerReading *reading, char *err, int32_t err_bytes);
+    IRPowerReading *reading, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
 /* 等待已开启电源通道先通过可选的负载启动确认，再连续保持电流稳定低于 stable_threshold_a。
  * 支持从其他线程调用 IR_RequestStop() 中止等待；spec 与 reading 不可为 NULL，成功时返回最终读数。
  */
 IR_STATION_API int32_t IR_WaitPowerCurrentStable(IRHandle handle, int32_t channel,
     const IRPowerCurrentStableSpec *spec, IRPowerReading *reading,
-    char *err, int32_t err_bytes);
+    char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
 /* 枚举本机可用串口，输出 UTF-8 JSON 数组（例如 [{"port":"COM1","device":"..."}]）。
  * required_bytes 可为 NULL；缓冲区不足时返回 IR_BUFFER_TOO_SMALL 并写入所需总字节数（含结尾 '\0'）。
  */
 IR_STATION_API int32_t IR_ListSerialPorts(char *json_out, int32_t capacity,
-    int32_t *required_bytes, char *err, int32_t err_bytes);
+    int32_t *required_bytes, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
 /* 枚举指定采集后端的可用设备，输出 UTF-8 JSON 数组（例如 [{"name":"FX3","device_path":"..."}]）。
  * Windows 支持 IR_DIRECTSHOW，Linux 支持 IR_V4L2；其余已知后端返回 IR_UNSUPPORTED。
  * required_bytes 可为 NULL；缓冲区不足时返回 IR_BUFFER_TOO_SMALL 并写入所需总字节数（含结尾 '\0'）。
  */
 IR_STATION_API int32_t IR_ListCaptureDevices(int32_t backend, char *json_out, int32_t capacity,
-    int32_t *required_bytes, char *err, int32_t err_bytes);
+    int32_t *required_bytes, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
 /* ======================== 温箱 (GWS STEN) ======================== */
 
@@ -133,13 +133,13 @@ typedef struct IROvenReading {
  * max_setpoint_c（默认 70）及 timeout_ms（默认 2000）。
  */
 IR_STATION_API int32_t IR_SetOven(IRHandle handle, double target_c, double *readback_c,
-    char *err, int32_t err_bytes);
+    char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 IR_STATION_API int32_t IR_ReadOven(IRHandle handle, IROvenReading *reading,
-    char *err, int32_t err_bytes);
-IR_STATION_API int32_t IR_StopOven(IRHandle handle, char *err, int32_t err_bytes);
+    char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
+IR_STATION_API int32_t IR_StopOven(IRHandle handle, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 IR_STATION_API int32_t IR_WaitOvenStable(IRHandle handle, double target_c, double tolerance_c,
     int32_t stable_window_ms, int32_t timeout_ms, int32_t require_no_alarm,
-    IROvenReading *reading, char *err, int32_t err_bytes);
+    IROvenReading *reading, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
 /* ======================== 万用表 (Keithley DMM6500 SCPI) ======================== */
 
@@ -158,9 +158,9 @@ typedef struct IRDmmReading {
 } IRDmmReading;
 
 /* DMM6500 配置 JSON 含 port（默认 115200 baud）或 host/tcp_port（默认 5025）二选一及可选 timeout_ms（默认 2000）。 */
-IR_STATION_API int32_t IR_SetDmmMode(IRHandle handle, int32_t mode, char *err, int32_t err_bytes);
+IR_STATION_API int32_t IR_SetDmmMode(IRHandle handle, int32_t mode, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 IR_STATION_API int32_t IR_ReadDmm(IRHandle handle, int32_t expected_mode,
-    IRDmmReading *reading, char *err, int32_t err_bytes);
+    IRDmmReading *reading, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
 /* ======================== 探测器串口控制 (CC 帧协议) ======================== */
 
@@ -175,14 +175,14 @@ typedef struct IRDetectorCurrentReading {
  * 可选 timeout_ms（默认 1200）与 inter_command_ms（默认 0）。
  */
 IR_STATION_API int32_t IR_SetDetectorTiming(IRHandle handle, int32_t integration_us,
-    int32_t frame_hz, int32_t empty_us, char *err, int32_t err_bytes);
+    int32_t frame_hz, int32_t empty_us, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 IR_STATION_API int32_t IR_SetDetectorGpol(IRHandle handle, double gpol_v,
-    char *err, int32_t err_bytes);
+    char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 IR_STATION_API int32_t IR_SetDetectorRegister(IRHandle handle, uint8_t command_code,
-    const uint8_t *payload, int32_t payload_bytes, char *err, int32_t err_bytes);
+    const uint8_t *payload, int32_t payload_bytes, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 IR_STATION_API int32_t IR_MeasureDetectorCurrent(IRHandle handle, int32_t gain_code,
     uint16_t channel_code, IRDetectorCurrentReading *reading,
-    char *err, int32_t err_bytes);
+    char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
 /* ======================== 制冷机监测 (Modbus RTU) ======================== */
 
@@ -196,7 +196,7 @@ typedef struct IRCoolerReading {
  * 可选 slave_address（1..247，默认 1）、register_address（0..65535，默认 0x7A52）与 timeout_ms（默认 2000）。
  */
 IR_STATION_API int32_t IR_ReadCooler(IRHandle handle, IRCoolerReading *reading,
-    char *err, int32_t err_bytes);
+    char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
 #ifdef __cplusplus
 }

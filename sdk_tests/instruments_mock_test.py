@@ -90,6 +90,10 @@ class Geometry(c.Structure):
     _fields_ = [("width", c.c_int32), ("height", c.c_int32), ("valid_bits", c.c_int32)]
 
 
+class FrameSourceInfo(c.Structure):
+    _fields_ = [("geometry", Geometry), ("data_type", c.c_int32)]
+
+
 class NoiseRecipe(c.Structure):
     _fields_ = [
         ("recipe_id", c.c_char_p),
@@ -159,7 +163,7 @@ def load_sdk(path: Path):
     ]
     sdk.IR_ReadCooler.argtypes = [c.c_uint64, c.POINTER(CoolerReading), *err_args]
 
-    sdk.IR_OpenFrames.argtypes = [c.c_int32, c.c_char_p, c.c_int32, c.POINTER(Geometry), *err_args]
+    sdk.IR_OpenFrames.argtypes = [c.c_int32, c.c_char_p, c.c_int32, c.POINTER(FrameSourceInfo), *err_args]
     sdk.IR_CloseFrames.argtypes = err_args
     sdk.IR_RequestStop.argtypes = []
     sdk.IR_RequestStop.restype = None

@@ -145,7 +145,8 @@ function Import-VsDevEnv([string]$VsPath) {
         throw "Failed to initialize MSVC x64 environment via $vcvars"
     }
     foreach ($line in $envDump) {
-        if ($line -match '^([^=]+)=(.*)$') {
+        # Preserve inherited empty values. Windows PowerShell's setter removes them.
+        if ($line -match '^([^=]+)=(.+)$') {
             [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2], "Process")
         }
     }
@@ -289,8 +290,8 @@ foreach ($sym in @(
 $analysisExports = (Invoke-External -FilePath $dumpbinPath -Arguments @("/nologo", "/exports", $AnalysisDll)).StdOut
 foreach ($sym in @(
     "IR_AnalysisVersion",
-    "IR_FrameStatisticsU16",
-    "IR_ROIMeanU16",
+    "IR_FrameStatistics",
+    "IR_ROIMean",
     "IR_Noise3DBuildCalibDn",
     "IR_Noise3DComputeFramesDn",
     "IR_GbProcessBadPixels",
@@ -299,16 +300,16 @@ foreach ($sym in @(
     "IR_GjbEvaluateMaps",
     "IR_BuildTwoPointNucF64",
     "IR_ApplyAffineMapF64",
-    "IR_FrameStatisticsNucU16",
+    "IR_FrameStatisticsNuc",
     "IR_MapSummaryF64",
     "IR_SpatialLowHighPassF64",
     "IR_MapBinaryOpF64",
     "IR_ThresholdMaskF64",
     "IR_MaskCombine",
     "IR_ComputeRfft1D",
-    "IR_ChannelSpectrumU16",
+    "IR_ChannelSpectrum",
     "IR_GjbEvaluateBurstMetrics",
-    "IR_FlickerDetectU16",
+    "IR_FlickerDetect",
     "IR_Fft2dMagnitudeF64"
 )) {
     Assert-True ($analysisExports -match "(?m)^\s*\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+$([regex]::Escape($sym))(?:\s|$)") "IR_analysis.dll must export $sym"
