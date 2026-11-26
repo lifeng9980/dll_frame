@@ -75,4 +75,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\verify_windows.ps1 -
 ```
 
 - **L5 → L0 源码追踪**：`examples/ir_recipe_cli.cpp` → `include/IR_recipe.h` → `station/procedures/recipe_json.cpp` → `recipe_{parse,instruments,runner}.cpp` → `recipe_metrics.cpp` + `metrics_{basic,standard}.cpp` → `analysis/*.cpp`。
-- **调试与产物目录**：当前 Windows 增量构建固定使用 `实验/test/{bin,lib,lib/plugins,tests/bin}/`；不要为每轮迭代创建新的构建目录。VS Code `F5` 运行 `ir_run_recipe.exe --run --station 实验/debug_tc002a/station.json --recipe 实验/debug_tc002a/recipe.json --output out_dbg`。
+- **调试与产物目录**：Windows Debug 统一使用 Ninja 和 `实验/build-debug`，产物放在 `bin`、`bin/plugins`、`lib`、`lib/plugins` 和 `tests/bin`。各轮迭代复用该目录。VS Code `F5` 运行 `ir_run_recipe.exe --run --station 实验/debug_tc002a/station.json --recipe 实验/debug_tc002a/recipe.json --output out_dbg`。

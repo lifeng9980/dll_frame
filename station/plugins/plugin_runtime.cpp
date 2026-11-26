@@ -681,11 +681,8 @@ private:
             const auto existingIt = container.find(slotName);
             const bool needsAllocation =
                 existingIt == container.end() || elements > existingIt->second.data.capacity();
-            const uint64_t retained = ir::procedures::recipe::addBytes(
-                runCtx_.inflightBaseBytes, runCtx_.ctx.retainedBytes());
-            const uint64_t peak = ir::procedures::recipe::addBytes(
-                retained, needsAllocation ? count * sizeof(T) : 0);
-            ir::procedures::recipe::requireWithinMemoryLimit(peak, runCtx_.maxInflightBytes);
+            ir::procedures::recipe::requireAdditionalBytes(
+                runCtx_, needsAllocation ? count * sizeof(T) : 0);
 
             // A fresh sized vector avoids geometric growth. The old buffer stays live
             // until the new allocation succeeds, so the peak includes both buffers.

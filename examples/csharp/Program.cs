@@ -307,13 +307,12 @@ internal static class IRStation
 
         var subDir = OperatingSystem.IsWindows() ? "bin" : "lib";
         var platDir = OperatingSystem.IsWindows() ? "windows-x64" : "linux-x86_64";
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        for (var i = 0; i < 6 && dir is not null; ++i, dir = dir.Parent)
+        for (DirectoryInfo? dir = new(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
         {
             var packaged = Path.Combine(dir.FullName, platDir, subDir);
             if (Directory.Exists(packaged)) return packaged;
-            var buildTest = Path.Combine(dir.FullName, "实验", "test", subDir);
-            if (Directory.Exists(buildTest)) return buildTest;
+            var buildDebug = Path.Combine(dir.FullName, "实验", "build-debug", subDir);
+            if (Directory.Exists(buildDebug)) return buildDebug;
         }
         throw new InvalidOperationException("Set IR_SDK_LIB_DIR to the platform library directory.");
     }

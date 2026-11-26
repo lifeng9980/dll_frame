@@ -369,9 +369,9 @@ def sdk_library_directory() -> Path:
     packaged = package_root / ("windows-x64/bin" if os.name == "nt" else "linux-x86_64/lib")
     if packaged.is_dir():
         return packaged
-    build_test = package_root / "实验" / "test" / ("bin" if os.name == "nt" else "lib")
-    if build_test.is_dir():
-        return build_test
+    build_debug = package_root / "实验" / "build-debug" / ("bin" if os.name == "nt" else "lib")
+    if build_debug.is_dir():
+        return build_debug
     return packaged
 
 

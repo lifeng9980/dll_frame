@@ -718,6 +718,18 @@ void testPreflightRejections()
     };
     CHECK(IR_CheckRecipeJson(stOk.c_str(), rTypeMismatch.dump().c_str(), err, sizeof err) == IR_BAD_ARGUMENT);
 
+    Json aliasedSlot = rTypeMismatch;
+    aliasedSlot["steps"][2] = {{"id", "fft"}, {"type", "analyze"}, {"method", "fft2d"},
+                                {"input", "m"}, {"outputs", {{"magnitude_map", "m"}}}};
+    CHECK(IR_CheckRecipeJson(stOk.c_str(), aliasedSlot.dump().c_str(), err, sizeof err) == IR_BAD_ARGUMENT);
+    CHECK(std::string(err).find("aliases input slot 'm'") != std::string::npos);
+
+    Json duplicateSlot = rTypeMismatch;
+    duplicateSlot["steps"].erase(2);
+    duplicateSlot["steps"][1]["outputs"]["std_map"] = "m";
+    CHECK(IR_CheckRecipeJson(stOk.c_str(), duplicateSlot.dump().c_str(), err, sizeof err) == IR_BAD_ARGUMENT);
+    CHECK(std::string(err).find("binds duplicate output slot 'm'") != std::string::npos);
+
     // 3. save_raw inside repeat_burst
     const Json rSaveInsideLoop = {
         {"schemav", 1},
@@ -810,6 +822,24 @@ void testPreflightRejections()
     CHECK(IR_RunRecipeJson(limitedStation.dump().c_str(), budgetRecipe.dump().c_str(), utf8(outDir).c_str(), nullptr, &result, err, sizeof err) == IR_BAD_ARGUMENT);
     CHECK(std::string(err).find("max_inflight_bytes") != std::string::npos);
     CHECK(Json::parse(readText(outDir / "result.json")).at("run_status") == "ERROR");
+
+    const Json scratchRecipe{{"recipe_id", "frame-stats-scratch-budget"}, {"steps", Json::array({
+        {{"id", "capture"}, {"type", "capture"}, {"frames", 2}, {"frame_timeout_ms", 0}},
+        {{"id", "stats"}, {"type", "analyze"}, {"method", "frame_stats"}, {"input", "capture"}}
+    })}};
+    // The retained estimate includes no output slots, but frame_stats still needs two temporary maps.
+    constexpr uint64_t scratchPeak = (2 + 2 + 2) * 16 * sizeof(uint16_t) +
+        4 * sizeof(IRFrameStamp) + 2 * 16 * sizeof(double);
+    limitedStation["acquisition"]["max_inflight_bytes"] = scratchPeak - 1;
+    CHECK(IR_RunRecipeJson(limitedStation.dump().c_str(), scratchRecipe.dump().c_str(),
+                           utf8(root.path() / "scratch_reject").c_str(), nullptr, &result,
+                           err, sizeof err) == IR_BAD_ARGUMENT);
+    CHECK(result.failed_stage == IR_RECIPE_STAGE_ANALYZE && result.failed_step_index == 1);
+    CHECK(std::string(err).find("frame storage " + std::to_string(scratchPeak)) != std::string::npos);
+    limitedStation["acquisition"]["max_inflight_bytes"] = scratchPeak;
+    CHECK(IR_RunRecipeJson(limitedStation.dump().c_str(), scratchRecipe.dump().c_str(),
+                           utf8(root.path() / "scratch_fit").c_str(), nullptr, &result,
+                           err, sizeof err) == IR_OK);
 
     const auto repeatedFixture = root.path() / "repeated_capture_fixture";
     fs::create_directories(repeatedFixture);

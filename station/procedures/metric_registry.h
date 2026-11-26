@@ -62,41 +62,51 @@ inline void recordScalarOutputs(ExecutionContext &ctx, const std::string &name,
 }
 
 template <typename MapT>
+uint64_t slotAllocationBytes(const std::map<std::string, MapT> &container,
+                             const std::string &slotName, int64_t pixelCount)
+{
+    if (const auto slot = container.find(slotName); slot != container.end() &&
+        slot->second.data.capacity() >= static_cast<size_t>(pixelCount))
+        return 0;
+    using Element = typename decltype(MapT::data)::value_type;
+    return multiplyBytes(static_cast<uint64_t>(pixelCount), sizeof(Element));
+}
+
+inline void requireAdditionalBytes(const AnalysisRunContext &runCtx, uint64_t bytes)
+{
+    const uint64_t retained = addBytes(runCtx.inflightBaseBytes, runCtx.ctx.retainedBytes());
+    requireWithinMemoryLimit(addBytes(retained, bytes), runCtx.maxInflightBytes);
+}
+
+template <typename MapT>
 class SlotBufferWriter {
+    using Buffer = decltype(MapT::data);
+
 public:
     SlotBufferWriter(std::map<std::string, MapT> &container, const std::string &slotName,
-                     IRGeometry g, int64_t pixelCount, bool directReuse, bool zeroFill = false)
-        : container_(container), slotName_(slotName), geometry_(g),
-          direct_(directReuse && !slotName.empty())
+                     IRGeometry g, int64_t pixelCount, bool zeroFill = false)
     {
-        if (direct_) {
-            auto &slot = container_[slotName_];
-            slot.geometry = g;
-            slot.data.resize(static_cast<size_t>(pixelCount));
-            if (zeroFill)
-                std::fill(slot.data.begin(), slot.data.end(), typename decltype(slot.data)::value_type{});
-            ptr_ = slot.data.data();
+        auto *slot = slotName.empty() ? nullptr : &container[slotName];
+        auto &buffer = slot ? slot->data : scratch_;
+        const auto elements = static_cast<size_t>(pixelCount);
+        if (elements > buffer.capacity()) {
+            // Match the budgeted allocation instead of growing capacity geometrically.
+            buffer = Buffer(elements);
         } else {
-            scratch_.resize(static_cast<size_t>(pixelCount));
-            ptr_ = scratch_.data();
+            buffer.resize(elements);
+            if (zeroFill)
+                std::fill(buffer.begin(), buffer.end(), typename Buffer::value_type{});
         }
+        if (slot)
+            slot->geometry = g;
+        ptr_ = buffer.data();
     }
 
     auto *data() noexcept { return ptr_; }
 
-    void commit()
-    {
-        if (!direct_ && !slotName_.empty())
-            container_[slotName_] = {geometry_, std::move(scratch_)};
-    }
-
 private:
-    std::map<std::string, MapT> &container_;
-    std::string slotName_;
-    IRGeometry geometry_{};
-    bool direct_{false};
-    decltype(MapT::data) scratch_;
-    decltype(MapT::data.data()) ptr_{nullptr};
+    Buffer scratch_;
+    typename Buffer::value_type *ptr_{};
 };
 
 IRCalcParameters parseCalcParams(const Json &params, const std::string &path);

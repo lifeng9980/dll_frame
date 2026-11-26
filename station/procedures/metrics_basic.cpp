@@ -26,6 +26,7 @@ PreparedMetric prepTemporalNoise(const std::string &name, const Json &inputs, co
             const auto &b = getBatch(ctx, framesSlot);
             const auto n = pixels(b.geometry.height, b.geometry.width);
             const IRArrayView input = frameBatchArrayView(b);
+            requireAdditionalBytes(runCtx, multiplyBytes(static_cast<uint64_t>(n), 2 * sizeof(double)));
             std::vector<double> meanMap(static_cast<size_t>(n)), stdMap(static_cast<size_t>(n));
             double summary[2]{};
             char err[1024]{};
@@ -115,8 +116,10 @@ PreparedMetric prepFrameStats(const std::string &name, const Json &inputs, const
                 checkMaskSize(vm, n, g, "frame_stats.valid_mask");
                 maskPtr = vm.data.data();
             }
-            SlotBufferWriter meanWriter(ctx.maps, meanOut, g, n, meanOut != stdOut);
-            SlotBufferWriter stdWriter(ctx.maps, stdOut, g, n, stdOut != meanOut);
+            requireAdditionalBytes(runCtx, addBytes(
+                slotAllocationBytes(ctx.maps, meanOut, n), slotAllocationBytes(ctx.maps, stdOut, n)));
+            SlotBufferWriter meanWriter(ctx.maps, meanOut, g, n);
+            SlotBufferWriter stdWriter(ctx.maps, stdOut, g, n);
             double summary[2]{};
             char err[1024]{};
             const IRArrayView input = frameBatchArrayView(b);
@@ -127,8 +130,6 @@ PreparedMetric prepFrameStats(const std::string &name, const Json &inputs, const
                 checkStatus(IR_FrameStatisticsNuc(&input, sampleStd, kPtr, bPtr, darkPtr, maskPtr,
                     meanWriter.data(), stdWriter.data(), n, summary, 2, err, sizeof err), err);
             }
-            meanWriter.commit();
-            stdWriter.commit();
             recordScalarOutputs(ctx, name, outs, {summary[0], summary[1]});
         }
     }};
@@ -240,16 +241,14 @@ PreparedMetric prepTwoPointNuc(const std::string &name, const Json &inputs, cons
                 checkMapSize(rm, n, g, "two_point_nuc.ref_map");
                 refPtr = rm.data.data();
             }
-            const bool kDirect = kOut != v1Slot && kOut != v2Slot && kOut != refSlot && kOut != bOut;
-            const bool bDirect = bOut != v1Slot && bOut != v2Slot && bOut != refSlot && bOut != kOut;
-            SlotBufferWriter kWriter(ctx.maps, kOut, g, n, kDirect);
-            SlotBufferWriter bWriter(ctx.maps, bOut, g, n, bDirect);
+            requireAdditionalBytes(runCtx, addBytes(
+                slotAllocationBytes(ctx.maps, kOut, n), slotAllocationBytes(ctx.maps, bOut, n)));
+            SlotBufferWriter kWriter(ctx.maps, kOut, g, n);
+            SlotBufferWriter bWriter(ctx.maps, bOut, g, n);
             double summary[4]{};
             char err[1024]{};
             checkStatus(IR_BuildTwoPointNucF64(v1.data.data(), v2.data.data(), maskPtr, refPtr,
                 g.height, g.width, n, kWriter.data(), bWriter.data(), summary, 4, err, sizeof err), err);
-            kWriter.commit();
-            bWriter.commit();
             recordScalarOutputs(ctx, name, outs, {summary[0], summary[1], summary[2], summary[3]});
         }
     }};
@@ -297,10 +296,10 @@ PreparedMetric prepSpatialFilter(const std::string &name, const Json &inputs, co
                 checkMaskSize(vm, n, g, "spatial_filter.valid_mask");
                 maskPtr = vm.data.data();
             }
-            const bool lowDirect = lowOut != inSlot && lowOut != highOut;
-            const bool highDirect = highOut != inSlot && highOut != lowOut;
-            SlotBufferWriter lowWriter(ctx.maps, lowOut, g, n, lowDirect);
-            SlotBufferWriter highWriter(ctx.maps, highOut, g, n, highDirect);
+            requireAdditionalBytes(runCtx, addBytes(
+                slotAllocationBytes(ctx.maps, lowOut, n), slotAllocationBytes(ctx.maps, highOut, n)));
+            SlotBufferWriter lowWriter(ctx.maps, lowOut, g, n);
+            SlotBufferWriter highWriter(ctx.maps, highOut, g, n);
             char err[1024]{};
             checkStatus(IR_SpatialLowHighPassF64(inMap.data.data(), maskPtr, g.height, g.width, n,
                 filterKind, kw, kh, lowWriter.data(), highWriter.data(),
@@ -310,8 +309,6 @@ PreparedMetric prepSpatialFilter(const std::string &name, const Json &inputs, co
                 0, 0, 0, 0, 0.0, 100.0, &lowSum, err, sizeof err), err);
             checkStatus(IR_MapSummaryF64(highWriter.data(), maskPtr, g.height, g.width, n,
                 0, 0, 0, 0, 0.0, 100.0, &highSum, err, sizeof err), err);
-            lowWriter.commit();
-            highWriter.commit();
             recordScalarOutputs(ctx, name, outs, {lowSum.pop_std, highSum.pop_std});
         }
     }};
@@ -348,14 +345,14 @@ PreparedMetric prepMapBinaryOp(const std::string &name, const Json &inputs, cons
             const auto n = pixels(g.height, g.width);
             checkMapSize(a, n, g, "map_binary_op.a_map");
             checkMapSize(b, n, g, "map_binary_op.b_map");
-            SlotBufferWriter outWriter(ctx.maps, outSlot, g, n, outSlot != aSlot && outSlot != bSlot);
+            requireAdditionalBytes(runCtx, slotAllocationBytes(ctx.maps, outSlot, n));
+            SlotBufferWriter outWriter(ctx.maps, outSlot, g, n);
             char err[1024]{};
             checkStatus(IR_MapBinaryOpF64(a.data.data(), b.data.data(), g.height, g.width, n,
                 op, paramVal, outWriter.data(), err, sizeof err), err);
             IRMapSummary ms{};
             checkStatus(IR_MapSummaryF64(outWriter.data(), nullptr, g.height, g.width, n,
                 0, 0, 0, 0, 0.0, 100.0, &ms, err, sizeof err), err);
-            outWriter.commit();
             recordScalarOutputs(ctx, name, outs, {ms.mean});
         }
     }};
@@ -400,12 +397,12 @@ PreparedMetric prepThresholdMask(const std::string &name, const Json &inputs, co
                 checkMaskSize(bm, n, g, "threshold_mask.base_valid_mask");
                 basePtr = bm.data.data();
             }
-            SlotBufferWriter passWriter(ctx.masks, outSlot, g, n, outSlot != baseSlot);
+            requireAdditionalBytes(runCtx, slotAllocationBytes(ctx.masks, outSlot, n));
+            SlotBufferWriter passWriter(ctx.masks, outSlot, g, n);
             int32_t passCnt = 0, failCnt = 0;
             char err[1024]{};
             checkStatus(IR_ThresholdMaskF64(m.data.data(), basePtr, g.height, g.width, n,
                 mode, lowParam, highParam, passWriter.data(), &passCnt, &failCnt, err, sizeof err), err);
-            passWriter.commit();
             recordScalarOutputs(ctx, name, outs, {double(passCnt), double(failCnt)});
         }
     }};
@@ -446,12 +443,12 @@ PreparedMetric prepMaskCombine(const std::string &name, const Json &inputs, cons
                 checkMaskSize(mb, n, g, "mask_combine.mask_b");
                 bPtr = mb.data.data();
             }
-            SlotBufferWriter outWriter(ctx.masks, outSlot, g, n, outSlot != aSlot && outSlot != bSlot);
+            requireAdditionalBytes(runCtx, slotAllocationBytes(ctx.masks, outSlot, n));
+            SlotBufferWriter outWriter(ctx.masks, outSlot, g, n);
             int32_t nonzeroCnt = 0;
             char err[1024]{};
             checkStatus(IR_MaskCombine(ma.data.data(), bPtr, g.height, g.width, n, op,
                 outWriter.data(), &nonzeroCnt, err, sizeof err), err);
-            outWriter.commit();
             recordScalarOutputs(ctx, name, outs, {double(nonzeroCnt)});
         }
     }};

@@ -544,6 +544,50 @@ int main(int argc, char **argv)
     CHECK(rr.completed_frames == 2);
     CHECK(Json::parse(readText(outBudget / "result.json")).at("run_status") == "ERROR");
 
+    // The plugin retains a 4x4 map, larger than the 2x2 preflight estimate.
+    // Both standard metrics must count their two new mask slots before analysis.
+    constexpr uint64_t maskPeak = (2 + 2 + 2) * 4 * sizeof(uint16_t) + 4 * sizeof(IRFrameStamp) +
+        (4 + 16 + 3 * 4) * sizeof(double) + 2 * 4 * sizeof(uint8_t);
+    for (const std::string method : {"gb_evaluate", "gjb_evaluate"}) {
+        Json recipe = overBudgetRecipe;
+        auto &steps = recipe["steps"];
+        steps.push_back({
+            {"id", "stats"}, {"type", "analyze"}, {"method", "frame_stats"},
+            {"input", "b"}, {"outputs", {{"mean_map", "v1"}, {"std_map", "vn"}}}
+        });
+        steps.push_back({
+            {"id", "hot"}, {"type", "analyze"}, {"method", "map_binary_op"},
+            {"inputs", {{"a_map", "v1"}, {"b_map", "vn"}}},
+            {"params", {{"op", "add"}}}, {"outputs", {{"out_map", "v2"}}}
+        });
+        Json evaluate{
+            {"id", "evaluate"}, {"type", "analyze"}, {"method", method},
+            {"inputs", {{"v1_map", "v1"}, {"v2_map", "v2"}, {"vn_map", "vn"}}},
+            {"params", {{"t0_c", 20.0}, {"t1_c", 20.0}}},
+            {"outputs", {{"valid_mask", "valid"}, {"total_bad_mask", "bad"}}}
+        };
+        steps.push_back(evaluate);
+        const auto runMaskBudget = [&](uint64_t budget, const char *suffix) {
+            auto station = tightStation;
+            station["acquisition"]["max_inflight_bytes"] = budget;
+            return IR_RunRecipeJson(station.dump().c_str(), recipe.dump().c_str(),
+                utf8(root.path() / (method + suffix)).c_str(), nullptr, &rr, err, sizeof err);
+        };
+        // The math API would reject equal temperatures. The budget must reject it before that call.
+        CHECK(runMaskBudget(maskPeak - 1, "_mask_reject") == IR_BAD_ARGUMENT);
+        CHECK(rr.failed_stage == IR_RECIPE_STAGE_ANALYZE && rr.failed_step_index == 4);
+        CHECK(std::string(err).find("frame storage " + std::to_string(maskPeak)) != std::string::npos);
+
+        evaluate["params"]["t1_c"] = 25.0;
+        steps.back() = evaluate;
+        evaluate["id"] = "evaluate_reuse";
+        steps.push_back(evaluate);
+        const auto fitStatus = runMaskBudget(maskPeak, "_mask_fit");
+        if (fitStatus != IR_OK)
+            std::cerr << method << " mask budget run failed: " << err << '\n';
+        CHECK(fitStatus == IR_OK);
+    }
+
     // A plugin that ignores a failed repeated allocation still fails its execute() call.
     const Json duplicateAllocRecipe{
         {"schemav", 1},

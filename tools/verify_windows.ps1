@@ -145,7 +145,8 @@ function Import-VsDevEnv([string]$VsPath) {
         throw "Failed to initialize MSVC x64 environment via $vcvars"
     }
     foreach ($line in $envDump) {
-        if ($line -match '^([^=]+)=(.*)$') {
+        # Preserve inherited empty values. Windows PowerShell's setter removes them.
+        if ($line -match '^([^=]+)=(.+)$') {
             [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2], "Process")
         }
     }
@@ -236,7 +237,7 @@ $res = Invoke-External -FilePath $ctestPath -WorkingDirectory $RepoRoot `
     -Arguments @("--preset", "windows", "--output-on-failure")
 Write-Host $res.StdOut.Trim()
 
-$BuildDir = Join-Path $ExperimentDir "test"
+$BuildDir = Join-Path $ExperimentDir "build-debug"
 $BuildBinDir = Join-Path $BuildDir "bin"
 $StationDll = Join-Path $BuildBinDir "IR_station.dll"
 $AnalysisDll = Join-Path $BuildBinDir "IR_analysis.dll"
