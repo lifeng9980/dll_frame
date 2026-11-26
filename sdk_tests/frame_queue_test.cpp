@@ -1,6 +1,8 @@
 #include "IR_station.h"
-#include "frame_queue.h"
+#include "api_common.h"
+#include "frame_source.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -8,8 +10,10 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <new>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -24,6 +28,54 @@ struct FrameQueueTestAccess {
         release.wait();
     }
 };
+
+namespace {
+class TestLiveSource final : public FrameSource {
+public:
+    IRGeometry geometry() const override
+    {
+        // The first geometry request after start() is part of pump scratch setup.
+        if (started_ && std::exchange(failScratchSetup_, false))
+            throw std::bad_alloc{};
+        return {2, 2, 16};
+    }
+
+    void start() override
+    {
+        ir::api::require(!started_, IR_BUSY, "Live test source is still started");
+        started_ = true;
+        delivered_ = false;
+    }
+    void stop() override { started_ = false; }
+    void flush() override { failScratchSetup_ = true; }
+
+    void read(void *frame, IRFrameStamp &stamp, int) override
+    {
+        if (std::exchange(delivered_, true))
+            throw ir::api::Error(IR_END_OF_STREAM, "End of live test data");
+        std::fill_n(static_cast<uint16_t *>(frame), 4, uint16_t{17});
+        stamp.sequence = 1;
+        stamp.fields = IR_HAS_SEQUENCE;
+    }
+
+private:
+    bool started_{};
+    bool delivered_{};
+    mutable bool failScratchSetup_{true};
+};
+}
+
+#if defined(_WIN32)
+std::unique_ptr<FrameSource> openDirectShow(const char *, int)
+{
+    return std::make_unique<TestLiveSource>();
+}
+#elif defined(__linux__)
+std::unique_ptr<FrameSource> openV4l2(const char *, int)
+{
+    return std::make_unique<TestLiveSource>();
+}
+#endif
 }
 
 namespace {
@@ -39,6 +91,13 @@ void checkTrue(bool cond, const char *expr, int line)
 }
 
 #define CHECK(cond) checkTrue((cond), #cond, __LINE__)
+
+IRFrameBatchView makeU16Batch(void *pixels, uint64_t byteSize, int32_t width, int32_t height,
+                              int32_t frames, IRFrameStamp *stamps = nullptr,
+                              int32_t stampCapacity = 0)
+{
+    return {{pixels, byteSize, IR_TYPE_U16, width, height, frames}, 0, stamps, stampCapacity};
+}
 
 struct TempDirGuard {
     fs::path dir;
@@ -57,12 +116,74 @@ struct TempDirGuard {
 
 using ir::acquisition::FrameQueue;
 
+#if defined(_WIN32) || defined(__linux__)
+void testLiveScratchStartupFailure()
+{
+#ifdef _WIN32
+    constexpr auto backend = IR_DIRECTSHOW;
+#else
+    constexpr auto backend = IR_V4L2;
+#endif
+    char error[512]{};
+    IRFrameSourceInfo sourceInfo{};
+    CHECK(IR_OpenFrames(backend, "fake-live", 16, &sourceInfo, error, sizeof error) == IR_OK);
+    CHECK(IR_StartFrames(error, sizeof error) == IR_COMPUTATION_FAILED);
+    IRCaptureStats stats{};
+    CHECK(IR_GetCaptureStats(&stats, error, sizeof error) == IR_OK);
+    CHECK(stats.running == 0);
+
+    CHECK(IR_StartFrames(error, sizeof error) == IR_OK);
+    uint16_t pixels[4]{};
+    IRFrameStamp stamp{};
+    auto batch = makeU16Batch(pixels, sizeof pixels, 2, 2, 1, &stamp, 1);
+    CHECK(IR_ReadFrames(1000, &batch, error, sizeof error) == IR_OK);
+    CHECK(batch.pixels.frames == 1 && pixels[0] == 17 && pixels[3] == 17);
+
+    int32_t discarded = -1;
+    CHECK(IR_FlushFrames(0, 0, &discarded, error, sizeof error) == IR_COMPUTATION_FAILED);
+    CHECK(discarded == 0);
+    CHECK(IR_GetCaptureStats(&stats, error, sizeof error) == IR_OK);
+    CHECK(stats.running == 0);
+    CHECK(IR_StartFrames(error, sizeof error) == IR_OK);
+    batch.pixels.frames = 1;
+    CHECK(IR_ReadFrames(1000, &batch, error, sizeof error) == IR_OK);
+    CHECK(batch.pixels.frames == 1 && pixels[0] == 17 && pixels[3] == 17);
+    CHECK(IR_CloseFrames(error, sizeof error) == IR_OK);
+}
+#endif
+
+void testTerminalErrorFollowsQueuedFrames()
+{
+    FrameQueue queue;
+    queue.resetSession({2, 2, 16}, IR_TYPE_U16, 2, true);
+    const uint16_t pixels[]{4, 5, 6, 7};
+    IRFrameStamp stamp{};
+    stamp.sequence = 3;
+    stamp.fields = IR_HAS_SEQUENCE;
+    queue.push(pixels, stamp);
+
+    const std::string prefix(1022, 'x');
+    const std::string message = prefix + "\xe4\xb8\xad";
+    queue.setTerminalError(IR_IO_ERROR, message.c_str());
+    queue.setTerminalError(IR_TIMEOUT, "Later failure");
+
+    uint16_t out[4]{};
+    IRFrameStamp outStamp{};
+    int32_t code = IR_OK;
+    std::string detail;
+    const auto neverStop = [] { return false; };
+    CHECK(queue.pop(out, outStamp, 0, neverStop, code, detail) == FrameQueue::PopStatus::ok);
+    CHECK(outStamp.sequence == 3 && out[0] == 4 && out[3] == 7);
+    CHECK(queue.pop(out, outStamp, 0, neverStop, code, detail) == FrameQueue::PopStatus::terminal_error);
+    CHECK(code == IR_IO_ERROR && detail == prefix);
+}
+
 void testPreviewContentionDoesNotBlockMeasurementQueue()
 {
     FrameQueue queue;
     const IRGeometry geometry{4, 4, 16};
-    queue.configure(geometry, 8);
-    queue.resetSession(geometry, 8, true);
+    queue.configure(geometry, IR_TYPE_U16, 8);
+    queue.resetSession(geometry, IR_TYPE_U16, 8, true);
 
     std::promise<void> locked;
     std::promise<void> release;
@@ -73,10 +194,9 @@ void testPreviewContentionDoesNotBlockMeasurementQueue()
     locked.get_future().wait();
 
     std::vector<uint16_t> previewPixels(16);
-    IRGeometry previewGeometry{};
-    int32_t hasFrame = 1;
-    queue.tryReadLatest(previewPixels.data(), 16, &previewGeometry, nullptr, hasFrame);
-    CHECK(hasFrame == 0);
+    auto preview = makeU16Batch(previewPixels.data(), previewPixels.size() * sizeof(uint16_t), 4, 4, 1);
+    queue.tryReadLatest(preview);
+    CHECK(preview.pixels.frames == 0);
 
     std::promise<void> producerDone;
     auto producerFuture = producerDone.get_future();
@@ -108,22 +228,21 @@ void testConcurrentLiveProducerAndSlowPreview()
 {
     FrameQueue fq;
     const IRGeometry geom{4, 4, 16};
-    fq.configure(geom, 64);
-    fq.resetSession(geom, 64, true);
+    fq.configure(geom, IR_TYPE_U16, 64);
+    fq.resetSession(geom, IR_TYPE_U16, 64, true);
 
     std::atomic<bool> stopPreview{false};
     std::atomic<bool> previewSeen{false};
     std::atomic<bool> previewError{false};
     std::thread previewThread([&] {
         std::vector<uint16_t> buf(16, 0);
+        IRFrameStamp stamp{};
         while (!stopPreview.load(std::memory_order_acquire)) {
             try {
-                IRGeometry pg{};
-                IRFrameStamp ps{};
-                int32_t hasFrame = 0;
-                fq.tryReadLatest(buf.data(), 16, &pg, &ps, hasFrame);
-                if (hasFrame == 1) {
-                    if (pg.width == 4 && pg.height == 4 && ps.sequence >= 1)
+                auto preview = makeU16Batch(buf.data(), buf.size() * sizeof(uint16_t), 4, 4, 1, &stamp, 1);
+                fq.tryReadLatest(preview);
+                if (preview.pixels.frames == 1) {
+                    if (preview.pixels.width == 4 && preview.pixels.height == 4 && stamp.sequence >= 1)
                         previewSeen.store(true, std::memory_order_release);
                     else
                         previewError.store(true, std::memory_order_release);
@@ -184,8 +303,8 @@ void testOverflowPrefixAndGapRecovery()
 {
     FrameQueue fq;
     const IRGeometry geom{4, 4, 16};
-    fq.configure(geom, 8);
-    fq.resetSession(geom, 8, true);
+    fq.configure(geom, IR_TYPE_U16, 8);
+    fq.resetSession(geom, IR_TYPE_U16, 8, true);
 
     std::vector<uint16_t> frame(16, 0);
     for (uint64_t seq = 1; seq <= 20; ++seq) {
@@ -198,11 +317,10 @@ void testOverflowPrefixAndGapRecovery()
 
     // Non-blocking preview sees latest frame 20 immediately despite ring overflow.
     std::vector<uint16_t> prevBuf(16, 0);
-    IRGeometry pg{};
     IRFrameStamp ps{};
-    int32_t hasFrame = 0;
-    fq.tryReadLatest(prevBuf.data(), 16, &pg, &ps, hasFrame);
-    CHECK(hasFrame == 1);
+    auto preview = makeU16Batch(prevBuf.data(), prevBuf.size() * sizeof(uint16_t), 4, 4, 1, &ps, 1);
+    fq.tryReadLatest(preview);
+    CHECK(preview.pixels.frames == 1);
     CHECK(ps.sequence == 20 && prevBuf[0] == 20);
 
     // Consumer pops intact contiguous prefix 1..8, then receives gap on empty ring.
@@ -226,7 +344,7 @@ void testOverflowPrefixAndGapRecovery()
     CHECK(stOverflow.frames_dropped >= 12);
 
     // Test attached loss flag when a post-overflow frame eventually enters freed tail slot.
-    fq.resetSession(geom, 4, true);
+    fq.resetSession(geom, IR_TYPE_U16, 4, true);
     for (uint64_t seq = 1; seq <= 6; ++seq) {
         std::fill(frame.begin(), frame.end(), static_cast<uint16_t>(seq));
         IRFrameStamp st{};
@@ -269,8 +387,8 @@ void testCancelWakesBlockedConsumer()
 {
     FrameQueue fq;
     const IRGeometry geom{4, 4, 16};
-    fq.configure(geom, 8);
-    fq.resetSession(geom, 8, true);
+    fq.configure(geom, IR_TYPE_U16, 8);
+    fq.resetSession(geom, IR_TYPE_U16, 8, true);
 
     std::atomic<bool> stopFlag{false};
     std::thread stopper([&] {
@@ -324,14 +442,16 @@ void testPublicCApiConcurrentPreviewAndStats()
     const auto u8path = fixture.dir.u8string();
     const std::string pathStr(reinterpret_cast<const char *>(u8path.data()), u8path.size());
 
-    IRGeometry geom{};
-    CHECK(IR_OpenFrames(IR_RAW_REPLAY, pathStr.c_str(), 16, &geom, err, sizeof err) == IR_OK);
-    CHECK(geom.width == 4 && geom.height == 4 && geom.valid_bits == 16);
+    IRFrameSourceInfo sourceInfo{};
+    CHECK(IR_OpenFrames(IR_RAW_REPLAY, pathStr.c_str(), 16, &sourceInfo, err, sizeof err) == IR_OK);
+    CHECK(sourceInfo.data_type == IR_TYPE_U16);
+    CHECK(sourceInfo.geometry.width == 4 && sourceInfo.geometry.height == 4 &&
+          sourceInfo.geometry.valid_bits == 16);
 
     std::vector<uint16_t> previewBuf(static_cast<size_t>(nPix), 0);
-    int32_t hasFrame = 1;
-    CHECK(IR_TryReadLatestFrame(previewBuf.data(), nPix, &geom, nullptr, &hasFrame, err, sizeof err) == IR_OK);
-    CHECK(hasFrame == 0);
+    auto preview = makeU16Batch(previewBuf.data(), previewBuf.size() * sizeof(uint16_t), 4, 4, 1);
+    CHECK(IR_TryReadLatestFrame(&preview, err, sizeof err) == IR_OK);
+    CHECK(preview.pixels.frames == 0);
 
     std::atomic<bool> stopPoll{false};
     std::atomic<bool> sawPreview{false};
@@ -341,25 +461,23 @@ void testPublicCApiConcurrentPreviewAndStats()
 
     std::thread pollThread([&] {
         std::vector<uint16_t> localBuf(static_cast<size_t>(nPix), 0);
+        IRFrameStamp localStamp{};
         uint16_t tinyBuf[1]{};
         char localErr[256]{};
         while (!stopPoll.load(std::memory_order_acquire)) {
-            IRGeometry lg{};
-            IRFrameStamp ls{};
-            int32_t lHas = 0;
-            const int32_t stPreview = IR_TryReadLatestFrame(
-                localBuf.data(), nPix, &lg, &ls, &lHas, localErr, sizeof localErr);
+            auto localPreview = makeU16Batch(localBuf.data(), localBuf.size() * sizeof(uint16_t),
+                                             4, 4, 1, &localStamp, 1);
+            const int32_t stPreview = IR_TryReadLatestFrame(&localPreview, localErr, sizeof localErr);
             if (stPreview == IR_BUSY)
                 ++busyErrors;
             else if (stPreview != IR_OK)
                 ++pollOtherErrors;
-            else if (lHas == 1) {
+            else if (localPreview.pixels.frames == 1) {
                 sawPreview.store(true, std::memory_order_release);
-                IRGeometry tg{};
-                int32_t tHas = 0;
-                const int32_t stTiny = IR_TryReadLatestFrame(
-                    tinyBuf, 1, &tg, nullptr, &tHas, localErr, sizeof localErr);
-                if (stTiny == IR_BUFFER_TOO_SMALL && tg.width == 4 && tg.height == 4 && tg.valid_bits == 16)
+                auto tinyPreview = makeU16Batch(tinyBuf, sizeof(tinyBuf), 4, 4, 1);
+                const int32_t stTiny = IR_TryReadLatestFrame(&tinyPreview, localErr, sizeof localErr);
+                if (stTiny == IR_BUFFER_TOO_SMALL && tinyPreview.pixels.width == 4 &&
+                    tinyPreview.pixels.height == 4 && tinyPreview.valid_bits == 16)
                     sawTooSmallGeom.store(true, std::memory_order_release);
             }
 
@@ -378,44 +496,45 @@ void testPublicCApiConcurrentPreviewAndStats()
     CHECK(IR_SetFrameQueueCapacity(16, err, sizeof err) == IR_BUSY);
 
     std::vector<uint16_t> readBuf(static_cast<size_t>(nPix), 0);
-    IRFrameStamp oneStamp{};
-    int32_t foreignCompleted = 0;
     int32_t foreignStatus = IR_OK;
     std::thread foreignReader([&] {
         uint16_t foreignBuffer[16]{};
         IRFrameStamp foreignStamp{};
         char foreignError[256]{};
-        foreignStatus = IR_ReadFrames(1, 1000, foreignBuffer, 16, &foreignStamp, 1,
-                                      &foreignCompleted, foreignError, sizeof foreignError);
+        auto foreignBatch = makeU16Batch(foreignBuffer, sizeof(foreignBuffer), 4, 4, 1,
+                                         &foreignStamp, 1);
+        foreignStatus = IR_ReadFrames(1000, &foreignBatch, foreignError, sizeof foreignError);
+        CHECK(foreignBatch.pixels.frames == 0);
     });
     foreignReader.join();
     CHECK(foreignStatus == IR_BUSY);
-    CHECK(foreignCompleted == 0);
 
     for (int i = 0; i < 10; ++i) {
-        int32_t completed = 0;
-        CHECK(IR_ReadFrames(1, 1000, readBuf.data(), static_cast<int64_t>(readBuf.size()),
-                            &oneStamp, 1, &completed, err, sizeof err) == IR_OK);
-        CHECK(completed == 1);
+        IRFrameStamp oneStamp{};
+        auto readBatch = makeU16Batch(readBuf.data(), readBuf.size() * sizeof(uint16_t), 4, 4, 1,
+                                      &oneStamp, 1);
+        CHECK(IR_ReadFrames(1000, &readBatch, err, sizeof err) == IR_OK);
+        CHECK(readBatch.pixels.frames == 1);
         std::this_thread::sleep_for(std::chrono::milliseconds(3));
     }
     for (int wait = 0; wait < 200 && (!sawPreview.load() || !sawTooSmallGeom.load()); ++wait)
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     std::thread canceler([] { IR_RequestStop(); });
     canceler.join();
-    int32_t cancelledCompleted = 0;
-    CHECK(IR_ReadFrames(1, 1000, readBuf.data(), static_cast<int64_t>(readBuf.size()),
-                        &oneStamp, 1, &cancelledCompleted, err, sizeof err) == IR_CANCELLED);
-    CHECK(cancelledCompleted == 0);
+    IRFrameStamp cancelledStamp{};
+    auto cancelledBatch = makeU16Batch(readBuf.data(), readBuf.size() * sizeof(uint16_t), 4, 4, 1,
+                                       &cancelledStamp, 1);
+    CHECK(IR_ReadFrames(1000, &cancelledBatch, err, sizeof err) == IR_CANCELLED);
+    CHECK(cancelledBatch.pixels.frames == 0);
     CHECK(IR_StopFrames(err, sizeof err) == IR_OK);
 
     CHECK(IR_StartFrames(err, sizeof err) == IR_OK);
     std::vector<uint16_t> batchBuf(20ULL * nPix);
     std::vector<IRFrameStamp> batchStamps(20);
-    int32_t batchCompleted = 0;
-    CHECK(IR_ReadFrames(20, 0, batchBuf.data(), static_cast<int64_t>(batchBuf.size()),
-                        batchStamps.data(), 20, &batchCompleted, err, sizeof err) == IR_OK);
-    CHECK(batchCompleted == 20);
+    auto batch = makeU16Batch(batchBuf.data(), batchBuf.size() * sizeof(uint16_t), 4, 4, 20,
+                              batchStamps.data(), static_cast<int32_t>(batchStamps.size()));
+    CHECK(IR_ReadFrames(0, &batch, err, sizeof err) == IR_OK);
+    CHECK(batch.pixels.frames == 20);
     CHECK(IR_StopFrames(err, sizeof err) == IR_OK);
 
     stopPoll.store(true, std::memory_order_release);
@@ -431,8 +550,9 @@ void testPublicCApiConcurrentPreviewAndStats()
     CHECK(finalStats.frames_delivered >= 30);
 
     CHECK(IR_CloseFrames(err, sizeof err) == IR_OK);
-    CHECK(IR_TryReadLatestFrame(previewBuf.data(), nPix, &geom, nullptr, &hasFrame, err, sizeof err) == IR_OK);
-    CHECK(hasFrame == 0);
+    preview.pixels.frames = 1;
+    CHECK(IR_TryReadLatestFrame(&preview, err, sizeof err) == IR_OK);
+    CHECK(preview.pixels.frames == 0);
     CHECK(IR_GetCaptureStats(&finalStats, err, sizeof err) == IR_OK);
     CHECK(finalStats.running == 0);
     CHECK(IR_SetFrameQueueCapacity(64, err, sizeof err) == IR_OK);
@@ -451,7 +571,7 @@ void testPublicCApiConcurrentPreviewAndStats()
     }
     const auto largeU8Path = largeFixture.dir.u8string();
     const std::string largePath(reinterpret_cast<const char *>(largeU8Path.data()), largeU8Path.size());
-    CHECK(IR_OpenFrames(IR_RAW_REPLAY, largePath.c_str(), 16, &geom, err, sizeof err) == IR_OK);
+    CHECK(IR_OpenFrames(IR_RAW_REPLAY, largePath.c_str(), 16, &sourceInfo, err, sizeof err) == IR_OK);
     CHECK(IR_SetFrameQueueCapacity(4096, err, sizeof err) == IR_BAD_ARGUMENT);
     CHECK(IR_GetCaptureStats(&finalStats, err, sizeof err) == IR_OK);
     CHECK(finalStats.queue_capacity == 64);
@@ -462,6 +582,10 @@ void testPublicCApiConcurrentPreviewAndStats()
 
 int main()
 {
+#if defined(_WIN32) || defined(__linux__)
+    testLiveScratchStartupFailure();
+#endif
+    testTerminalErrorFollowsQueuedFrames();
     testPreviewContentionDoesNotBlockMeasurementQueue();
     testConcurrentLiveProducerAndSlowPreview();
     testOverflowPrefixAndGapRecovery();

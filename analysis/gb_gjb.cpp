@@ -716,7 +716,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_GbProcessBadPixels(
     const IRGbBadPixelMasks *masks,
     char *err,
     int32_t err_bytes)
-{
+noexcept{
     if (summary)
         *summary = IRGbBadPixelSummary{};
     return guarded(err, err_bytes, [&] {
@@ -752,7 +752,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_GbEvaluateMaps(
     const IRGbBadPixelMasks *masks,
     char *err,
     int32_t err_bytes)
-{
+noexcept{
     if (summary)
         *summary = IRGbSummary{};
     return guarded(err, err_bytes, [&] {
@@ -857,7 +857,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_GjbProcessBadPixels(
     const IRGjbBadPixelMasks *masks,
     char *err,
     int32_t err_bytes)
-{
+noexcept{
     if (summary)
         *summary = IRGjbBadPixelSummary{};
     return guarded(err, err_bytes, [&] {
@@ -898,7 +898,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_GjbEvaluateMaps(
     const IRGjbBadPixelMasks *masks,
     char *err,
     int32_t err_bytes)
-{
+noexcept{
     if (summary)
         *summary = IRGjbSummary{};
     return guarded(err, err_bytes, [&] {

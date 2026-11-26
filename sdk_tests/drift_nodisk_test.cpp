@@ -109,11 +109,12 @@ int main()
     }
 
     char err[512]{};
-    IRGeometry geom{};
+    IRFrameSourceInfo sourceInfo{};
     const auto u8path = fixture.dir.u8string();
     const std::string pathStr(u8path.begin(), u8path.end());
-    CHECK(IR_OpenFrames(IR_RAW_REPLAY, pathStr.c_str(), 16, &geom, err, sizeof err) == IR_OK);
-    CHECK(geom.width == cols && geom.height == rows);
+    CHECK(IR_OpenFrames(IR_RAW_REPLAY, pathStr.c_str(), 16, &sourceInfo, err, sizeof err) == IR_OK);
+    CHECK(sourceInfo.data_type == IR_TYPE_U16);
+    CHECK(sourceInfo.geometry.width == cols && sourceInfo.geometry.height == rows);
     CHECK(IR_StartFrames(err, sizeof err) == IR_OK);
 
     // Preallocated buffers reused across all steps (zero RAW written to disk)
@@ -123,22 +124,32 @@ int main()
         v2Mean(static_cast<size_t>(nPix)), vn2(static_cast<size_t>(nPix));
     double statSum[2]{};
     int32_t completed = 0, discarded = 0;
+    IRFrameBatchView calibBatch{{rawCalib.data(), static_cast<uint64_t>(rawCalib.size()) * sizeof(uint16_t),
+                                 IR_TYPE_U16, cols, rows, 4}, 16, stamps.data(), 8};
 
     // 1. Read T0
-    CHECK(IR_ReadFrames(4, 1000, rawCalib.data(), int64_t(rawCalib.size()),
-                        stamps.data(), 8, &completed, err, sizeof err) == IR_OK);
+    calibBatch.pixels.frames = 4;
+    CHECK(IR_ReadFrames(1000, &calibBatch, err, sizeof err) == IR_OK);
+    completed = calibBatch.pixels.frames;
     CHECK(completed == 4);
-    CHECK(IR_FrameStatisticsU16(rawCalib.data(), int64_t(rawCalib.size()), 4, rows, cols, 0,
-                                v2Mean.data(), vn2.data(), nPix, statSum, 2, err, sizeof err) == IR_OK);
+    const IRArrayView t0Input{rawCalib.data(),
+        static_cast<uint64_t>(rawCalib.size()) * sizeof(uint16_t), IR_TYPE_U16,
+        cols, rows, completed};
+    CHECK(IR_FrameStatistics(&t0Input, 0, v2Mean.data(), vn2.data(), nPix,
+                             statSum, 2, err, sizeof err) == IR_OK);
 
     // 2. Flush 1 transition frame without stopping stream, read T1
     CHECK(IR_FlushFrames(1, 1000, &discarded, err, sizeof err) == IR_OK);
     CHECK(discarded == 1);
-    CHECK(IR_ReadFrames(4, 1000, rawCalib.data(), int64_t(rawCalib.size()),
-                        stamps.data(), 8, &completed, err, sizeof err) == IR_OK);
+    calibBatch.pixels.frames = 4;
+    CHECK(IR_ReadFrames(1000, &calibBatch, err, sizeof err) == IR_OK);
+    completed = calibBatch.pixels.frames;
     CHECK(completed == 4);
-    CHECK(IR_FrameStatisticsU16(rawCalib.data(), int64_t(rawCalib.size()), 4, rows, cols, 0,
-                                v1Mean.data(), vn1.data(), nPix, statSum, 2, err, sizeof err) == IR_OK);
+    const IRArrayView t1Input{rawCalib.data(),
+        static_cast<uint64_t>(rawCalib.size()) * sizeof(uint16_t), IR_TYPE_U16,
+        cols, rows, completed};
+    CHECK(IR_FrameStatistics(&t1Input, 0, v1Mean.data(), vn1.data(), nPix,
+                             statSum, 2, err, sizeof err) == IR_OK);
 
     // 3. t=0 Calibration (GJB + TwoPoint NUC)
     IRCalcParameters calcParams{};
@@ -183,6 +194,8 @@ int main()
 
     // 4. Multi-burst drift loop (zero disk writes, Pre-NUC vs Post-NUC GJB & Noise3D)
     std::vector<uint16_t> burstRaw(static_cast<size_t>(8 * nPix));
+    IRFrameBatchView burstBatch{{burstRaw.data(), static_cast<uint64_t>(burstRaw.size()) * sizeof(uint16_t),
+                                 IR_TYPE_U16, cols, rows, 8}, 16, stamps.data(), 8};
     std::vector<double> orgMean(static_cast<size_t>(nPix)), orgVn(static_cast<size_t>(nPix));
     std::vector<double> nucMean(static_cast<size_t>(nPix)), nucVn(static_cast<size_t>(nPix));
     double prevOrgMean = 0.0;
@@ -191,21 +204,25 @@ int main()
     {
         CHECK(IR_FlushFrames(1, 1000, &discarded, err, sizeof err) == IR_OK);
         CHECK(discarded == 1);
-        CHECK(IR_ReadFrames(8, 1000, burstRaw.data(), int64_t(burstRaw.size()),
-                            stamps.data(), 8, &completed, err, sizeof err) == IR_OK);
+        burstBatch.pixels.frames = 8;
+        CHECK(IR_ReadFrames(1000, &burstBatch, err, sizeof err) == IR_OK);
+        completed = burstBatch.pixels.frames;
         CHECK(completed == 8);
+        const IRArrayView burstInput{burstRaw.data(),
+            static_cast<uint64_t>(burstRaw.size()) * sizeof(uint16_t), IR_TYPE_U16,
+            cols, rows, completed};
 
         // Pre-NUC stats + GJB partial metrics
-        CHECK(IR_FrameStatisticsU16(burstRaw.data(), int64_t(burstRaw.size()), 8, rows, cols, 0,
-                                    orgMean.data(), orgVn.data(), nPix, statSum, 2, err, sizeof err) == IR_OK);
+        CHECK(IR_FrameStatistics(&burstInput, 0, orgMean.data(), orgVn.data(), nPix,
+                                 statSum, 2, err, sizeof err) == IR_OK);
         IRGjbBurstMetrics orgGjb{};
         CHECK(IR_GjbEvaluateBurstMetrics(orgMean.data(), orgVn.data(), validMask.data(),
                                          rows, cols, nPix, &driftCtx, &orgGjb, err, sizeof err) == IR_OK);
 
         // Post-NUC lossless stats + GJB partial metrics (RFPN / RNU)
-        CHECK(IR_FrameStatisticsNucU16(burstRaw.data(), int64_t(burstRaw.size()), 8, rows, cols, 0,
-                                      kMap.data(), bMap.data(), nullptr, validMask.data(),
-                                      nucMean.data(), nucVn.data(), nPix, statSum, 2, err, sizeof err) == IR_OK);
+        CHECK(IR_FrameStatisticsNuc(&burstInput, 0, kMap.data(), bMap.data(), nullptr,
+                                    validMask.data(), nucMean.data(), nucVn.data(), nPix,
+                                    statSum, 2, err, sizeof err) == IR_OK);
         IRGjbBurstMetrics nucGjb{};
         CHECK(IR_GjbEvaluateBurstMetrics(nucMean.data(), nucVn.data(), validMask.data(),
                                          rows, cols, nPix, &driftCtx, &nucGjb, err, sizeof err) == IR_OK);
@@ -243,13 +260,13 @@ int main()
 
             const IRNoise3DComputeParams pOrg{IR_NOISE3D_MODE_ORG, 1, histInterval, 0, 0.0, -999.0};
             n3dOut.scalars = scalarsOrg;
-            CHECK(IR_Noise3DComputeFramesDn(burstRaw.data(), int64_t(burstRaw.size()), 8, rows, cols,
+            CHECK(IR_Noise3DComputeFramesDn(&burstInput,
                                             blindMask.data(), nPix, nullptr, nullptr, 0,
                                             &pOrg, &n3dOut, err, sizeof err) == IR_OK);
 
             const IRNoise3DComputeParams pNuc{IR_NOISE3D_MODE_NUC, 1, histInterval, 0, nucMeta[0], -999.0};
             n3dOut.scalars = scalarsNuc;
-            CHECK(IR_Noise3DComputeFramesDn(burstRaw.data(), int64_t(burstRaw.size()), 8, rows, cols,
+            CHECK(IR_Noise3DComputeFramesDn(&burstInput,
                                             blindMask.data(), nPix, kMap.data(), v1Mean.data(), nPix,
                                             &pNuc, &n3dOut, err, sizeof err) == IR_OK);
 

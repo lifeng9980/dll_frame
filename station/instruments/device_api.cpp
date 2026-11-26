@@ -378,7 +378,7 @@ DeviceLease::~DeviceLease()
 }
 
 extern "C" int32_t IR_OpenDevice(int32_t kind, const char *config, IRHandle *out, char *err, int32_t bytes)
-{
+noexcept{
     if (out) *out = 0;
     return guarded(err, bytes, [&] {
         needed(out, 1, 1);
@@ -462,7 +462,7 @@ extern "C" int32_t IR_OpenDevice(int32_t kind, const char *config, IRHandle *out
 }
 
 extern "C" int32_t IR_CloseDevice(IRHandle handle, char *err, int32_t bytes)
-{
+noexcept{
     return guarded(err, bytes, [&] {
         std::shared_ptr<Session> device;
         std::unique_ptr<Doc058Blackbody> closingBlackbody;
@@ -505,7 +505,7 @@ extern "C" int32_t IR_CloseDevice(IRHandle handle, char *err, int32_t bytes)
 }
 
 extern "C" int32_t IR_SetBlackbody(IRHandle handle, double target, double *readback, char *err, int32_t bytes)
-{
+noexcept{
     return guarded(err, bytes, [&] {
         needed(readback, 1, 1);
         useBlackbody(handle, [&](auto &blackbody) { *readback = blackbody.set(target); });
@@ -513,7 +513,7 @@ extern "C" int32_t IR_SetBlackbody(IRHandle handle, double target, double *readb
 }
 
 extern "C" int32_t IR_ReadBlackbody(IRHandle handle, IRBlackbodyReading *reading, char *err, int32_t bytes)
-{
+noexcept{
     return guarded(err, bytes, [&] {
         needed(reading, 1, 1);
         useBlackbody(handle, [&](auto &blackbody) { *reading = blackbody.read(); });
@@ -522,7 +522,7 @@ extern "C" int32_t IR_ReadBlackbody(IRHandle handle, IRBlackbodyReading *reading
 
 extern "C" int32_t IR_SetPowerChannel(IRHandle handle, int32_t channel,
     double voltage, double currentLimit, IRPowerReading *readback, char *err, int32_t bytes)
-{
+noexcept{
     if (readback) *readback = {};
     return guarded(err, bytes, [&] {
         needed(readback, 1, 1);
@@ -536,7 +536,7 @@ extern "C" int32_t IR_SetPowerChannel(IRHandle handle, int32_t channel,
 
 extern "C" int32_t IR_SetPowerOutput(IRHandle handle, int32_t channel, int32_t enabled,
     IRPowerReading *readback, char *err, int32_t bytes)
-{
+noexcept{
     if (readback) *readback = {};
     return guarded(err, bytes, [&] {
         needed(readback, 1, 1);
@@ -551,7 +551,7 @@ extern "C" int32_t IR_SetPowerOutput(IRHandle handle, int32_t channel, int32_t e
 
 extern "C" int32_t IR_ReadPower(IRHandle handle, int32_t channel,
     IRPowerReading *reading, char *err, int32_t bytes)
-{
+noexcept{
     if (reading) *reading = {};
     return guarded(err, bytes, [&] {
         needed(reading, 1, 1);
@@ -564,7 +564,7 @@ extern "C" int32_t IR_ReadPower(IRHandle handle, int32_t channel,
 }
 
 extern "C" int32_t IR_SetOven(IRHandle handle, double target_c, double *readback_c, char *err, int32_t bytes)
-{
+noexcept{
     return guarded(err, bytes, [&] {
         needed(readback_c, 1, 1);
         useOven(handle, [&](GwsStenOven &oven) { *readback_c = oven.set(target_c); });
@@ -572,7 +572,7 @@ extern "C" int32_t IR_SetOven(IRHandle handle, double target_c, double *readback
 }
 
 extern "C" int32_t IR_ReadOven(IRHandle handle, IROvenReading *reading, char *err, int32_t bytes)
-{
+noexcept{
     if (reading) *reading = {};
     return guarded(err, bytes, [&] {
         needed(reading, 1, 1);
@@ -581,21 +581,21 @@ extern "C" int32_t IR_ReadOven(IRHandle handle, IROvenReading *reading, char *er
 }
 
 extern "C" int32_t IR_StopOven(IRHandle handle, char *err, int32_t bytes)
-{
+noexcept{
     return guarded(err, bytes, [&] {
         useOven(handle, [&](GwsStenOven &oven) { oven.stop(); });
     });
 }
 
 extern "C" int32_t IR_SetDmmMode(IRHandle handle, int32_t mode, char *err, int32_t bytes)
-{
+noexcept{
     return guarded(err, bytes, [&] {
         useDmm(handle, [&](Dmm6500 &dmm) { dmm.setMode(mode); });
     });
 }
 
 extern "C" int32_t IR_ReadDmm(IRHandle handle, int32_t expected_mode, IRDmmReading *reading, char *err, int32_t bytes)
-{
+noexcept{
     if (reading) *reading = {};
     return guarded(err, bytes, [&] {
         needed(reading, 1, 1);
@@ -605,7 +605,7 @@ extern "C" int32_t IR_ReadDmm(IRHandle handle, int32_t expected_mode, IRDmmReadi
 
 extern "C" int32_t IR_SetDetectorTiming(IRHandle handle, int32_t integration_us,
     int32_t frame_hz, int32_t empty_us, char *err, int32_t bytes)
-{
+noexcept{
     return guarded(err, bytes, [&] {
         useDetector(handle, [&](DetectorSerial &det) {
             det.setTiming(integration_us, frame_hz, empty_us);
@@ -614,7 +614,7 @@ extern "C" int32_t IR_SetDetectorTiming(IRHandle handle, int32_t integration_us,
 }
 
 extern "C" int32_t IR_SetDetectorGpol(IRHandle handle, double gpol_v, char *err, int32_t bytes)
-{
+noexcept{
     return guarded(err, bytes, [&] {
         useDetector(handle, [&](DetectorSerial &det) { det.setGpol(gpol_v); });
     });
@@ -622,7 +622,7 @@ extern "C" int32_t IR_SetDetectorGpol(IRHandle handle, double gpol_v, char *err,
 
 extern "C" int32_t IR_SetDetectorRegister(IRHandle handle, uint8_t command_code,
     const uint8_t *payload, int32_t payload_bytes, char *err, int32_t bytes)
-{
+noexcept{
     return guarded(err, bytes, [&] {
         needed(payload, payload_bytes, 1);
         useDetector(handle, [&](DetectorSerial &det) {
@@ -633,7 +633,7 @@ extern "C" int32_t IR_SetDetectorRegister(IRHandle handle, uint8_t command_code,
 
 extern "C" int32_t IR_MeasureDetectorCurrent(IRHandle handle, int32_t gain_code,
     uint16_t channel_code, IRDetectorCurrentReading *reading, char *err, int32_t bytes)
-{
+noexcept{
     if (reading) *reading = {};
     return guarded(err, bytes, [&] {
         needed(reading, 1, 1);
@@ -644,7 +644,7 @@ extern "C" int32_t IR_MeasureDetectorCurrent(IRHandle handle, int32_t gain_code,
 }
 
 extern "C" int32_t IR_ReadCooler(IRHandle handle, IRCoolerReading *reading, char *err, int32_t bytes)
-{
+noexcept{
     if (reading) *reading = {};
     return guarded(err, bytes, [&] {
         needed(reading, 1, 1);

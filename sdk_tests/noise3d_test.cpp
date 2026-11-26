@@ -36,6 +36,18 @@ void checkNear(double actual, double expected, double tol, const char *label, in
 #define CHECK(cond) checkTrue((cond), #cond, __LINE__)
 #define CHECK_NEAR(actual, expected, tol) checkNear((actual), (expected), (tol), #actual, __LINE__)
 
+IRArrayView makeArrayView(const uint16_t *data, int32_t frames, int32_t rows, int32_t cols)
+{
+    const auto byteCount = uint64_t(frames) * uint64_t(rows) * uint64_t(cols) * sizeof(*data);
+    return {data, byteCount, IR_TYPE_U16, cols, rows, frames};
+}
+
+IRArrayView makeArrayView(const uint32_t *data, int32_t frames, int32_t rows, int32_t cols)
+{
+    const auto byteCount = uint64_t(frames) * uint64_t(rows) * uint64_t(cols) * sizeof(*data);
+    return {data, byteCount, IR_TYPE_U32, cols, rows, frames};
+}
+
 void testBuildCalibDn()
 {
     const int32_t rows = 2, cols = 3;
@@ -96,6 +108,7 @@ void testComputeFramesOrgHandDerived()
     double mapIJ[4]{}, mapTI[4]{}, mapTJ[4]{}, meta[IR_NOISE3D_META_COUNT]{};
 
     const IRNoise3DComputeParams params{IR_NOISE3D_MODE_ORG, 4, histInterval, 0, 0.0, -999.0};
+    const IRArrayView input = makeArrayView(frames, frameCount, rows, cols);
     IRNoise3DComputeOutputs outputs{};
     outputs.scalars = scalars;
     outputs.hist = hist;
@@ -113,7 +126,7 @@ void testComputeFramesOrgHandDerived()
     outputs.meta_capacity = IR_NOISE3D_META_COUNT;
 
     char err[256]{};
-    CHECK(IR_Noise3DComputeFramesDn(frames, totalSamples, frameCount, rows, cols,
+    CHECK(IR_Noise3DComputeFramesDn(&input,
                                     blindMask, n, nullptr, nullptr, 0,
                                     &params, &outputs, err, sizeof err) == IR_OK);
 
@@ -160,6 +173,40 @@ void testComputeFramesOrgHandDerived()
     CHECK_NEAR(sumGroup(IR_NOISE3D_HIST_J), double(cols), 1e-12);
     CHECK_NEAR(sumGroup(IR_NOISE3D_HIST_TIJ), double(totalSamples), 1e-12);
     CHECK_NEAR(meta[IR_NOISE3D_META_EFFECTIVE_THREAD_COUNT], 1.0, 1e-12);
+
+    IRArrayView shortInput = input;
+    shortInput.byte_size -= sizeof(uint16_t);
+    CHECK(IR_Noise3DComputeFramesDn(&shortInput,
+                                    blindMask, n, nullptr, nullptr, 0,
+                                    &params, &outputs, err, sizeof err) == IR_BUFFER_TOO_SMALL);
+
+    const uint32_t wideFrames[8] = {
+        70010, 70020, 70030, 70040,
+        70014, 70022, 70038, 70042
+    };
+    const IRArrayView wideInput = makeArrayView(wideFrames, frameCount, rows, cols);
+    double wideScalars[IR_NOISE3D_SCALAR_COUNT]{};
+    double wideHist[IR_NOISE3D_HIST_GROUP_COUNT * 4]{};
+    double wideHistMeta[IR_NOISE3D_HIST_GROUP_COUNT * 3]{};
+    double wideMapIJ[4]{}, wideMapTI[4]{}, wideMapTJ[4]{};
+    IRNoise3DComputeOutputs wideOutputs{};
+    wideOutputs.scalars = wideScalars;
+    wideOutputs.hist = wideHist;
+    wideOutputs.hist_meta = wideHistMeta;
+    wideOutputs.map_ij = wideMapIJ;
+    wideOutputs.map_ti = wideMapTI;
+    wideOutputs.map_tj = wideMapTJ;
+    wideOutputs.hist_capacity = IR_NOISE3D_HIST_GROUP_COUNT * 4;
+    wideOutputs.map_ij_capacity = n;
+    wideOutputs.map_ti_capacity = frameCount * rows;
+    wideOutputs.map_tj_capacity = frameCount * cols;
+    wideOutputs.scalars_capacity = IR_NOISE3D_SCALAR_COUNT;
+    wideOutputs.hist_meta_capacity = IR_NOISE3D_HIST_GROUP_COUNT * 3;
+    CHECK(IR_Noise3DComputeFramesDn(&wideInput,
+                                    blindMask, n, nullptr, nullptr, 0,
+                                    &params, &wideOutputs, err, sizeof err) == IR_OK);
+    CHECK_NEAR(wideScalars[IR_NOISE3D_SCALAR_GLOBAL_MEAN], 70027.0, 1e-12);
+    CHECK_NEAR(wideScalars[IR_NOISE3D_SCALAR_DELTA_TOTAL], expectedTotal, 1e-12);
 }
 
 void testComputeFramesNucAndBlindPixels()
@@ -173,28 +220,26 @@ void testComputeFramesNucAndBlindPixels()
         14, 19, 24, 16, 21, 9999
     };
     const uint8_t blindMask[6] = {0, 0, 0, 0, 0, 1};
-    const double kMap[6] = {2.0, 2.0, 2.0, 2.0, 2.0, 0.0};
+    const double kMap[6] = {1.5, 1.5, 1.5, 1.5, 1.5, 0.0};
     const double bMap[6] = {10.0, 10.0, 10.0, 10.0, 10.0, 99.0};
     const double bAvg = 100.0;
     const double invalidFill = -1234.5;
     const int32_t histInterval = 5;
 
-    std::vector<uint16_t> nucFrames(size_t(totalSamples), 0);
     double scalars[IR_NOISE3D_SCALAR_COUNT]{};
     double hist[IR_NOISE3D_HIST_GROUP_COUNT * 5]{};
     double histMeta[IR_NOISE3D_HIST_GROUP_COUNT * 3]{};
     double mapIJ[6]{}, mapTI[9]{}, mapTJ[9]{};
 
     const IRNoise3DComputeParams params{IR_NOISE3D_MODE_NUC, 1, histInterval, 0, bAvg, invalidFill};
+    const IRArrayView input = makeArrayView(orgFrames, frameCount, rows, cols);
     IRNoise3DComputeOutputs outputs{};
-    outputs.nuc_frames = nucFrames.data();
     outputs.scalars = scalars;
     outputs.hist = hist;
     outputs.hist_meta = histMeta;
     outputs.map_ij = mapIJ;
     outputs.map_ti = mapTI;
     outputs.map_tj = mapTJ;
-    outputs.nuc_frames_capacity = totalSamples;
     outputs.hist_capacity = IR_NOISE3D_HIST_GROUP_COUNT * histInterval;
     outputs.map_ij_capacity = n;
     outputs.map_ti_capacity = frameCount * rows;
@@ -203,23 +248,47 @@ void testComputeFramesNucAndBlindPixels()
     outputs.hist_meta_capacity = IR_NOISE3D_HIST_GROUP_COUNT * 3;
 
     char err[256]{};
-    CHECK(IR_Noise3DComputeFramesDn(orgFrames, totalSamples, frameCount, rows, cols,
+    CHECK(IR_Noise3DComputeFramesDn(&input,
                                     blindMask, n, kMap, bMap, n,
                                     &params, &outputs, err, sizeof err) == IR_OK);
 
-    // Blind pixel must receive bAvg in nuc_frames and invalidFill in map_ij
-    CHECK(nucFrames[5] == 100 && nucFrames[11] == 100 && nucFrames[17] == 100);
-    // Valid pixel (0,0) in frame 0: 2*(15-10)+100 = 110
-    CHECK(nucFrames[0] == 110);
+    // NUC stays in floating point for measurement statistics.
     CHECK_NEAR(mapIJ[5], invalidFill, 1e-12);
+    CHECK_NEAR(scalars[IR_NOISE3D_SCALAR_GLOBAL_MEAN], 114.7, 1e-12);
     CHECK_NEAR(scalars[IR_NOISE3D_SCALAR_VALID_PIXEL_COUNT], 5.0, 1e-12);
     CHECK_NEAR(scalars[IR_NOISE3D_SCALAR_VALID_SAMPLE_COUNT], 15.0, 1e-12);
     // Notice all residuals across t are identically shifted per frame (+2 on t=1, -2 on t=2) while row/col profiles match across frames:
     // So DELTA_IJ, DELTA_TI, DELTA_TJ, DELTA_TIJ should be near 0!
-    CHECK_NEAR(scalars[IR_NOISE3D_SCALAR_DELTA_T], 2.0, 1e-12);
+    CHECK_NEAR(scalars[IR_NOISE3D_SCALAR_DELTA_T], 1.5, 1e-12);
     CHECK_NEAR(scalars[IR_NOISE3D_SCALAR_DELTA_TI], 0.0, 1e-12);
     CHECK_NEAR(scalars[IR_NOISE3D_SCALAR_DELTA_TJ], 0.0, 1e-12);
     CHECK_NEAR(scalars[IR_NOISE3D_SCALAR_DELTA_TIJ], 0.0, 1e-12);
+
+    uint32_t orgFrames32[totalSamples]{};
+    for (int64_t i = 0; i < totalSamples; ++i)
+        orgFrames32[i] = static_cast<uint32_t>(orgFrames[i]) + 70000U;
+    double bMap32[6] = {70010.0, 70010.0, 70010.0, 70010.0, 70010.0, 99.0};
+    double scalars32[IR_NOISE3D_SCALAR_COUNT]{};
+    double hist32[IR_NOISE3D_HIST_GROUP_COUNT * 5]{};
+    double histMeta32[IR_NOISE3D_HIST_GROUP_COUNT * 3]{};
+    double mapIJ32[6]{}, mapTI32[9]{}, mapTJ32[9]{};
+    IRNoise3DComputeOutputs outputs32 = outputs;
+    outputs32.scalars = scalars32;
+    outputs32.hist = hist32;
+    outputs32.hist_meta = histMeta32;
+    outputs32.map_ij = mapIJ32;
+    outputs32.map_ti = mapTI32;
+    outputs32.map_tj = mapTJ32;
+    const IRArrayView input32 = makeArrayView(orgFrames32, frameCount, rows, cols);
+    CHECK(IR_Noise3DComputeFramesDn(&input32,
+                                    blindMask, n, kMap, bMap32, n,
+                                    &params, &outputs32, err, sizeof err) == IR_OK);
+    CHECK_NEAR(mapIJ32[5], invalidFill, 1e-12);
+    CHECK_NEAR(scalars32[IR_NOISE3D_SCALAR_GLOBAL_MEAN], 114.7, 1e-12);
+    CHECK_NEAR(scalars32[IR_NOISE3D_SCALAR_DELTA_T], 1.5, 1e-12);
+    CHECK_NEAR(scalars32[IR_NOISE3D_SCALAR_DELTA_TI], 0.0, 1e-12);
+    CHECK_NEAR(scalars32[IR_NOISE3D_SCALAR_DELTA_TJ], 0.0, 1e-12);
+    CHECK_NEAR(scalars32[IR_NOISE3D_SCALAR_DELTA_TIJ], 0.0, 1e-12);
 }
 
 void testErrorPaths()
@@ -254,6 +323,7 @@ void testErrorPaths()
     double histMeta[IR_NOISE3D_HIST_GROUP_COUNT * 3]{};
     double mapIJ[4]{}, mapTI[4]{}, mapTJ[4]{};
     const IRNoise3DComputeParams pOrg{IR_NOISE3D_MODE_ORG, 1, 2, 0, 0.0, 0.0};
+    const IRArrayView input = makeArrayView(frames, frameCount, rows, cols);
     IRNoise3DComputeOutputs outOrg{};
     outOrg.scalars = scalars;
     outOrg.hist = hist;
@@ -269,18 +339,18 @@ void testErrorPaths()
     outOrg.hist_meta_capacity = IR_NOISE3D_HIST_GROUP_COUNT * 3;
 
     const uint8_t emptyRowMask[4] = {1, 1, 0, 0};
-    CHECK(IR_Noise3DComputeFramesDn(frames, totalSamples, frameCount, rows, cols,
+    CHECK(IR_Noise3DComputeFramesDn(&input,
                                     emptyRowMask, n, nullptr, nullptr, 0,
                                     &pOrg, &outOrg, err, sizeof err) == IR_COMPUTATION_FAILED);
 
     const uint8_t oneValidMask[4] = {0, 1, 1, 1};
-    CHECK(IR_Noise3DComputeFramesDn(frames, totalSamples, frameCount, rows, cols,
+    CHECK(IR_Noise3DComputeFramesDn(&input,
                                     oneValidMask, n, nullptr, nullptr, 0,
                                     &pOrg, &outOrg, err, sizeof err) == IR_COMPUTATION_FAILED);
 
     const IRNoise3DComputeParams pNuc{IR_NOISE3D_MODE_NUC, 1, 2, 0, 0.0, 0.0};
     const uint8_t okMask[4] = {0, 0, 0, 0};
-    CHECK(IR_Noise3DComputeFramesDn(frames, totalSamples, frameCount, rows, cols,
+    CHECK(IR_Noise3DComputeFramesDn(&input,
                                     okMask, n, nullptr, bMap, n,
                                     &pNuc, &outOrg, err, sizeof err) == IR_NULL_POINTER);
 }

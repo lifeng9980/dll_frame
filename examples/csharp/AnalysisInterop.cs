@@ -14,6 +14,8 @@ internal static class IRAnalysis
     internal const int Noise3DStatsCount = 32;
     internal const int Noise3DHistGroupCount = 4;
     internal const int Noise3DMetaCount = 32;
+    internal const int DataTypeU16 = 2;
+    internal const int DataTypeU32 = 3;
 
     internal const int SpatialFilterBoxMean = 0;
     internal const int SpatialFilterGaussian = 1;
@@ -38,6 +40,17 @@ internal static class IRAnalysis
     internal const int WindowRectangular = 0;
     internal const int WindowHann = 1;
     internal const int WindowHamming = 2;
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct ArrayView
+    {
+        public IntPtr Data;
+        public ulong ByteSize;
+        public int DataType;
+        public int Width;
+        public int Height;
+        public int Frames;
+    }
 
     internal const int SpectrumAxisColumns = 0;
     internal const int SpectrumAxisRows = 1;
@@ -261,7 +274,6 @@ internal static class IRAnalysis
     [StructLayout(LayoutKind.Sequential)]
     internal struct Noise3DComputeOutputs
     {
-        public IntPtr NucFrames;
         public IntPtr Scalars;
         public IntPtr Hist;
         public IntPtr HistMeta;
@@ -269,7 +281,6 @@ internal static class IRAnalysis
         public IntPtr MapTI;
         public IntPtr MapTJ;
         public IntPtr Meta;
-        public long NucFramesCapacity;
         public long HistCapacity;
         public long MapIJCapacity;
         public long MapTICapacity;
@@ -383,10 +394,11 @@ internal static class IRAnalysis
             Marshal.SizeOf<FlickerSummary>() != 48 ||
             Marshal.SizeOf<Fft2dSummary>() != 64 ||
             (IntPtr.Size == 8 && (
+                Marshal.SizeOf<ArrayView>() != 32 ||
                 Marshal.SizeOf<GbBadPixelMasks>() != 64 ||
                 Marshal.SizeOf<GjbBadPixelMasks>() != 64 ||
                 Marshal.SizeOf<Noise3DCalibOutputs>() != 64 ||
-                Marshal.SizeOf<Noise3DComputeOutputs>() != 120)))
+                Marshal.SizeOf<Noise3DComputeOutputs>() != 104)))
         {
             throw new InvalidOperationException("C# IRAnalysis structs do not match IR SDK C ABI layout.");
         }
@@ -397,16 +409,49 @@ internal static class IRAnalysis
 
     internal static string AnalysisVersion() => Marshal.PtrToStringUTF8(AnalysisVersionPtr()) ?? string.Empty;
 
-    [DllImport("IR_analysis", EntryPoint = "IR_FrameStatisticsU16", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int FrameStatisticsU16(
-        ushort[] frames, long frameElements, int frameCount, int rows, int cols, int sampleStd,
+    [DllImport("IR_analysis", EntryPoint = "IR_FrameStatistics", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int FrameStatisticsView(
+        ref ArrayView input, int sampleStd,
         double[] meanMap, double[] stdMap, long pixelCapacity, double[] summary, int summaryCount,
         byte[] error, int errorBytes);
 
-    [DllImport("IR_analysis", EntryPoint = "IR_ROIMeanU16", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int RoiMeanU16(
-        ushort[] frames, long frameElements, int frameCount, int rows, int cols,
-        int x, int y, int roiWidth, int roiHeight, out double meanDn,
+    internal static int FrameStatistics(
+        ArrayView input, int sampleStd, double[] meanMap, double[] stdMap,
+        long pixelCapacity, double[] summary, int summaryCount, byte[] error, int errorBytes)
+    {
+        return FrameStatisticsView(ref input, sampleStd, meanMap, stdMap,
+            pixelCapacity, summary, summaryCount, error, errorBytes);
+    }
+
+    internal static int FrameStatistics(
+        ushort[] frames, int frameCount, int rows, int cols, int sampleStd,
+        double[] meanMap, double[] stdMap, long pixelCapacity, double[] summary,
+        int summaryCount, byte[] error, int errorBytes)
+    {
+        var pin = GCHandle.Alloc(frames, GCHandleType.Pinned);
+        try
+        {
+            var input = new ArrayView
+            {
+                Data = pin.AddrOfPinnedObject(),
+                ByteSize = checked((ulong)frames.LongLength * sizeof(ushort)),
+                DataType = DataTypeU16,
+                Width = cols,
+                Height = rows,
+                Frames = frameCount,
+            };
+            return FrameStatisticsView(ref input, sampleStd, meanMap, stdMap, pixelCapacity,
+                summary, summaryCount, error, errorBytes);
+        }
+        finally
+        {
+            pin.Free();
+        }
+    }
+
+    [DllImport("IR_analysis", EntryPoint = "IR_ROIMean", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int RoiMean(
+        ref ArrayView frames, int x, int y, int roiWidth, int roiHeight, out double meanDn,
         byte[] error, int errorBytes);
 
     [DllImport("IR_analysis", EntryPoint = "IR_GbProcessBadPixels", CallingConvention = CallingConvention.Cdecl)]
@@ -447,7 +492,7 @@ internal static class IRAnalysis
 
     [DllImport("IR_analysis", EntryPoint = "IR_Noise3DComputeFramesDn", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int Noise3DComputeFramesDn(
-        ushort[] orgFrames, long frameElements, int frameCount, int rows, int cols,
+        ref ArrayView orgFrames,
         byte[] totalBlindMask, long maskCapacity, double[]? kMap, double[]? bMap, long calibMapCapacity,
         ref Noise3DComputeParams parameters, ref Noise3DComputeOutputs outputs,
         byte[] error, int errorBytes);
@@ -465,9 +510,9 @@ internal static class IRAnalysis
         int rows, int cols, long pixelCapacity, double[] outMap,
         byte[] error, int errorBytes);
 
-    [DllImport("IR_analysis", EntryPoint = "IR_FrameStatisticsNucU16", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int FrameStatisticsNucU16(
-        ushort[] frames, long frameElements, int frameCount, int rows, int cols, int sampleStd,
+    [DllImport("IR_analysis", EntryPoint = "IR_FrameStatisticsNuc", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int FrameStatisticsNuc(
+        ref ArrayView frames, int sampleStd,
         double[]? kMap, double[]? bMap, double[]? darkMap, byte[]? validMask,
         double[] meanMap, double[] stdMap, long pixelCapacity, double[]? summary, int summaryCount,
         byte[] error, int errorBytes);
@@ -507,10 +552,9 @@ internal static class IRAnalysis
         double[]? outFreqsHz, double[] outAmplitude, double[]? outPsd, int outBinsCapacity,
         byte[] error, int errorBytes);
 
-    [DllImport("IR_analysis", EntryPoint = "IR_ChannelSpectrumU16", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int ChannelSpectrumU16(
-        ushort[] frames, long frameElements, int frameCount, int rows, int cols,
-        int axis, int channelCount, double sampleRateHz, int windowKind,
+    [DllImport("IR_analysis", EntryPoint = "IR_ChannelSpectrum", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ChannelSpectrum(
+        ref ArrayView frames, int axis, int channelCount, double sampleRateHz, int windowKind,
         double[]? outFreqsHz, int freqCapacity, double[]? outChannelSeries, long seriesCapacity,
         double[] outChannelAmplitudes, long amplitudeCapacity,
         double[]? outTemporalMeans, double[]? outTemporalStds, int channelStatsCapacity,
@@ -521,9 +565,9 @@ internal static class IRAnalysis
         double[] meanMap, double[] vnMap, byte[]? validMask, int rows, int cols, long pixelCapacity,
         ref GjbDriftContext ctx, out GjbBurstMetrics metrics, byte[] error, int errorBytes);
 
-    [DllImport("IR_analysis", EntryPoint = "IR_FlickerDetectU16", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int FlickerDetectU16(
-        ushort[] frames, long frameElements, int frameCount, int rows, int cols,
+    [DllImport("IR_analysis", EntryPoint = "IR_FlickerDetect", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int FlickerDetect(
+        ref ArrayView frames,
         double[]? kMap, double[]? bMap, byte[]? validMask,
         double stdDevMultiplier, int exceedCountThreshold,
         out FlickerSummary summary, int[]? outExceedCountMap, byte[]? outFlickerMask, long pixelCapacity,

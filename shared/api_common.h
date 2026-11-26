@@ -37,7 +37,10 @@ inline void copyText(char *out, int32_t count, const char *text) noexcept
     if (!out || count <= 0)
         return;
     const char *src = text ? text : "";
-    const auto n = std::min(size_t(count - 1), std::strlen(src));
+    auto n = std::min(size_t(count - 1), std::strlen(src));
+    // If UTF-8 text was cut inside a character, omit the incomplete character.
+    while (n > 0 && (static_cast<unsigned char>(src[n]) & 0xc0) == 0x80)
+        --n;
     std::memcpy(out, src, n);
     out[n] = 0;
 }

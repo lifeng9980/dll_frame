@@ -31,7 +31,7 @@ struct SavedBatchSnapshot {
 };
 
 uint64_t retainedRecipeStorage(const RecipeConfig &recipe, IRGeometry geometry,
-                               int64_t maxBatchBytes)
+                               int32_t dataType, int64_t maxBatchBytes)
 {
     struct BatchSlot {
         int32_t currentFrames{};
@@ -55,13 +55,13 @@ uint64_t retainedRecipeStorage(const RecipeConfig &recipe, IRGeometry geometry,
                     recordCapture(*capture);
         } else if (const auto *save = std::get_if<SaveRawStep>(&step)) {
             const auto frames = batchSlots.at(save->inputSlot).currentFrames;
-            total = addBytes(total, batchStorageBytes(geometry, frames, maxBatchBytes));
+            total = addBytes(total, batchStorageBytes(geometry, frames, dataType, maxBatchBytes));
         }
     }
 
     for (const auto &[name, slot] : batchSlots) {
         (void)name;
-        total = addBytes(total, batchStorageBytes(geometry, slot.maxFrames, maxBatchBytes));
+        total = addBytes(total, batchStorageBytes(geometry, slot.maxFrames, dataType, maxBatchBytes));
     }
 
     const uint64_t pixelCount = static_cast<uint64_t>(pixels(geometry.height, geometry.width));
@@ -73,13 +73,26 @@ uint64_t retainedRecipeStorage(const RecipeConfig &recipe, IRGeometry geometry,
 }
 
 
-void validateInnerGeometry(const InnerStep &step, IRGeometry geom, int64_t maxBatchElements)
+void validatePhysicalMetricDomain(const AnalysisStep &step, IRGeometry geometry,
+                                  int32_t dataType)
+{
+    const bool uses16BitPhysicalModel = step.method == "gb_evaluate" ||
+        step.method == "gjb_evaluate" || step.method == "gjb_burst";
+    const bool rawBitWidthUnsupported = geometry.valid_bits > 16 ||
+        (dataType == IR_TYPE_U32 && geometry.valid_bits == 0);
+    require(!rawBitWidthUnsupported || !uses16BitPhysicalModel, IR_UNSUPPORTED,
+            "GB/GJB recipe metrics require a high-bit measurement model; valid_bits is not digital_full");
+}
+
+void validateInnerGeometry(const InnerStep &step, IRGeometry geom, int32_t dataType,
+                           int64_t maxBatchElements)
 {
     if (const auto *cap = std::get_if<CaptureStep>(&step)) {
         const auto elements = stackSize(pixels(geom.height, geom.width), cap->frames);
         require(elements <= maxBatchElements, IR_BAD_ARGUMENT,
                 "Frame batch exceeds station.acquisition.max_batch_bytes");
     } else if (const auto *an = std::get_if<AnalysisStep>(&step)) {
+        validatePhysicalMetricDomain(*an, geom, dataType);
         if (an->operations.checkGeometry)
             an->operations.checkGeometry(geom);
     }
@@ -149,6 +162,7 @@ struct RuntimeState {
     const RecipeConfig &recipe;
     const fs::path &destination;
     RecipeProgress &progress;
+    IRFrameSourceInfo sourceInfo{};
     bool sourceOpened{false};
     bool sourceStarted{false};
     std::map<std::string, IRHandle> devices;
@@ -163,6 +177,17 @@ struct RuntimeState {
     Json stepRecords = Json::array();
     bool destinationCreated{false};
     bool freshFramesRequired{false};
+
+    void createDestination()
+    {
+        if (destinationCreated)
+            return;
+        std::error_code error;
+        const bool created = fs::create_directory(destination, error);
+        require(created && !error, IR_IO_ERROR,
+                "Cannot exclusively create the recipe output directory");
+        destinationCreated = true;
+    }
 
     void ensureCaptureStarted()
     {
@@ -185,13 +210,17 @@ struct RuntimeState {
 void preflightRecipe(RuntimeState &rt)
 {
     rt.progress.enter(IR_RECIPE_STAGE_PREPARE);
-    rt.ctx.geometry = rt.capture.open(rt.station.backend, rt.station.source.c_str(),
-                                      rt.station.validBits, rt.station.queueCapacity,
-                                      rt.station.maxInflightBytes);
+    rt.sourceInfo = rt.capture.open(rt.station.backend, rt.station.source.c_str(),
+                                    rt.station.validBits, rt.station.queueCapacity,
+                                    rt.station.maxInflightBytes);
+    rt.ctx.geometry = rt.sourceInfo.geometry;
     rt.sourceOpened = true;
     rt.capture.checkStop();
 
-    const int64_t maxBatchElements = rt.station.maxBatchBytes / int64_t(sizeof(uint16_t));
+    const uint64_t elementBytes = pixelElementBytes(rt.sourceInfo.data_type);
+    require(elementBytes != 0, IR_UNSUPPORTED,
+            "Recipe capture supports U16 or U32 pixel storage");
+    const int64_t maxBatchElements = rt.station.maxBatchBytes / static_cast<int64_t>(elementBytes);
     for (const auto &step : rt.recipe.steps) {
         std::visit([&](const auto &s) {
             using T = std::decay_t<decltype(s)>;
@@ -202,13 +231,15 @@ void preflightRecipe(RuntimeState &rt)
                 require(elements <= maxBatchElements, IR_BAD_ARGUMENT,
                         "Frame batch exceeds station.acquisition.max_batch_bytes");
             } else if constexpr (std::is_same_v<T, AnalysisStep>) {
+                validatePhysicalMetricDomain(s, rt.ctx.geometry, rt.sourceInfo.data_type);
                 if (s.operations.checkGeometry)
                     s.operations.checkGeometry(rt.ctx.geometry);
             } else if constexpr (std::is_same_v<T, RepeatBurstStep>) {
                 for (const auto &inner : s.steps) {
                     std::visit([&](const auto &is) {
                         rt.progress.enter(IR_RECIPE_STAGE_PREPARE, &is.ref);
-                        validateInnerGeometry(inner, rt.ctx.geometry, maxBatchElements);
+                        validateInnerGeometry(inner, rt.ctx.geometry, rt.sourceInfo.data_type,
+                                              maxBatchElements);
                     }, inner);
                 }
             }
@@ -216,7 +247,8 @@ void preflightRecipe(RuntimeState &rt)
     }
     uint64_t requiredStorage = rt.capture.bufferedBytes();
     requiredStorage = addBytes(requiredStorage,
-                               retainedRecipeStorage(rt.recipe, rt.ctx.geometry, rt.station.maxBatchBytes));
+        retainedRecipeStorage(rt.recipe, rt.ctx.geometry, rt.sourceInfo.data_type,
+                              rt.station.maxBatchBytes));
     requireWithinMemoryLimit(requiredStorage, rt.station.maxInflightBytes);
     rt.capture.checkStop();
 }
@@ -324,17 +356,29 @@ void executeCommonStep(RuntimeState &rt, const auto &s)
             pixels(rt.ctx.geometry.height, rt.ctx.geometry.width), s.frames);
         auto &batch = rt.ctx.batches[s.outputSlot];
         batch.geometry = rt.ctx.geometry;
-        batch.pixels.resize(static_cast<size_t>(elements));
+        batch.resizePixels(rt.sourceInfo.data_type, static_cast<std::size_t>(elements));
         batch.stamps.resize(static_cast<size_t>(s.frames));
-        int32_t stepCompleted = 0;
+        IRFrameBatchView readView{
+            mutableFrameBatchArrayView(batch, s.frames),
+            batch.geometry.valid_bits,
+            batch.stamps.data(),
+            s.frames
+        };
+        const auto keepCompleted = [&] {
+            const int32_t completed = std::clamp(readView.pixels.frames, 0, s.frames);
+            const auto pixelsPerFrame = static_cast<std::size_t>(elements / s.frames);
+            batch.resizePixels(rt.sourceInfo.data_type,
+                               pixelsPerFrame * static_cast<std::size_t>(completed));
+            batch.stamps.resize(static_cast<std::size_t>(completed));
+            return completed;
+        };
         try {
-            rt.capture.read(s.frames, s.timeoutMs, batch.pixels.data(), elements,
-                            batch.stamps.data(), s.frames, stepCompleted);
+            rt.capture.read(s.timeoutMs, readView);
         } catch (...) {
-            rt.progress.result.completed_frames += stepCompleted;
+            rt.progress.result.completed_frames += keepCompleted();
             throw;
         }
-        rt.progress.result.completed_frames += stepCompleted;
+        rt.progress.result.completed_frames += keepCompleted();
         rt.capture.checkStop();
         requireWithinMemoryLimit(addBytes(
             addBytes(rt.capture.bufferedBytes(), rt.ctx.retainedBytes()), rt.savedSnapshotBytes),
@@ -344,7 +388,7 @@ void executeCommonStep(RuntimeState &rt, const auto &s)
         rt.capture.checkStop();
         AnalysisRunContext runCtx{
             rt.ctx,
-            [&capture = rt.capture]() { return capture.isStopRequested(); },
+            [&capture = rt.capture]() noexcept { return capture.isStopRequested(); },
             addBytes(rt.capture.bufferedBytes(), rt.savedSnapshotBytes),
             rt.station.maxInflightBytes
         };
@@ -380,13 +424,7 @@ int32_t executeRepeatBurstStep(RuntimeState &rt, const RepeatBurstStep &rb)
 
         rt.progress.enter(IR_RECIPE_STAGE_ARCHIVE, &rb.ref);
         if (!csvStream.is_open()) {
-            if (!rt.destinationCreated) {
-                std::error_code createError;
-                const bool created = fs::create_directory(rt.destination, createError);
-                require(created && !createError, IR_IO_ERROR,
-                        "Cannot exclusively create the recipe output directory");
-                rt.destinationCreated = true;
-            }
+            rt.createDestination();
             const fs::path csvPath = rt.destination / pathFromUtf8(rb.csvFile);
             csvStream.open(csvPath, std::ios::binary | std::ios::out);
             require(csvStream.is_open(), IR_IO_ERROR,
@@ -540,6 +578,7 @@ void writeDiagnosticFailureResult(RuntimeState &rt, const std::string &startedUt
             {"source_name", rt.station.source},
             {"width", rt.ctx.geometry.width},
             {"height", rt.ctx.geometry.height},
+            {"data_type", pixelDataTypeName(rt.sourceInfo.data_type)},
             {"valid_bits", rt.ctx.geometry.valid_bits},
             {"completed_frames", rt.progress.result.completed_frames},
             {"cleanup_status", rt.progress.result.cleanup_status},
@@ -559,13 +598,9 @@ void writeDiagnosticFailureResult(RuntimeState &rt, const std::string &startedUt
             {"metrics", std::move(metricsJson)},
             {"limits", Json::array()}
         };
-        if (!rt.destinationCreated) {
-            std::error_code ec;
-            fs::create_directory(rt.destination, ec);
-            if (ec) return;
-            rt.destinationCreated = true;
-        }
-        writeTextFileAtomicOrDirect(rt.destination / "result.json", record.dump(2) + '\n');
+        rt.createDestination();
+        writeTextFileAtomicOrDirect(rt.destination / "result.json",
+                                    record.dump(2, ' ', false, Json::error_handler_t::replace) + '\n');
     } catch (...) {
     }
 }
@@ -610,14 +645,15 @@ void archiveRecipeResult(RuntimeState &rt, const std::string &startedUtc,
     std::vector<SavedBatchRef> batchRefs;
     batchRefs.reserve(rt.savedSnapshots.size());
     for (const auto &snap : rt.savedSnapshots) {
-        batchRefs.push_back({snap.subdir, snap.batch.geometry,
-                             &snap.batch.pixels, &snap.batch.stamps});
+        batchRefs.push_back({snap.subdir, &snap.batch});
         savedBatchesMeta.push_back({
             {"input", snap.inputSlot},
             {"subdir", snap.subdir},
             {"frames", snap.batch.stamps.size()},
             {"width", snap.batch.geometry.width},
-            {"height", snap.batch.geometry.height}
+            {"height", snap.batch.geometry.height},
+            {"data_type", pixelDataTypeName(snap.batch.dataType())},
+            {"valid_bits", snap.batch.geometry.valid_bits}
         });
     }
 
@@ -630,14 +666,15 @@ void archiveRecipeResult(RuntimeState &rt, const std::string &startedUtc,
         {"source_name", rt.station.source},
         {"width", rt.ctx.geometry.width},
         {"height", rt.ctx.geometry.height},
+        {"data_type", pixelDataTypeName(rt.sourceInfo.data_type)},
         {"valid_bits", rt.ctx.geometry.valid_bits},
         {"completed_frames", rt.progress.result.completed_frames},
         {"cleanup_status", rt.progress.result.cleanup_status},
         {"cleanup_status_name", statusName(rt.progress.result.cleanup_status)},
         {"raw_saved", !rt.savedSnapshots.empty()},
         {"saved_batches", std::move(savedBatchesMeta)},
-        {"burst_runs", std::move(rt.burstRunsSummary)},
-        {"step_records", std::move(rt.stepRecords)},
+        {"burst_runs", rt.burstRunsSummary},
+        {"step_records", rt.stepRecords},
         {"total_duration_ms", elapsedMsSince(runStartSteady)},
         {"station_version", IR_StationVersion()},
         {"analysis_version", IR_AnalysisVersion()},
@@ -663,7 +700,7 @@ void archiveRecipeResult(RuntimeState &rt, const std::string &startedUtc,
             const auto targetDir = ref.subdir.empty()
                 ? rt.destination
                 : (rt.destination / pathFromUtf8(ref.subdir));
-            writeFrameBatchFiles(targetDir, ref.geometry, *ref.frames, *ref.stamps);
+            writeFrameBatchFiles(targetDir, *ref.batch);
         }
         writeTextFileAtomicOrDirect(rt.destination / "result.json", text);
     }
@@ -672,22 +709,36 @@ void archiveRecipeResult(RuntimeState &rt, const std::string &startedUtc,
 
 } // namespace
 
-void runRecipe(ir::acquisition::Capture &capture, const StationConfig &station,
-                 const RecipeConfig &recipe, const char *directory, IRRecipeResult &result,
-                 const IRRecipeRunOptions *options)
+void runRecipe(const char *stationJson,
+               const std::function<RecipeConfig(const StationConfig &)> &prepareRecipe,
+               const char *directory, IRRecipeResult &result, const IRRecipeRunOptions *options)
 {
+    if (options != nullptr) {
+        require(options->struct_size == sizeof(IRRecipeRunOptions), IR_BAD_ARGUMENT,
+                "Invalid IRRecipeRunOptions struct_size");
+        require(options->flags == 0, IR_BAD_ARGUMENT, "IRRecipeRunOptions.flags must be 0");
+    }
+    RecipeProgress progress{result};
+    progress.enter(IR_RECIPE_STAGE_RESERVE);
+    Measurement measurement;
+    progress.enter(IR_RECIPE_STAGE_VALIDATE);
     require(directory && *directory, IR_BAD_ARGUMENT, "Specify a new output directory");
-    const auto destination = pathFromUtf8(directory);
+    const auto destination = fs::absolute(pathFromUtf8(directory));
     checkDestination(destination);
-    capture.checkStop();
     const auto startedUtc = utcTimestampNow();
     const auto runStartSteady = std::chrono::steady_clock::now();
 
-    RecipeProgress progress{result};
-    RuntimeState rt{capture, station, recipe, destination, progress};
-    std::exception_ptr failure;
+    StationConfig station;
+    RecipeConfig recipe;
+    RuntimeState rt{measurement.frames(), station, recipe, destination, progress};
 
     try {
+        station = parseStation(stationJson);
+        rt.capture.checkStop();
+        recipe = prepareRecipe(station);
+        rt.capture.checkStop();
+
+        std::exception_ptr failure;
         try {
             preflightRecipe(rt);
             openAndLeaseDevices(rt);
@@ -705,7 +756,7 @@ void runRecipe(ir::acquisition::Capture &capture, const StationConfig &station,
                         rt.capture.checkStop();
                         const auto &batch = rt.ctx.batches.at(sr->inputSlot);
                         const uint64_t snapshotBytes = batchStorageBytes(
-                            batch.geometry, static_cast<int32_t>(batch.stamps.size()),
+                            batch.geometry, static_cast<int32_t>(batch.stamps.size()), batch.dataType(),
                             station.maxBatchBytes);
                         const uint64_t nextSavedSnapshotBytes = addBytes(
                             rt.savedSnapshotBytes, snapshotBytes);
@@ -755,29 +806,27 @@ void runRecipe(ir::acquisition::Capture &capture, const StationConfig &station,
                 emitRecipeStepEvent(options, IR_STEP_EVENT_COMPLETED, *sInfo.ref,
                                     finalStage, IR_OK, durationMs, sInfo.typeName);
             }
+            rt.progress.enter(IR_RECIPE_STAGE_ARCHIVE);
+            rt.capture.checkStop();
         } catch (...) {
             failure = std::current_exception();
         }
 
         failure = performSafetyCleanup(rt, failure);
-        if (failure) {
-            try {
-                std::rethrow_exception(failure);
-            } catch (const Error &e) {
-                writeDiagnosticFailureResult(rt, startedUtc, runStartSteady, e.code, e.what());
-                throw;
-            } catch (const std::exception &e) {
-                writeDiagnosticFailureResult(rt, startedUtc, runStartSteady, exceptionToStatus(e), e.what());
-                throw;
-            } catch (...) {
-                writeDiagnosticFailureResult(rt, startedUtc, runStartSteady, IR_COMPUTATION_FAILED, "Unknown error");
-                throw;
-            }
-        }
+        if (failure)
+            std::rethrow_exception(failure);
         archiveRecipeResult(rt, startedUtc, runStartSteady);
     } catch (const Error &error) {
+        writeDiagnosticFailureResult(rt, startedUtc, runStartSteady, error.code, error.what());
         if (progress.step)
             throw Error(error.code, "Step '" + progress.step->id + "' failed: " + error.what());
+        throw;
+    } catch (const std::exception &error) {
+        writeDiagnosticFailureResult(rt, startedUtc, runStartSteady,
+                                     exceptionToStatus(error), error.what());
+        throw;
+    } catch (...) {
+        writeDiagnosticFailureResult(rt, startedUtc, runStartSteady, IR_COMPUTATION_FAILED, "Unknown error");
         throw;
     }
 }

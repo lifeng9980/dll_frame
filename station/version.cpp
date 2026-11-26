@@ -11,7 +11,7 @@
 #endif
 
 extern "C" const char *IR_StationVersion(void)
-{
+noexcept{
     return IR_STATION_VERSION;
 }
 

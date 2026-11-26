@@ -236,7 +236,7 @@ $res = Invoke-External -FilePath $ctestPath -WorkingDirectory $RepoRoot `
     -Arguments @("--preset", "windows", "--output-on-failure")
 Write-Host $res.StdOut.Trim()
 
-$BuildDir = Join-Path $ExperimentDir "build-debug"
+$BuildDir = Join-Path $ExperimentDir "test"
 $BuildBinDir = Join-Path $BuildDir "bin"
 $StationDll = Join-Path $BuildBinDir "IR_station.dll"
 $AnalysisDll = Join-Path $BuildBinDir "IR_analysis.dll"
@@ -289,8 +289,8 @@ foreach ($sym in @(
 $analysisExports = (Invoke-External -FilePath $dumpbinPath -Arguments @("/nologo", "/exports", $AnalysisDll)).StdOut
 foreach ($sym in @(
     "IR_AnalysisVersion",
-    "IR_FrameStatisticsU16",
-    "IR_ROIMeanU16",
+    "IR_FrameStatistics",
+    "IR_ROIMean",
     "IR_Noise3DBuildCalibDn",
     "IR_Noise3DComputeFramesDn",
     "IR_GbProcessBadPixels",
@@ -299,16 +299,16 @@ foreach ($sym in @(
     "IR_GjbEvaluateMaps",
     "IR_BuildTwoPointNucF64",
     "IR_ApplyAffineMapF64",
-    "IR_FrameStatisticsNucU16",
+    "IR_FrameStatisticsNuc",
     "IR_MapSummaryF64",
     "IR_SpatialLowHighPassF64",
     "IR_MapBinaryOpF64",
     "IR_ThresholdMaskF64",
     "IR_MaskCombine",
     "IR_ComputeRfft1D",
-    "IR_ChannelSpectrumU16",
+    "IR_ChannelSpectrum",
     "IR_GjbEvaluateBurstMetrics",
-    "IR_FlickerDetectU16",
+    "IR_FlickerDetect",
     "IR_Fft2dMagnitudeF64"
 )) {
     Assert-True ($analysisExports -match "(?m)^\s*\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+$([regex]::Escape($sym))(?:\s|$)") "IR_analysis.dll must export $sym"

@@ -25,11 +25,11 @@ PreparedMetric prepTemporalNoise(const std::string &name, const Json &inputs, co
             ExecutionContext &ctx = runCtx.ctx;
             const auto &b = getBatch(ctx, framesSlot);
             const auto n = pixels(b.geometry.height, b.geometry.width);
+            const IRArrayView input = frameBatchArrayView(b);
             std::vector<double> meanMap(static_cast<size_t>(n)), stdMap(static_cast<size_t>(n));
             double summary[2]{};
             char err[1024]{};
-            checkStatus(IR_FrameStatisticsU16(b.pixels.data(), int64_t(b.pixels.size()),
-                int32_t(b.stamps.size()), b.geometry.height, b.geometry.width, 1,
+            checkStatus(IR_FrameStatistics(&input, 1,
                 meanMap.data(), stdMap.data(), n, summary, 2, err, sizeof err), err);
             recordScalarOutputs(ctx, name, outs, {summary[0], summary[1]});
         }
@@ -57,11 +57,10 @@ PreparedMetric prepRoiMean(const std::string &name, const Json &inputs, const Js
         [=](AnalysisRunContext &runCtx) {
             ExecutionContext &ctx = runCtx.ctx;
             const auto &b = getBatch(ctx, framesSlot);
+            const IRArrayView input = frameBatchArrayView(b);
             double mean{};
             char err[1024]{};
-            checkStatus(IR_ROIMeanU16(b.pixels.data(), int64_t(b.pixels.size()),
-                int32_t(b.stamps.size()), b.geometry.height, b.geometry.width,
-                x, y, w, h, &mean, err, sizeof err), err);
+            checkStatus(IR_ROIMean(&input, x, y, w, h, &mean, err, sizeof err), err);
             recordScalarOutputs(ctx, name, outs, {mean});
         }
     }};
@@ -120,14 +119,12 @@ PreparedMetric prepFrameStats(const std::string &name, const Json &inputs, const
             SlotBufferWriter stdWriter(ctx.maps, stdOut, g, n, stdOut != meanOut);
             double summary[2]{};
             char err[1024]{};
-            const int32_t frameCount = int32_t(b.stamps.size());
+            const IRArrayView input = frameBatchArrayView(b);
             if (!kPtr && !darkPtr && !maskPtr) {
-                checkStatus(IR_FrameStatisticsU16(b.pixels.data(), int64_t(b.pixels.size()),
-                    frameCount, g.height, g.width, sampleStd, meanWriter.data(), stdWriter.data(), n,
+                checkStatus(IR_FrameStatistics(&input, sampleStd, meanWriter.data(), stdWriter.data(), n,
                     summary, 2, err, sizeof err), err);
             } else {
-                checkStatus(IR_FrameStatisticsNucU16(b.pixels.data(), int64_t(b.pixels.size()),
-                    frameCount, g.height, g.width, sampleStd, kPtr, bPtr, darkPtr, maskPtr,
+                checkStatus(IR_FrameStatisticsNuc(&input, sampleStd, kPtr, bPtr, darkPtr, maskPtr,
                     meanWriter.data(), stdWriter.data(), n, summary, 2, err, sizeof err), err);
             }
             meanWriter.commit();

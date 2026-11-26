@@ -76,9 +76,9 @@ void testNucBuilderAffineAndFrameStats()
     };
     const double dark[4] = {100.0, 100.0, 100.0, 999.0};
     double meanMap[4]{}, stdMap[4]{}, summary[2]{};
-    CHECK(IR_FrameStatisticsNucU16(frames, 8, 2, rows, cols, 0,
-                                  kMap, bMap, dark, validMask,
-                                  meanMap, stdMap, n, summary, 2, err, sizeof err) == IR_OK);
+    const IRArrayView frameView{frames, sizeof frames, IR_TYPE_U16, cols, rows, 2};
+    CHECK(IR_FrameStatisticsNuc(&frameView, 0, kMap, bMap, dark, validMask,
+                                meanMap, stdMap, n, summary, 2, err, sizeof err) == IR_OK);
     CHECK_NEAR(meanMap[0], 30000.0, 1e-12);
     CHECK_NEAR(meanMap[1], 30000.0, 1e-12);
     CHECK_NEAR(meanMap[2], 30000.0, 1e-12);
@@ -87,6 +87,30 @@ void testNucBuilderAffineAndFrameStats()
     CHECK_NEAR(stdMap[2], 4.0, 1e-12);
     CHECK_NEAR(summary[0], 30000.0, 1e-12);
     CHECK_NEAR(summary[1], 4.0, 1e-12);
+
+    const uint32_t frames32[8] = {70000, 71000, 72000, 73000, 70002, 71002, 72002, 73002};
+    const IRArrayView frameView32{frames32, sizeof frames32, IR_TYPE_U32, cols, rows, 2};
+    CHECK(IR_FrameStatisticsNuc(&frameView32, 0, nullptr, nullptr, nullptr, validMask,
+                                meanMap, stdMap, n, summary, 2, err, sizeof err) == IR_OK);
+    CHECK_NEAR(meanMap[0], 70001.0, 1e-12);
+    CHECK_NEAR(stdMap[0], 1.0, 1e-12);
+    CHECK_NEAR(summary[0], 71001.0, 1e-12);
+    CHECK_NEAR(summary[1], 1.0, 1e-12);
+
+    const double kMap32[4] = {1.5, 2.0, 0.5, 4.0};
+    const double bMap32[4] = {100.0, -150.0, 200.0, 1.0};
+    const double darkMap32[4] = {1000.0, 50.0, -500.0, 5.0};
+    CHECK(IR_FrameStatisticsNuc(&frameView32, 0, kMap32, bMap32, darkMap32, validMask,
+                                meanMap, stdMap, n, summary, 2, err, sizeof err) == IR_OK);
+    CHECK_NEAR(meanMap[0], 104101.5, 1e-12);
+    CHECK_NEAR(meanMap[1], 141802.0, 1e-12);
+    CHECK_NEAR(meanMap[2], 36700.5, 1e-12);
+    CHECK_NEAR(meanMap[3], 292000.0, 1e-12);
+    CHECK_NEAR(stdMap[0], 1.5, 1e-12);
+    CHECK_NEAR(stdMap[1], 2.0, 1e-12);
+    CHECK_NEAR(stdMap[2], 0.5, 1e-12);
+    CHECK_NEAR(summary[0], 94201.33333333333, 1e-10);
+    CHECK_NEAR(summary[1], 4.0 / 3.0, 1e-12);
 }
 
 void testMapSummaryAndBinaryAndThresholds()
@@ -338,17 +362,42 @@ void testFftAndChannelSpectrum()
         std::vector<double> series(size_t(chCount) * T);
         std::vector<double> amps(size_t(chCount) * bins);
         double chMean[4]{}, chStd[4]{};
-        CHECK(IR_ChannelSpectrumU16(frames.data(), totalSamples, T, rows, cols,
-                                    IR_SPECTRUM_AXIS_COLUMNS, chCount, 100.0, IR_WINDOW_RECTANGULAR,
-                                    freqs, bins, series.data(), int64_t(series.size()),
-                                    amps.data(), int64_t(amps.size()),
-                                    chMean, chStd, chCount, err, sizeof err) == IR_OK);
+        const IRArrayView frameView{frames.data(), uint64_t(frames.size() * sizeof(uint16_t)),
+                                    IR_TYPE_U16, cols, rows, T};
+        CHECK(IR_ChannelSpectrum(&frameView, IR_SPECTRUM_AXIS_COLUMNS, chCount,
+                                 100.0, IR_WINDOW_RECTANGULAR,
+                                 freqs, bins, series.data(), int64_t(series.size()),
+                                 amps.data(), int64_t(amps.size()),
+                                 chMean, chStd, chCount, err, sizeof err) == IR_OK);
         CHECK_NEAR(chMean[0], 1000.0, 1e-12);
         CHECK_NEAR(chStd[0], 0.0, 1e-12);
         CHECK_NEAR(chMean[2], 1000.0, 1e-12);
         CHECK_NEAR(chStd[2], std::sqrt(50.0), 1e-12); // amplitude 10 cosine RMS = 10 / sqrt(2)
         CHECK_NEAR(amps[size_t(2) * bins + 25], 10.0, 1e-10);
         CHECK_NEAR(amps[size_t(0) * bins + 25], 0.0, 1e-12);
+
+        std::vector<uint32_t> frames32(size_t(totalSamples), 70000);
+        for (int t = 0; t < T; ++t)
+        {
+            const int delta = static_cast<int>(std::lround(10.0 * std::cos(2.0 * kPi * 25.0 * t / 100.0)));
+            for (int r = 0; r < rows; ++r)
+                for (int c = 2; c < cols; c += chCount)
+                    frames32[size_t(t) * 64 + size_t(r) * cols + c] = static_cast<uint32_t>(70000 + delta);
+        }
+        std::fill(series.begin(), series.end(), 0.0);
+        std::fill(amps.begin(), amps.end(), 0.0);
+        const IRArrayView frameView32{frames32.data(), uint64_t(frames32.size() * sizeof(uint32_t)),
+                                      IR_TYPE_U32, cols, rows, T};
+        CHECK(IR_ChannelSpectrum(&frameView32, IR_SPECTRUM_AXIS_COLUMNS, chCount,
+                                 100.0, IR_WINDOW_RECTANGULAR,
+                                 freqs, bins, series.data(), int64_t(series.size()),
+                                 amps.data(), int64_t(amps.size()),
+                                 chMean, chStd, chCount, err, sizeof err) == IR_OK);
+        CHECK_NEAR(chMean[0], 70000.0, 1e-12);
+        CHECK_NEAR(chStd[0], 0.0, 1e-12);
+        CHECK_NEAR(chMean[2], 70000.0, 1e-12);
+        CHECK_NEAR(chStd[2], std::sqrt(50.0), 1e-12);
+        CHECK_NEAR(amps[size_t(2) * bins + 25], 10.0, 1e-10);
     }
 }
 

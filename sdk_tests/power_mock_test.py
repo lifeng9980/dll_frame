@@ -58,11 +58,30 @@ class RecipeResult(c.Structure):
     ]
 
 
-def run_recipe(sdk, station, recipe, output):
+class RecipeStepEvent(c.Structure):
+    _fields_ = [
+        ("struct_size", c.c_uint32), ("event_kind", c.c_int32), ("step_index", c.c_int32),
+        ("stage", c.c_int32), ("status", c.c_int32), ("reserved", c.c_int32),
+        ("duration_ms", c.c_double), ("step_id_utf8", c.c_char_p),
+        ("step_type_utf8", c.c_char_p), ("detail_utf8", c.c_char_p),
+    ]
+
+
+RecipeStepCallback = c.CFUNCTYPE(None, c.POINTER(RecipeStepEvent), c.c_void_p)
+
+
+class RecipeRunOptions(c.Structure):
+    _fields_ = [
+        ("struct_size", c.c_uint32), ("flags", c.c_uint32),
+        ("on_step_event", RecipeStepCallback), ("user_data", c.c_void_p),
+    ]
+
+
+def run_recipe(sdk, station, recipe, output, options=None):
     result = RecipeResult()
     error = c.create_string_buffer(1024)
     status = sdk.IR_RunRecipeJson(json.dumps(station).encode(), json.dumps(recipe).encode(),
-                                  os.fsencode(output), None, c.byref(result), error, len(error))
+                                  os.fsencode(output), options, c.byref(result), error, len(error))
     return (status, result.completed_frames, result.failed_stage,
             result.failed_step_index, result.cleanup_status), error.value
 
@@ -416,6 +435,20 @@ def main():
             report, detail = run_recipe(sdk, station, short_recipe, root / "two-failures")
             assert report == (11, 2, 5, 1, 6), (report, detail)
             assert (root / "two-failures" / "result.json").is_file()
+
+            @RecipeStepCallback
+            def cancel_after_archive(event, _):
+                step = event.contents
+                if step.event_kind == 2 and step.step_id_utf8 == b"archive":
+                    sdk.IR_RequestStop()
+
+            options = RecipeRunOptions(c.sizeof(RecipeRunOptions), 0, cancel_after_archive, None)
+            controller.drop_count = 1
+            cancelled_output = root / "late-cancel-with-cleanup-failure"
+            report, detail = run_recipe(sdk, station, powered_recipe, cancelled_output, c.byref(options))
+            assert report == (8, 2, 7, -1, 6), (report, detail)
+            record = json.loads((cancelled_output / "result.json").read_text(encoding="utf-8"))
+            assert record["run_status"] == "CANCELLED" and record["cleanup_status"] == 6, record
 
             blocked = []
             offline = dict(station, devices={})

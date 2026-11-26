@@ -7,6 +7,9 @@
 ## 1. 定位与收束红线（Non-Goals）
 
 - **不做 UI/HMI 与工单**：界面交互、良率阈值与工单编排留在上位机；SDK 只暴露纯 C ABI 与 CLI，并在失败/取消时输出诊断 `result.json`。
+- **先判定需求归属**：流程表和旧上位机只作业务背景。SDK 只实现可复用的设备、采集、算法和执行契约；产品特定的自动找点/寻优、人工确认与试验计划由上位机或测试应用编排，不据此新增 SDK 专属控制流。
+- **研发期直接演进接口**：尚未发布的 ABI/API 按当前设计直接调整，不增加兼容入口；既有指标口径只在已对外承诺后作为兼容约束。
+- **设计与验证范围分开**：实现继续遵守 Windows x64 / Linux x86_64 可移植约束；当前迭代只在 Windows 验证，不声称未经验证的平台已验收。
 - **不拆分微库**：除 `IR_analysis`、`IR_station` 及按 `IR_plugin_abi.h` 扩展的外部算子插件外，不为单个仪器或内置算子额外拆 DLL/SO。
 - **零重型运行依赖**：核心双库保持**零 Qt、零 OpenCV、零第三方运行时动态库**；`Asio 1.36.0` 与 `nlohmann/json 3.12.0` 仅作私有编译期头依赖，严禁进入 `include/`。
 - **不破坏兼容语义**：已发布指标口径（如 `temporal_noise` 逐像元样本标准差 `N - 1` vs GJB 总体标准差 `N`）不得静默篡改；新能力走独立指标名或外部插件入口。
@@ -63,11 +66,13 @@
 
 ```powershell
 # 1. CMake windows Debug preset 配置、构建与 CTest
-cmake --preset windows ; cmake --build --preset windows ; ctest --preset windows --output-on-failure
+cmake --preset windows
+cmake --build --preset windows
+ctest --preset windows --output-on-failure
 
 # 2. 全量 Windows Debug 验收（可选 -RunCom0ComHil 启用虚拟串口 HIL，发布前加 -RequireClean）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\verify_windows.ps1 -PythonExe "<venv-python>" -RunCom0ComHil
 ```
 
 - **L5 → L0 源码追踪**：`examples/ir_recipe_cli.cpp` → `include/IR_recipe.h` → `station/procedures/recipe_json.cpp` → `recipe_{parse,instruments,runner}.cpp` → `recipe_metrics.cpp` + `metrics_{basic,standard}.cpp` → `analysis/*.cpp`。
-- **调试与产物目录**：产物分置 `实验/build-debug/{bin,lib,lib/plugins,tests/bin}/`；VS Code `F5` 运行 `ir_run_recipe.exe --run --station 实验/debug_tc002a/station.json --recipe 实验/debug_tc002a/recipe.json --output out_dbg`。
+- **调试与产物目录**：当前 Windows 增量构建固定使用 `实验/test/{bin,lib,lib/plugins,tests/bin}/`；不要为每轮迭代创建新的构建目录。VS Code `F5` 运行 `ir_run_recipe.exe --run --station 实验/debug_tc002a/station.json --recipe 实验/debug_tc002a/recipe.json --output out_dbg`。

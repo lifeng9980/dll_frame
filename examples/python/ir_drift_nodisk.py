@@ -26,6 +26,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 from ir_analysis import (  # noqa: E402
+    IRArrayView,
     IRCalcParameters,
     IRGjbBadPixelMasks,
     IRGjbBurstMetrics,
@@ -46,6 +47,7 @@ from ir_analysis import (  # noqa: E402
     load_analysis,
     sdk_library_directory,
     verify_abi_sizes,
+    make_array_view,
 )
 
 IR_OK = 0
@@ -55,6 +57,8 @@ IR_DIRECTSHOW = 1
 IR_RAW_REPLAY = 2
 IR_V4L2 = 3
 IR_PCN7LT = 2
+IR_TYPE_U16 = 2
+IR_TYPE_U32 = 3
 
 IR_NOISE3D_MODE_ORG = 0
 IR_NOISE3D_MODE_NUC = 1
@@ -73,6 +77,13 @@ class IRGeometry(c.Structure):
     ]
 
 
+class IRFrameSourceInfo(c.Structure):
+    _fields_ = [
+        ("geometry", IRGeometry),
+        ("data_type", c.c_int32),
+    ]
+
+
 class IRFrameStamp(c.Structure):
     _fields_ = [
         ("sequence", c.c_uint64),
@@ -83,6 +94,37 @@ class IRFrameStamp(c.Structure):
         ("time_origin", c.c_int32),
         ("reserved", c.c_int32),
     ]
+
+
+class IRMutableArrayView(c.Structure):
+    _fields_ = [
+        ("data", c.c_void_p),
+        ("byte_size", c.c_uint64),
+        ("data_type", c.c_int32),
+        ("width", c.c_int32),
+        ("height", c.c_int32),
+        ("frames", c.c_int32),
+    ]
+
+
+class IRFrameBatchView(c.Structure):
+    _fields_ = [
+        ("pixels", IRMutableArrayView),
+        ("valid_bits", c.c_int32),
+        ("stamps", c.POINTER(IRFrameStamp)),
+        ("stamp_capacity", c.c_int32),
+    ]
+
+
+def make_frame_batch_view(pixels, width: int, height: int, frames: int,
+                          valid_bits: int, stamps) -> IRFrameBatchView:
+    return IRFrameBatchView(
+        IRMutableArrayView(c.cast(pixels, c.c_void_p), c.sizeof(pixels), IR_TYPE_U16,
+                           width, height, frames),
+        valid_bits,
+        c.cast(stamps, c.POINTER(IRFrameStamp)),
+        len(stamps),
+    )
 
 
 class IRBlackbodyReading(c.Structure):
@@ -128,9 +170,13 @@ def load_station(directory: Path):
 
 def bind_sdk(station, analysis) -> None:
     verify_abi_sizes()
-    if (c.sizeof(IRGeometry) != 12 or c.sizeof(IRFrameStamp) != 40 or
+    if (c.sizeof(IRGeometry) != 12 or c.sizeof(IRFrameSourceInfo) != 16 or
+            c.sizeof(IRFrameStamp) != 40 or
             c.sizeof(IRBlackbodyReading) != 24 or c.sizeof(IRCaptureStats) != 64):
         raise RuntimeError("Station ctypes structure size mismatch against C ABI")
+    if c.sizeof(c.c_void_p) == 8 and (
+            c.sizeof(IRMutableArrayView) != 32 or c.sizeof(IRFrameBatchView) != 56):
+        raise RuntimeError("Station array view ctypes layout mismatch against C ABI")
 
     err_args = [c.c_char_p, c.c_int32]
 
@@ -140,20 +186,14 @@ def bind_sdk(station, analysis) -> None:
     station.IR_RequestStop.restype = None
 
     station_bindings = [
-        ("IR_OpenFrames", [c.c_int32, c.c_char_p, c.c_int32, c.POINTER(IRGeometry), *err_args]),
+        ("IR_OpenFrames", [c.c_int32, c.c_char_p, c.c_int32, c.POINTER(IRFrameSourceInfo), *err_args]),
         ("IR_StartFrames", [*err_args]),
-        ("IR_ReadFrames", [
-            c.c_int32, c.c_int32, c.POINTER(c.c_uint16), c.c_int64,
-            c.POINTER(IRFrameStamp), c.c_int32, c.POINTER(c.c_int32), *err_args,
-        ]),
+        ("IR_ReadFrames", [c.c_int32, c.POINTER(IRFrameBatchView), *err_args]),
         ("IR_FlushFrames", [c.c_int32, c.c_int32, c.POINTER(c.c_int32), *err_args]),
         ("IR_StopFrames", [*err_args]),
         ("IR_CloseFrames", [*err_args]),
         ("IR_SetFrameQueueCapacity", [c.c_int32, *err_args]),
-        ("IR_TryReadLatestFrame", [
-            c.POINTER(c.c_uint16), c.c_int64, c.POINTER(IRGeometry), c.POINTER(IRFrameStamp),
-            c.POINTER(c.c_int32), *err_args,
-        ]),
+        ("IR_TryReadLatestFrame", [c.POINTER(IRFrameBatchView), *err_args]),
         ("IR_GetCaptureStats", [c.POINTER(IRCaptureStats), *err_args]),
         ("IR_OpenDevice", [c.c_int32, c.c_char_p, c.POINTER(c.c_uint64), *err_args]),
         ("IR_CloseDevice", [c.c_uint64, *err_args]),
@@ -173,13 +213,13 @@ def bind_sdk(station, analysis) -> None:
     analysis.IR_AnalysisVersion.restype = c.c_char_p
 
     analysis_bindings = [
-        ("IR_FrameStatisticsU16", [
-            c.POINTER(c.c_uint16), c.c_int64, c.c_int32, c.c_int32, c.c_int32, c.c_int32,
+        ("IR_FrameStatistics", [
+            c.POINTER(IRArrayView), c.c_int32,
             c.POINTER(c.c_double), c.POINTER(c.c_double), c.c_int64,
             c.POINTER(c.c_double), c.c_int32, *err_args,
         ]),
-        ("IR_FrameStatisticsNucU16", [
-            c.POINTER(c.c_uint16), c.c_int64, c.c_int32, c.c_int32, c.c_int32, c.c_int32,
+        ("IR_FrameStatisticsNuc", [
+            c.POINTER(IRArrayView), c.c_int32,
             c.POINTER(c.c_double), c.POINTER(c.c_double), c.POINTER(c.c_double), c.POINTER(c.c_uint8),
             c.POINTER(c.c_double), c.POINTER(c.c_double), c.c_int64,
             c.POINTER(c.c_double), c.c_int32, *err_args,
@@ -213,15 +253,14 @@ def bind_sdk(station, analysis) -> None:
             c.POINTER(c.c_double), c.c_int32, c.c_double, c.c_int32, c.c_int32,
             c.POINTER(c.c_double), c.POINTER(c.c_double), c.POINTER(c.c_double), c.c_int32, *err_args,
         ]),
-        ("IR_ChannelSpectrumU16", [
-            c.POINTER(c.c_uint16), c.c_int64, c.c_int32, c.c_int32, c.c_int32,
-            c.c_int32, c.c_int32, c.c_double, c.c_int32,
+        ("IR_ChannelSpectrum", [
+            c.POINTER(IRArrayView), c.c_int32, c.c_int32, c.c_double, c.c_int32,
             c.POINTER(c.c_double), c.c_int32, c.POINTER(c.c_double), c.c_int64,
             c.POINTER(c.c_double), c.c_int64, c.POINTER(c.c_double), c.POINTER(c.c_double), c.c_int32,
             *err_args,
         ]),
         ("IR_Noise3DComputeFramesDn", [
-            c.POINTER(c.c_uint16), c.c_int64, c.c_int32, c.c_int32, c.c_int32,
+            c.POINTER(IRArrayView),
             c.POINTER(c.c_uint8), c.c_int64, c.POINTER(c.c_double), c.POINTER(c.c_double), c.c_int64,
             c.POINTER(IRNoise3DComputeParams), c.POINTER(IRNoise3DComputeOutputs), *err_args,
         ]),
@@ -333,7 +372,7 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
     calib_info: dict = {}
     drift_fft_summary: dict = {}
     capture_stats_summary: dict = {}
-    geom = IRGeometry()
+    source_info = IRFrameSourceInfo()
 
     try:
         # Stage 0: Optional blackbody + open & start stream + preallocate buffers
@@ -354,11 +393,15 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
             )
 
         check_status(
-            station.IR_OpenFrames(backend, source_path.encode("utf-8"), args.valid_bits, c.byref(geom), err, len(err)),
+            station.IR_OpenFrames(backend, source_path.encode("utf-8"), args.valid_bits,
+                                  c.byref(source_info), err, len(err)),
             "IR_OpenFrames",
             err,
         )
         frames_opened = True
+        geom = source_info.geometry
+        if source_info.data_type != IR_TYPE_U16:
+            raise RuntimeError("This drift/GJB example requires U16 DN input; use the generic capture API for U32 data")
         rows, cols = geom.height, geom.width
         n_pix = rows * cols
         max_frames = max(args.calib_frames, args.burst_frames)
@@ -369,7 +412,6 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
         # Constant-footprint reusable buffers (never write RAW to disk)
         raw_buf = (c.c_uint16 * (max_frames * n_pix))()
         stamps = (IRFrameStamp * max_frames)()
-        completed = c.c_int32(0)
         discarded = c.c_int32(0)
 
         v2_mean = (c.c_double * n_pix)()
@@ -399,20 +441,19 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
         # Stage 1: t=0 Two-point calibration (T0 cold -> transition -> T1 hot)
         if bb_handle.value:
             stabilize_bb(args.bb_t0_c)
+        calib_batch = make_frame_batch_view(raw_buf, cols, rows, args.calib_frames,
+                                            geom.valid_bits, stamps)
         check_status(
-            station.IR_ReadFrames(
-                args.calib_frames, args.frame_timeout_ms, raw_buf, len(raw_buf),
-                stamps, max_frames, c.byref(completed), err, len(err),
-            ),
+            station.IR_ReadFrames(args.frame_timeout_ms, c.byref(calib_batch), err, len(err)),
             "IR_ReadFrames(T0)",
             err,
         )
+        frame_view = make_array_view(raw_buf, cols, rows, calib_batch.pixels.frames)
         check_status(
-            analysis.IR_FrameStatisticsU16(
-                raw_buf, completed.value * n_pix, completed.value, rows, cols, 0,
-                v2_mean, vn2, n_pix, stat_sum, 2, err, len(err),
+            analysis.IR_FrameStatistics(
+                c.byref(frame_view), 0, v2_mean, vn2, n_pix, stat_sum, 2, err, len(err),
             ),
-            "IR_FrameStatisticsU16(T0)",
+            "IR_FrameStatistics(T0)",
             err,
         )
 
@@ -423,20 +464,18 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
         )
         if bb_handle.value:
             stabilize_bb(args.bb_t1_c)
+        calib_batch.pixels.frames = args.calib_frames
         check_status(
-            station.IR_ReadFrames(
-                args.calib_frames, args.frame_timeout_ms, raw_buf, len(raw_buf),
-                stamps, max_frames, c.byref(completed), err, len(err),
-            ),
+            station.IR_ReadFrames(args.frame_timeout_ms, c.byref(calib_batch), err, len(err)),
             "IR_ReadFrames(T1)",
             err,
         )
+        frame_view = make_array_view(raw_buf, cols, rows, calib_batch.pixels.frames)
         check_status(
-            analysis.IR_FrameStatisticsU16(
-                raw_buf, completed.value * n_pix, completed.value, rows, cols, 0,
-                v1_mean, vn1, n_pix, stat_sum, 2, err, len(err),
+            analysis.IR_FrameStatistics(
+                c.byref(frame_view), 0, v1_mean, vn1, n_pix, stat_sum, 2, err, len(err),
             ),
-            "IR_FrameStatisticsU16(T1)",
+            "IR_FrameStatistics(T1)",
             err,
         )
 
@@ -544,9 +583,9 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
         n3d_map_ti = (c.c_double * (args.burst_frames * rows))()
         n3d_map_tj = (c.c_double * (args.burst_frames * cols))()
         n3d_out = IRNoise3DComputeOutputs(
-            None, n3d_scalars_org, n3d_hist, n3d_hist_meta,
+            n3d_scalars_org, n3d_hist, n3d_hist_meta,
             n3d_map_ij, n3d_map_ti, n3d_map_tj, None,
-            0, len(n3d_hist), n_pix, len(n3d_map_ti), len(n3d_map_tj),
+            len(n3d_hist), n_pix, len(n3d_map_ti), len(n3d_map_tj),
             IR_NOISE3D_SCALAR_COUNT, len(n3d_hist_meta), 0, 0,
         )
         n3d_params_org = IRNoise3DComputeParams(IR_NOISE3D_MODE_ORG, 1, hist_interval, 0, 0.0, -999.0)
@@ -606,26 +645,24 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
                     break
                 check_status(st_flush, f"IR_FlushFrames(burst={burst_idx})", err)
 
-                st_read = station.IR_ReadFrames(
-                    args.burst_frames, args.frame_timeout_ms, raw_buf, len(raw_buf),
-                    stamps, max_frames, c.byref(completed), err, len(err),
-                )
+                burst_batch = make_frame_batch_view(raw_buf, cols, rows, args.burst_frames,
+                                                    geom.valid_bits, stamps)
+                st_read = station.IR_ReadFrames(args.frame_timeout_ms, c.byref(burst_batch), err, len(err))
                 if st_read == IR_CANCELLED:
                     stop_flag = True
                     break
                 check_status(st_read, f"IR_ReadFrames(burst={burst_idx})", err)
 
-                n_frames = completed.value
-                total_samples = n_frames * n_pix
+                n_frames = burst_batch.pixels.frames
                 lost_total = sum(stamps[i].lost_frames for i in range(n_frames))
+                frame_view = make_array_view(raw_buf, cols, rows, n_frames)
 
                 # Pre-NUC stats + map summary + GJB burst
                 check_status(
-                    analysis.IR_FrameStatisticsU16(
-                        raw_buf, total_samples, n_frames, rows, cols, 0,
-                        org_mean, org_vn, n_pix, stat_sum, 2, err, len(err),
+                    analysis.IR_FrameStatistics(
+                        c.byref(frame_view), 0, org_mean, org_vn, n_pix, stat_sum, 2, err, len(err),
                     ),
-                    "IR_FrameStatisticsU16(ORG)",
+                    "IR_FrameStatistics(ORG)",
                     err,
                 )
                 check_status(
@@ -647,12 +684,11 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
 
                 # Post-NUC lossless stats + map summary + GJB burst
                 check_status(
-                    analysis.IR_FrameStatisticsNucU16(
-                        raw_buf, total_samples, n_frames, rows, cols, 0,
-                        k_map, b_map, None, valid_mask,
+                    analysis.IR_FrameStatisticsNuc(
+                        c.byref(frame_view), 0, k_map, b_map, None, valid_mask,
                         nuc_mean, nuc_vn, n_pix, stat_sum, 2, err, len(err),
                     ),
-                    "IR_FrameStatisticsNucU16(NUC)",
+                    "IR_FrameStatisticsNuc(NUC)",
                     err,
                 )
                 check_status(
@@ -698,14 +734,13 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
                 if fft_channels > 0 and n_frames >= 2:
                     bins = n_frames // 2 + 1
                     check_status(
-                        analysis.IR_ChannelSpectrumU16(
-                            raw_buf, total_samples, n_frames, rows, cols,
-                            IR_SPECTRUM_AXIS_COLUMNS, fft_channels, args.sample_rate_hz,
+                        analysis.IR_ChannelSpectrum(
+                            c.byref(frame_view), IR_SPECTRUM_AXIS_COLUMNS, fft_channels, args.sample_rate_hz,
                             IR_WINDOW_RECTANGULAR,
                             ch_freqs, len(ch_freqs), None, 0,
                             ch_amps, len(ch_amps), None, None, 0, err, len(err),
                         ),
-                        "IR_ChannelSpectrumU16",
+                        "IR_ChannelSpectrum",
                         err,
                     )
                     if bins > 1:
@@ -719,7 +754,7 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
                     n3d_out.scalars = c.cast(n3d_scalars_org, c.POINTER(c.c_double))
                     check_status(
                         analysis.IR_Noise3DComputeFramesDn(
-                            raw_buf, total_samples, n_frames, rows, cols,
+                            c.byref(frame_view),
                             blind_mask, n_pix, None, None, 0,
                             c.byref(n3d_params_org), c.byref(n3d_out), err, len(err),
                         ),
@@ -729,7 +764,7 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
                     n3d_out.scalars = c.cast(n3d_scalars_nuc, c.POINTER(c.c_double))
                     check_status(
                         analysis.IR_Noise3DComputeFramesDn(
-                            raw_buf, total_samples, n_frames, rows, cols,
+                            c.byref(frame_view),
                             blind_mask, n_pix, k_map, v1_mean, n_pix,
                             c.byref(n3d_params_nuc), c.byref(n3d_out), err, len(err),
                         ),
@@ -848,7 +883,8 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
         "cancelled": stop_flag,
         "started_utc": started_utc,
         "finished_utc": utc_now_iso(),
-        "geometry": {"width": geom.width, "height": geom.height, "valid_bits": geom.valid_bits},
+        "geometry": {"width": geom.width, "height": geom.height, "valid_bits": geom.valid_bits,
+                     "data_type": source_info.data_type},
         "config": {
             "duration_hours": args.duration_hours,
             "interval_sec": args.interval_sec,

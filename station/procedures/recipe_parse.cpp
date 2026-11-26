@@ -27,11 +27,14 @@ uint64_t multiplyBytes(uint64_t count, uint64_t itemBytes)
     return count * itemBytes;
 }
 
-uint64_t batchStorageBytes(IRGeometry geometry, int32_t frames, int64_t maxBatchBytes)
+uint64_t batchStorageBytes(IRGeometry geometry, int32_t frames, int32_t dataType,
+                           int64_t maxBatchBytes)
 {
     const uint64_t pixelsPerFrame = static_cast<uint64_t>(pixels(geometry.height, geometry.width));
     const uint64_t pixelElements = multiplyBytes(pixelsPerFrame, static_cast<uint64_t>(frames));
-    const uint64_t pixelBytes = multiplyBytes(pixelElements, sizeof(uint16_t));
+    const uint64_t elementBytes = pixelElementBytes(dataType);
+    require(elementBytes != 0, IR_UNSUPPORTED, "Recipe capture supports U16 or U32 pixel storage");
+    const uint64_t pixelBytes = multiplyBytes(pixelElements, elementBytes);
     require(pixelBytes <= static_cast<uint64_t>(maxBatchBytes), IR_BAD_ARGUMENT,
             "Frame batch exceeds station.acquisition.max_batch_bytes");
     const uint64_t stampBytes = multiplyBytes(static_cast<uint64_t>(frames), sizeof(IRFrameStamp));
@@ -190,7 +193,7 @@ StationConfig parseStation(const char *text)
 #endif
     } else throw Error(IR_BAD_ARGUMENT, "station.acquisition.backend is unsupported");
     station.source = stringField(acquisition, "source", "station.acquisition");
-    station.validBits = integerField(acquisition, "valid_bits", 0, 16, "station.acquisition");
+    station.validBits = integerField(acquisition, "valid_bits", 0, 32, "station.acquisition");
     station.maxBatchBytes = optionalBytes(acquisition, "max_batch_bytes", station.maxBatchBytes,
                                           "station.acquisition");
     station.maxInflightBytes = static_cast<uint64_t>(optionalBytes(

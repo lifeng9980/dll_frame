@@ -4,7 +4,7 @@
     {
       "name": "windows",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/实验/build-debug",
+      "binaryDir": "${sourceDir}/实验/test",
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",

@@ -197,12 +197,17 @@ if(BUILD_TESTING)
     add_test(NAME drift_nodisk COMMAND drift_nodisk_test)
     add_executable(frame_queue_test
         sdk_tests/frame_queue_test.cpp
-        station/acquisition/frame_queue.cpp)
+        station/acquisition/frame_queue.cpp
+        station/acquisition/frame_source.cpp
+        station/acquisition/raw_replay_source.cpp)
     target_include_directories(frame_queue_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/include"
         "${PROJECT_SOURCE_DIR}/station/acquisition"
         "${PROJECT_SOURCE_DIR}/station"
         "${PROJECT_SOURCE_DIR}/shared")
-    target_link_libraries(frame_queue_test PRIVATE IR_station)
+    # Exercise capture startup with the platform live factory replaced by a test source.
+    target_compile_definitions(frame_queue_test PRIVATE IR_STATION_BUILD)
+    target_link_libraries(frame_queue_test PRIVATE Threads::Threads)
     add_test(NAME frame_queue COMMAND frame_queue_test)
     add_executable(replay_roundtrip sdk_tests/replay_roundtrip.cpp)
     target_link_libraries(replay_roundtrip PRIVATE IR_station)
@@ -222,11 +227,15 @@ if(BUILD_TESTING)
     add_test(NAME discovery COMMAND discovery_test)
     ir_add_metric_plugin(ir_test_plugin_good sdk_tests/plugins/test_plugin_good.cpp)
     ir_add_metric_plugin(ir_test_plugin_bad_abi sdk_tests/plugins/test_plugin_bad_abi.cpp)
-    add_executable(plugin_abi_test sdk_tests/plugin_abi_test.cpp)
+    ir_add_metric_plugin(ir_test_plugin_duplicate sdk_tests/plugins/test_plugin_duplicate.cpp)
+    add_executable(plugin_abi_test
+        sdk_tests/plugin_abi_test.cpp
+        sdk_tests/plugins/test_plugin_good.cpp)
     target_include_directories(plugin_abi_test SYSTEM PRIVATE
         "${PROJECT_SOURCE_DIR}/third_party/nlohmann_json/include")
     target_link_libraries(plugin_abi_test PRIVATE IR_station Threads::Threads)
-    add_dependencies(plugin_abi_test ir_test_plugin_good ir_test_plugin_bad_abi)
+    add_dependencies(plugin_abi_test
+        ir_test_plugin_good ir_test_plugin_bad_abi ir_test_plugin_duplicate)
     add_test(NAME plugin_abi COMMAND plugin_abi_test "$<TARGET_FILE_DIR:ir_test_plugin_good>")
     add_test(NAME ir_run_recipe_offline_check COMMAND ir_run_recipe --check
         --station "${PROJECT_SOURCE_DIR}/examples/stations/offline.json"
@@ -276,6 +285,14 @@ if(BUILD_TESTING)
             set_tests_properties(power_serial PROPERTIES TIMEOUT 30)
         endif()
     endif()
+endif()
+
+if(WIN32 AND BUILD_TESTING)
+    set(_ir_ctest_tmp "${PROJECT_BINARY_DIR}/ctest-tmp")
+    file(MAKE_DIRECTORY "${_ir_ctest_tmp}")
+    get_property(_ir_ctest_names DIRECTORY PROPERTY TESTS)
+    set_tests_properties(${_ir_ctest_names} PROPERTIES
+        ENVIRONMENT "TEMP=${_ir_ctest_tmp};TMP=${_ir_ctest_tmp}")
 endif()
 
 install(TARGETS IR_station IR_analysis RUNTIME DESTINATION bin

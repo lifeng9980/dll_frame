@@ -1,5 +1,6 @@
 #include "IR_analysis.h"
 #include "api_common.h"
+#include "matrix_view.h"
 
 #include <algorithm>
 #include <cmath>
@@ -9,6 +10,8 @@
 #include <vector>
 
 using namespace ir::api;
+using ir::analysis::dispatchRawArrayView;
+using ir::analysis::validateRawArrayView;
 
 namespace
 {
@@ -244,7 +247,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_ComputeRfft1D(
     int32_t out_bins_capacity,
     char *err,
     int32_t err_bytes)
-{
+noexcept{
     return guarded(err, err_bytes, [&] {
         require(signal != nullptr && out_amplitude != nullptr, IR_NULL_POINTER,
                 "signal and out_amplitude must not be null");
@@ -267,12 +270,8 @@ extern "C" IR_ANALYSIS_API int32_t IR_ComputeRfft1D(
     });
 }
 
-extern "C" IR_ANALYSIS_API int32_t IR_ChannelSpectrumU16(
-    const uint16_t *frames,
-    int64_t frame_elements,
-    int32_t frame_count,
-    int32_t rows,
-    int32_t cols,
+extern "C" IR_ANALYSIS_API int32_t IR_ChannelSpectrum(
+    const IRArrayView *frames,
     int32_t axis,
     int32_t channel_count,
     double sample_rate_hz,
@@ -287,12 +286,14 @@ extern "C" IR_ANALYSIS_API int32_t IR_ChannelSpectrumU16(
     double *out_temporal_stds,
     int32_t channel_stats_capacity,
     char *err,
-    int32_t err_bytes)
+    int32_t err_bytes) noexcept
 {
     return guarded(err, err_bytes, [&] {
-        const int64_t n = pixels(rows, cols);
+        const int64_t n = validateRawArrayView(frames);
+        const int32_t frame_count = frames->frames;
+        const int32_t rows = frames->height;
+        const int32_t cols = frames->width;
         require(frame_count >= 2, IR_BAD_ARGUMENT, "Channel spectrum requires at least 2 frames");
-        needed(frames, frame_elements, stackSize(n, frame_count));
         require(axis == IR_SPECTRUM_AXIS_COLUMNS || axis == IR_SPECTRUM_AXIS_ROWS,
                 IR_BAD_ARGUMENT, "axis must be IR_SPECTRUM_AXIS_COLUMNS or IR_SPECTRUM_AXIS_ROWS");
         require(channel_count >= 1, IR_BAD_ARGUMENT, "channel_count must be >= 1");
@@ -323,35 +324,37 @@ extern "C" IR_ANALYSIS_API int32_t IR_ChannelSpectrumU16(
         const int64_t samplesPerChannel = n / channel_count;
         std::vector<long double> sums(static_cast<size_t>(channel_count), 0.0L);
 
-        for (int32_t f = 0; f < frame_count; ++f)
-        {
-            std::fill(sums.begin(), sums.end(), 0.0L);
-            const uint16_t *framePtr = frames + int64_t(f) * n;
-            for (int32_t r = 0; r < rows; ++r)
+        dispatchRawArrayView(*frames, [&](const auto *pixels) {
+            for (int32_t f = 0; f < frame_count; ++f)
             {
-                const uint16_t *rowPtr = framePtr + int64_t(r) * cols;
-                if (axis == IR_SPECTRUM_AXIS_ROWS)
+                std::fill(sums.begin(), sums.end(), 0.0L);
+                const int64_t frameOffset = int64_t(f) * n;
+                for (int32_t r = 0; r < rows; ++r)
                 {
-                    const int32_t ch = r % channel_count;
-                    long double rowSum = 0.0L;
-                    for (int32_t c = 0; c < cols; ++c)
-                        rowSum += rowPtr[c];
-                    sums[static_cast<size_t>(ch)] += rowSum;
+                    const auto *rowPtr = pixels + frameOffset + int64_t(r) * cols;
+                    if (axis == IR_SPECTRUM_AXIS_ROWS)
+                    {
+                        const int32_t ch = r % channel_count;
+                        long double rowSum = 0.0L;
+                        for (int32_t c = 0; c < cols; ++c)
+                            rowSum += rowPtr[c];
+                        sums[static_cast<size_t>(ch)] += rowSum;
+                    }
+                    else
+                    {
+                        for (int32_t c = 0; c < cols; ++c)
+                            sums[static_cast<size_t>(c % channel_count)] += rowPtr[c];
+                    }
                 }
-                else
-                {
-                    for (int32_t c = 0; c < cols; ++c)
-                        sums[static_cast<size_t>(c % channel_count)] += rowPtr[c];
-                }
-            }
 
-            for (int32_t ch = 0; ch < channel_count; ++ch)
-            {
-                const double val =
-                    static_cast<double>(sums[static_cast<size_t>(ch)] / static_cast<long double>(samplesPerChannel));
-                channelSeries[static_cast<size_t>(ch)][static_cast<size_t>(f)] = val;
+                for (int32_t ch = 0; ch < channel_count; ++ch)
+                {
+                    const double val = static_cast<double>(
+                        sums[static_cast<size_t>(ch)] / static_cast<long double>(samplesPerChannel));
+                    channelSeries[static_cast<size_t>(ch)][static_cast<size_t>(f)] = val;
+                }
             }
-        }
+        });
 
         const PreparedRfft1d prep(frame_count, window_kind);
         for (int32_t ch = 0; ch < channel_count; ++ch)
@@ -404,7 +407,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_Fft2dMagnitudeF64(
     double *out_power_map,
     char *err,
     int32_t err_bytes)
-{
+noexcept{
     static_assert(sizeof(IRFft2dSummary) == 64, "Unexpected IRFft2dSummary size");
     if (summary)
         *summary = IRFft2dSummary{};

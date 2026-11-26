@@ -375,8 +375,9 @@ PreparedMetric prepNoise3dCompute(const std::string &name, const Json &inputs, c
 
             const IRNoise3DComputeParams cp{mode, threadCount, histInterval, 0, resolvedBAvg, invalidFill};
             char err[1024]{};
-            checkStatus(IR_Noise3DComputeFramesDn(b.pixels.data(), int64_t(b.pixels.size()),
-                frameCount, g.height, g.width, blind.data.data(), n, kPtr, bPtr, kPtr ? n : 0,
+            const IRArrayView input = frameBatchArrayView(b);
+            checkStatus(IR_Noise3DComputeFramesDn(&input,
+                blind.data.data(), n, kPtr, bPtr, kPtr ? n : 0,
                 &cp, &out, err, sizeof err), err);
             recordScalarOutputs(ctx, name, outs, {
                 scalars[IR_NOISE3D_SCALAR_DELTA_T],
@@ -429,14 +430,14 @@ PreparedMetric prepChannelSpectrum(const std::string &name, const Json &inputs, 
             const auto &b = getBatch(ctx, framesSlot);
             const auto g = b.geometry;
             const int32_t frameCount = int32_t(b.stamps.size());
+            const IRArrayView input = frameBatchArrayView(b);
             const int32_t bins = frameCount / 2 + 1;
             std::vector<double> freqs(static_cast<size_t>(bins));
             std::vector<double> amps(static_cast<size_t>(channels) * bins);
             std::vector<double> tMeans(static_cast<size_t>(channels));
             std::vector<double> tStds(static_cast<size_t>(channels));
             char err[1024]{};
-            checkStatus(IR_ChannelSpectrumU16(b.pixels.data(), int64_t(b.pixels.size()),
-                frameCount, g.height, g.width, axis, channels, fsHz, winKind,
+            checkStatus(IR_ChannelSpectrum(&input, axis, channels, fsHz, winKind,
                 freqs.data(), bins, nullptr, 0, amps.data(), int64_t(amps.size()),
                 tMeans.data(), tStds.data(), channels, err, sizeof err), err);
             int32_t bestK = 0;
@@ -485,6 +486,7 @@ PreparedMetric prepFlickerDetect(const std::string &name, const Json &inputs, co
             ExecutionContext &ctx = runCtx.ctx;
             const auto &b = getBatch(ctx, framesSlot);
             const auto g = b.geometry;
+            const IRArrayView input = frameBatchArrayView(b);
             const auto n = pixels(g.height, g.width);
             const double *kPtr = nullptr;
             const double *bPtr = nullptr;
@@ -510,8 +512,7 @@ PreparedMetric prepFlickerDetect(const std::string &name, const Json &inputs, co
             }
             IRFlickerSummary summary{};
             char err[1024]{};
-            checkStatus(IR_FlickerDetectU16(b.pixels.data(), int64_t(b.pixels.size()),
-                int32_t(b.stamps.size()), g.height, g.width,
+            checkStatus(IR_FlickerDetect(&input,
                 kPtr, bPtr, maskPtr, mult, exceedThresh,
                 &summary, nullptr, outMaskPtr, n, nullptr, nullptr, 0,
                 err, sizeof err), err);

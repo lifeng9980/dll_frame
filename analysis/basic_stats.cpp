@@ -1,5 +1,6 @@
 #include "IR_analysis.h"
 #include "api_common.h"
+#include "matrix_view.h"
 
 #include <algorithm>
 #include <cmath>
@@ -7,90 +8,107 @@
 #include <vector>
 
 using namespace ir::api;
+using ir::analysis::dispatchRawArrayView;
+using ir::analysis::validateRawArrayView;
 
 namespace
 {
 
 static_assert(sizeof(IRFlickerSummary) == 48, "Unexpected IRFlickerSummary size");
 
+template <typename T>
+void frameStatisticsCore(const T *frames, int32_t frameCount, int64_t pixelCount,
+                         int32_t sampleStd, double *means, double *stds,
+                         double *summary)
+{
+    std::vector<double> mean(static_cast<size_t>(pixelCount), 0.0);
+    std::vector<double> m2(static_cast<size_t>(pixelCount), 0.0);
+    for (int32_t frame = 0; frame < frameCount; ++frame)
+    {
+        const int64_t frameOffset = int64_t(frame) * pixelCount;
+        for (int64_t pixel = 0; pixel < pixelCount; ++pixel)
+        {
+            const double value = static_cast<double>(frames[frameOffset + pixel]);
+            const double delta = value - mean[static_cast<size_t>(pixel)];
+            mean[static_cast<size_t>(pixel)] += delta / (frame + 1);
+            m2[static_cast<size_t>(pixel)] +=
+                delta * (value - mean[static_cast<size_t>(pixel)]);
+        }
+    }
+
+    double average = 0.0;
+    double averageStd = 0.0;
+    for (int64_t pixel = 0; pixel < pixelCount; ++pixel)
+    {
+        const size_t index = static_cast<size_t>(pixel);
+        m2[index] = std::sqrt(std::max(0.0, m2[index] / (frameCount - sampleStd)));
+        average += mean[index] / pixelCount;
+        averageStd += m2[index] / pixelCount;
+    }
+    std::copy(mean.begin(), mean.end(), means);
+    std::copy(m2.begin(), m2.end(), stds);
+    summary[0] = average;
+    summary[1] = averageStd;
+}
+
 } // namespace
 
 extern "C" const char *IR_AnalysisVersion(void)
-{
+noexcept{
     return IR_ANALYSIS_VERSION;
 }
 
 // Welford 更新逐像元均值和平方差，避免高直流背景下的减法消差。
-extern "C" int32_t IR_FrameStatisticsU16(const uint16_t *frames, int64_t elements, int32_t t, int32_t rows,
-                                              int32_t cols, int32_t sample, double *means, double *stds,
-                                              int64_t capacity, double *summary, int32_t sn, char *err, int32_t en)
+extern "C" IR_ANALYSIS_API int32_t IR_FrameStatistics(
+    const IRArrayView *input, int32_t sample, double *means, double *stds,
+    int64_t capacity, double *summary, int32_t sn, char *err, int32_t en) noexcept
 {
     return guarded(err, en, [&] {
-        const auto n = pixels(rows, cols);
-        needed(frames, elements, stackSize(n, t));
-        require((sample == 0 || sample == 1) && t > sample, IR_BAD_ARGUMENT,
+        const auto n = validateRawArrayView(input);
+        require((sample == 0 || sample == 1) && input->frames > sample, IR_BAD_ARGUMENT,
                 "Invalid standard deviation convention or frame count");
         needed(means, capacity, n);
         needed(stds, capacity, n);
         needed(summary, sn, 2);
-        std::vector<double> m(size_t(n), 0), m2(size_t(n), 0);
-        for (int f = 0; f < t; ++f)
-        {
-            for (int64_t p = 0; p < n; ++p)
-            {
-                const double delta = frames[int64_t(f) * n + p] - m[p];
-                m[p] += delta / (f + 1);
-                m2[p] += delta * (frames[int64_t(f) * n + p] - m[p]);
-            }
-        }
-        double average = 0, averageStd = 0;
-        for (int64_t p = 0; p < n; ++p)
-        {
-            m2[p] = std::sqrt(std::max(0.0, m2[p] / (t - sample)));
-            average += m[p] / n;
-            averageStd += m2[p] / n;
-        }
-        std::copy(m.begin(), m.end(), means);
-        std::copy(m2.begin(), m2.end(), stds);
-        summary[0] = average;
-        summary[1] = averageStd;
+        dispatchRawArrayView(*input, [&](const auto *frames) {
+            frameStatisticsCore(frames, input->frames, n, sample, means, stds, summary);
+        });
     });
 }
 
-extern "C" int32_t IR_ROIMeanU16(const uint16_t *frames, int64_t elements,
-    int32_t frameCount, int32_t rows, int32_t cols, int32_t x, int32_t y,
-    int32_t roiWidth, int32_t roiHeight, double *meanDn, char *err, int32_t errBytes)
+extern "C" IR_ANALYSIS_API int32_t IR_ROIMean(
+    const IRArrayView *input, int32_t x, int32_t y, int32_t roiWidth, int32_t roiHeight,
+    double *meanDn, char *err, int32_t errBytes) noexcept
 {
     if (meanDn) *meanDn = 0.0;
     return guarded(err, errBytes, [&] {
-        const auto pixelCount = pixels(rows, cols);
-        require(frameCount > 0, IR_BAD_ARGUMENT, "At least one frame is required");
-        needed(frames, elements, stackSize(pixelCount, frameCount));
+        const auto pixelCount = validateRawArrayView(input);
+        const int32_t frameCount = input->frames;
+        const int32_t rows = input->height;
+        const int32_t cols = input->width;
         needed(meanDn, 1, 1);
         require(x >= 0 && y >= 0 && roiWidth > 0 && roiHeight > 0 &&
                 x <= cols - roiWidth && y <= rows - roiHeight,
                 IR_BAD_ARGUMENT, "ROI is outside the image geometry");
 
-        long double sum = 0.0L;
-        for (int32_t frame = 0; frame < frameCount; ++frame) {
-            const auto frameOffset = int64_t(frame) * pixelCount;
-            for (int32_t row = y; row < y + roiHeight; ++row) {
-                const auto rowOffset = frameOffset + int64_t(row) * cols + x;
-                for (int32_t col = 0; col < roiWidth; ++col)
-                    sum += frames[rowOffset + col];
+        dispatchRawArrayView(*input, [&](const auto *frames) {
+            long double sum = 0.0L;
+            for (int32_t frame = 0; frame < frameCount; ++frame) {
+                const auto frameOffset = int64_t(frame) * pixelCount;
+                for (int32_t row = y; row < y + roiHeight; ++row) {
+                    const auto rowOffset = frameOffset + int64_t(row) * cols + x;
+                    for (int32_t col = 0; col < roiWidth; ++col)
+                        sum += frames[rowOffset + col];
+                }
             }
-        }
-        const auto samples = int64_t(frameCount) * roiWidth * roiHeight;
-        *meanDn = static_cast<double>(sum / samples);
+            const auto samples = int64_t(frameCount) * roiWidth * roiHeight;
+            *meanDn = static_cast<double>(sum / samples);
+        });
     });
 }
 
-extern "C" IR_ANALYSIS_API int32_t IR_FlickerDetectU16(
-    const uint16_t *frames,
-    int64_t frame_elements,
-    int32_t frame_count,
-    int32_t rows,
-    int32_t cols,
+extern "C" IR_ANALYSIS_API int32_t IR_FlickerDetect(
+    const IRArrayView *input,
     const double *k_map,
     const double *b_map,
     const uint8_t *valid_mask,
@@ -104,11 +122,11 @@ extern "C" IR_ANALYSIS_API int32_t IR_FlickerDetectU16(
     double *out_frame_sigmas,
     int32_t frame_stats_capacity,
     char *err,
-    int32_t err_bytes)
+    int32_t err_bytes) noexcept
 {
     return guarded(err, err_bytes, [&] {
-        const int64_t n = pixels(rows, cols);
-        needed(frames, frame_elements, stackSize(n, frame_count));
+        const int64_t n = validateRawArrayView(input);
+        const int32_t frame_count = input->frames;
         require(frame_count >= 1, IR_BAD_ARGUMENT, "frame_count must be >= 1");
         require((k_map == nullptr) == (b_map == nullptr), IR_BAD_ARGUMENT,
                 "k_map and b_map must both be null or both non-null");
@@ -134,92 +152,92 @@ extern "C" IR_ANALYSIS_API int32_t IR_FlickerDetectU16(
         if (out_frame_sigmas)
             needed(out_frame_sigmas, frame_stats_capacity, frame_count);
 
-        const bool useNuc = (k_map != nullptr);
-        std::vector<int32_t> exceedCount(static_cast<size_t>(n), 0);
-        std::vector<uint8_t> observed(static_cast<size_t>(n), 0);
-        double sumFrameMean = 0.0;
-        double sumFrameSigma = 0.0;
+        dispatchRawArrayView(*input, [&](const auto *frames) {
+            const bool useNuc = (k_map != nullptr);
+            std::vector<int32_t> exceedCount(static_cast<size_t>(n), 0);
+            std::vector<uint8_t> observed(static_cast<size_t>(n), 0);
+            double sumFrameMean = 0.0;
+            double sumFrameSigma = 0.0;
 
-        for (int32_t f = 0; f < frame_count; ++f)
-        {
-            const int64_t base = int64_t(f) * n;
-            double mean = 0.0;
-            double m2 = 0.0;
-            int64_t validInFrame = 0;
-
-            for (int64_t p = 0; p < n; ++p)
+            for (int32_t f = 0; f < frame_count; ++f)
             {
-                if (valid_mask && valid_mask[p] == 0)
-                    continue;
-                const uint16_t raw = frames[base + p];
-                if (raw == 0)
-                    continue;
-                const double rawD = static_cast<double>(raw);
-                const double val = useNuc ? (rawD * k_map[p] + b_map[p]) : rawD;
-                if (!std::isfinite(val) || val == 0.0)
-                    continue;
+                const int64_t base = int64_t(f) * n;
+                double mean = 0.0;
+                double m2 = 0.0;
+                int64_t validInFrame = 0;
 
-                observed[static_cast<size_t>(p)] = 1;
-                ++validInFrame;
-                const double delta = val - mean;
-                mean += delta / static_cast<double>(validInFrame);
-                m2 += delta * (val - mean);
+                for (int64_t p = 0; p < n; ++p)
+                {
+                    if (valid_mask && valid_mask[p] == 0)
+                        continue;
+                    const double raw = static_cast<double>(frames[base + p]);
+                    if (raw == 0.0)
+                        continue;
+                    const double val = useNuc ? (raw * k_map[p] + b_map[p]) : raw;
+                    if (!std::isfinite(val) || val == 0.0)
+                        continue;
+
+                    observed[static_cast<size_t>(p)] = 1;
+                    ++validInFrame;
+                    const double delta = val - mean;
+                    mean += delta / static_cast<double>(validInFrame);
+                    m2 += delta * (val - mean);
+                }
+
+                require(validInFrame > 0, IR_COMPUTATION_FAILED, "Frame has no valid non-zero pixels");
+                const double sigma = std::sqrt(std::max(0.0, m2 / static_cast<double>(validInFrame)));
+                sumFrameMean += mean;
+                sumFrameSigma += sigma;
+                if (out_frame_means)
+                    out_frame_means[f] = mean;
+                if (out_frame_sigmas)
+                    out_frame_sigmas[f] = sigma;
+
+                const double limit = std_dev_multiplier * sigma;
+                for (int64_t p = 0; p < n; ++p)
+                {
+                    if (valid_mask && valid_mask[p] == 0)
+                        continue;
+                    const double raw = static_cast<double>(frames[base + p]);
+                    if (raw == 0.0)
+                        continue;
+                    const double val = useNuc ? (raw * k_map[p] + b_map[p]) : raw;
+                    if (!std::isfinite(val) || val == 0.0)
+                        continue;
+                    if (std::abs(val - mean) > limit)
+                        ++exceedCount[static_cast<size_t>(p)];
+                }
             }
 
-            require(validInFrame > 0, IR_COMPUTATION_FAILED, "Frame has no valid non-zero pixels");
-            const double sigma = std::sqrt(std::max(0.0, m2 / static_cast<double>(validInFrame)));
-            sumFrameMean += mean;
-            sumFrameSigma += sigma;
-            if (out_frame_means)
-                out_frame_means[f] = mean;
-            if (out_frame_sigmas)
-                out_frame_sigmas[f] = sigma;
-
-            const double limit = std_dev_multiplier * sigma;
+            int32_t validPixelCount = 0;
+            int32_t flickerCount = 0;
             for (int64_t p = 0; p < n; ++p)
             {
-                if (valid_mask && valid_mask[p] == 0)
-                    continue;
-                const uint16_t raw = frames[base + p];
-                if (raw == 0)
-                    continue;
-                const double rawD = static_cast<double>(raw);
-                const double val = useNuc ? (rawD * k_map[p] + b_map[p]) : rawD;
-                if (!std::isfinite(val) || val == 0.0)
-                    continue;
-                if (std::abs(val - mean) > limit)
-                    ++exceedCount[static_cast<size_t>(p)];
+                const size_t idx = static_cast<size_t>(p);
+                const bool isObserved = (observed[idx] != 0);
+                const bool isFlicker = isObserved && (exceedCount[idx] > exceed_count_threshold);
+                if (isObserved)
+                    ++validPixelCount;
+                if (isFlicker)
+                    ++flickerCount;
+                if (out_exceed_count_map)
+                    out_exceed_count_map[p] = exceedCount[idx];
+                if (out_flicker_mask)
+                    out_flicker_mask[p] = isFlicker ? 1 : 0;
             }
-        }
+            require(validPixelCount > 0, IR_COMPUTATION_FAILED, "No observed valid pixels across frames");
 
-        int32_t validPixelCount = 0;
-        int32_t flickerCount = 0;
-        for (int64_t p = 0; p < n; ++p)
-        {
-            const size_t idx = static_cast<size_t>(p);
-            const bool isObserved = (observed[idx] != 0);
-            const bool isFlicker = isObserved && (exceedCount[idx] > exceed_count_threshold);
-            if (isObserved)
-                ++validPixelCount;
-            if (isFlicker)
-                ++flickerCount;
-            if (out_exceed_count_map)
-                out_exceed_count_map[p] = exceedCount[idx];
-            if (out_flicker_mask)
-                out_flicker_mask[p] = isFlicker ? 1 : 0;
-        }
-        require(validPixelCount > 0, IR_COMPUTATION_FAILED, "No observed valid pixels across frames");
-
-        IRFlickerSummary result{};
-        result.std_dev_multiplier = std_dev_multiplier;
-        result.flicker_ratio_pct =
-            100.0 * static_cast<double>(flickerCount) / static_cast<double>(validPixelCount);
-        result.mean_frame_mean_dn = sumFrameMean / static_cast<double>(frame_count);
-        result.mean_frame_sigma_dn = sumFrameSigma / static_cast<double>(frame_count);
-        result.exceed_count_threshold = exceed_count_threshold;
-        result.frame_count = frame_count;
-        result.valid_pixel_count = validPixelCount;
-        result.flicker_count = flickerCount;
-        *summary = result;
+            IRFlickerSummary result{};
+            result.std_dev_multiplier = std_dev_multiplier;
+            result.flicker_ratio_pct =
+                100.0 * static_cast<double>(flickerCount) / static_cast<double>(validPixelCount);
+            result.mean_frame_mean_dn = sumFrameMean / static_cast<double>(frame_count);
+            result.mean_frame_sigma_dn = sumFrameSigma / static_cast<double>(frame_count);
+            result.exceed_count_threshold = exceed_count_threshold;
+            result.frame_count = frame_count;
+            result.valid_pixel_count = validPixelCount;
+            result.flicker_count = flickerCount;
+            *summary = result;
+        });
     });
 }

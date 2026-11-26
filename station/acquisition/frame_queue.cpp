@@ -2,8 +2,8 @@
 #include "api_common.h"
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <limits>
-#include <utility>
 
 namespace ir::acquisition {
 using namespace ir::api;
@@ -15,6 +15,24 @@ int64_t steadyNowNs() noexcept
 {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+uint64_t bytesPerPixel(int32_t dataType)
+{
+    switch (dataType) {
+    case IR_TYPE_U16: return sizeof(uint16_t);
+    case IR_TYPE_U32: return sizeof(uint32_t);
+    default: throw Error(IR_UNSUPPORTED, "FrameQueue supports U16 and U32 pixels");
+    }
+}
+
+uint64_t frameBytes(IRGeometry geometry, int32_t dataType)
+{
+    const auto count = pixels(geometry.height, geometry.width);
+    const auto elementSize = bytesPerPixel(dataType);
+    require(static_cast<uint64_t>(count) <= std::numeric_limits<uint64_t>::max() / elementSize,
+            IR_BAD_ARGUMENT, "Frame byte size overflows");
+    return static_cast<uint64_t>(count) * elementSize;
 }
 } // namespace
 
@@ -37,33 +55,38 @@ void FrameQueue::setIdleCapacity(int32_t capacity)
     }
 }
 
-void FrameQueue::configure(IRGeometry geometry, int32_t capacity)
+void FrameQueue::configure(IRGeometry geometry, int32_t dataType, int32_t capacity)
 {
     validateCapacity(capacity);
     const int64_t pxCount = pixels(geometry.height, geometry.width);
-    const int64_t poolElems = stackSize(pxCount, capacity);
+    const uint64_t oneFrameBytes = frameBytes(geometry, dataType);
+    require(oneFrameBytes <= std::numeric_limits<size_t>::max() / static_cast<size_t>(capacity),
+            IR_BAD_ARGUMENT, "FrameQueue storage size overflows");
+    const size_t poolBytes = static_cast<size_t>(oneFrameBytes) * static_cast<size_t>(capacity);
 
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
-        queueGeometry_ = geometry;
         queuePixelCount_ = pxCount;
+        queueFrameBytes_ = oneFrameBytes;
         capacity_ = capacity;
-        pool_.assign(static_cast<size_t>(poolElems), 0);
+        pool_.assign(poolBytes, 0);
         stamps_.assign(static_cast<size_t>(capacity), IRFrameStamp{});
         head_ = 0;
         count_ = 0;
         droppedSinceLastPush_ = 0;
         terminalStatus_ = IR_OK;
-        terminalMessage_.clear();
+        terminalMessage_[0] = '\0';
         stopped_ = false;
     }
 
     {
         std::lock_guard<std::mutex> lock(previewMutex_);
         previewGeometry_ = geometry;
+        previewDataType_ = dataType;
         previewPixelCount_ = pxCount;
+        previewFrameBytes_ = oneFrameBytes;
         hasLatest_ = false;
-        latestPixels_.assign(static_cast<size_t>(pxCount), 0);
+        latestPixels_.assign(static_cast<size_t>(oneFrameBytes), 0);
         latestStamp_ = {};
         framesReceived_.store(0, std::memory_order_relaxed);
         framesDelivered_.store(0, std::memory_order_relaxed);
@@ -78,38 +101,43 @@ void FrameQueue::configure(IRGeometry geometry, int32_t capacity)
     }
 }
 
-void FrameQueue::resetSession(IRGeometry geometry, int32_t capacity, bool running)
+void FrameQueue::resetSession(IRGeometry geometry, int32_t dataType, int32_t capacity, bool running)
 {
-    configure(geometry, capacity);
+    configure(geometry, dataType, capacity);
     std::lock_guard<std::mutex> lock(previewMutex_);
     running_ = running ? 1 : 0;
 }
 
-void FrameQueue::beginStartSession(IRGeometry geometry, int32_t capacity)
+void FrameQueue::beginStartSession(IRGeometry geometry, int32_t dataType, int32_t capacity)
 {
     validateCapacity(capacity);
     const int64_t pxCount = pixels(geometry.height, geometry.width);
-    const int64_t poolElems = stackSize(pxCount, capacity);
+    const uint64_t oneFrameBytes = frameBytes(geometry, dataType);
+    require(oneFrameBytes <= std::numeric_limits<size_t>::max() / static_cast<size_t>(capacity),
+            IR_BAD_ARGUMENT, "FrameQueue storage size overflows");
+    const size_t poolBytes = static_cast<size_t>(oneFrameBytes) * static_cast<size_t>(capacity);
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
-        queueGeometry_ = geometry;
         queuePixelCount_ = pxCount;
+        queueFrameBytes_ = oneFrameBytes;
         capacity_ = capacity;
-        pool_.assign(static_cast<size_t>(poolElems), 0);
+        pool_.assign(poolBytes, 0);
         stamps_.assign(static_cast<size_t>(capacity), IRFrameStamp{});
         head_ = 0;
         count_ = 0;
         droppedSinceLastPush_ = 0;
         terminalStatus_ = IR_OK;
-        terminalMessage_.clear();
+        terminalMessage_[0] = '\0';
         stopped_ = false;
     }
     {
         std::lock_guard<std::mutex> lock(previewMutex_);
         previewGeometry_ = geometry;
+        previewDataType_ = dataType;
         previewPixelCount_ = pxCount;
+        previewFrameBytes_ = oneFrameBytes;
         hasLatest_ = false;
-        latestPixels_.assign(static_cast<size_t>(pxCount), 0);
+        latestPixels_.assign(static_cast<size_t>(oneFrameBytes), 0);
         latestStamp_ = {};
         configuredCapacity_ = capacity;
         queueDepth_.store(0, std::memory_order_relaxed);
@@ -128,7 +156,7 @@ void FrameQueue::resumeSession()
         count_ = 0;
         droppedSinceLastPush_ = 0;
         terminalStatus_ = IR_OK;
-        terminalMessage_.clear();
+        terminalMessage_[0] = '\0';
         stopped_ = false;
     }
     {
@@ -142,8 +170,8 @@ void FrameQueue::resetClosed()
 {
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
-        queueGeometry_ = {};
         queuePixelCount_ = 0;
+        queueFrameBytes_ = 0;
         pool_.clear();
         pool_.shrink_to_fit();
         stamps_.clear();
@@ -151,13 +179,15 @@ void FrameQueue::resetClosed()
         count_ = 0;
         droppedSinceLastPush_ = 0;
         terminalStatus_ = IR_OK;
-        terminalMessage_.clear();
+        terminalMessage_[0] = '\0';
         stopped_ = true;
     }
     {
         std::lock_guard<std::mutex> lock(previewMutex_);
         previewGeometry_ = {};
+        previewDataType_ = IR_TYPE_U16;
         previewPixelCount_ = 0;
+        previewFrameBytes_ = 0;
         hasLatest_ = false;
         latestPixels_.clear();
         latestPixels_.shrink_to_fit();
@@ -176,13 +206,13 @@ void FrameQueue::setRunning(bool running)
     running_ = running ? 1 : 0;
 }
 
-void FrameQueue::recordPreviewLocked(const uint16_t *pixelData, const IRFrameStamp &stamp,
+void FrameQueue::recordPreviewLocked(const void *pixelData, const IRFrameStamp &stamp,
                                      int64_t pxCount)
 {
-    if (!pixelData || pxCount <= 0 || static_cast<int64_t>(latestPixels_.size()) < pxCount)
+    if (!pixelData || pxCount <= 0 || latestPixels_.size() < previewFrameBytes_)
         return;
 
-    std::copy_n(pixelData, static_cast<size_t>(pxCount), latestPixels_.data());
+    std::memcpy(latestPixels_.data(), pixelData, static_cast<size_t>(previewFrameBytes_));
     latestStamp_ = stamp;
     hasLatest_ = true;
     previewFrames_.fetch_add(1, std::memory_order_relaxed);
@@ -198,7 +228,7 @@ void FrameQueue::recordPreviewLocked(const uint16_t *pixelData, const IRFrameSta
     }
 }
 
-void FrameQueue::push(const uint16_t *pixelData, const IRFrameStamp &stamp)
+void FrameQueue::push(const void *pixelData, const IRFrameStamp &stamp)
 {
     if (!pixelData)
         return;
@@ -209,13 +239,13 @@ void FrameQueue::push(const uint16_t *pixelData, const IRFrameStamp &stamp)
     int32_t newDepth = 0;
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
-        if (stopped_ || queuePixelCount_ <= 0 || capacity_ <= 0)
+        if (stopped_ || queuePixelCount_ <= 0 || queueFrameBytes_ == 0 || capacity_ <= 0)
             return;
 
         if (count_ < capacity_) {
             const int32_t tail = (head_ + count_) % capacity_;
-            std::copy_n(pixelData, static_cast<size_t>(queuePixelCount_),
-                        pool_.data() + static_cast<size_t>(tail) * static_cast<size_t>(queuePixelCount_));
+            std::memcpy(pool_.data() + static_cast<size_t>(tail) * static_cast<size_t>(queueFrameBytes_),
+                        pixelData, static_cast<size_t>(queueFrameBytes_));
             IRFrameStamp queuedStamp = stamp;
             if (droppedSinceLastPush_ > 0) {
                 const uint64_t totalLost = uint64_t{queuedStamp.lost_frames} + droppedSinceLastPush_;
@@ -245,7 +275,7 @@ void FrameQueue::push(const uint16_t *pixelData, const IRFrameStamp &stamp)
     queueCv_.notify_one();
 }
 
-void FrameQueue::publishPulledFrame(const uint16_t *pixelData, const IRFrameStamp &stamp, bool delivered)
+void FrameQueue::publishPulledFrame(const void *pixelData, const IRFrameStamp &stamp, bool delivered)
 {
     framesReceived_.fetch_add(1, std::memory_order_relaxed);
     framesDropped_.fetch_add(stamp.lost_frames, std::memory_order_relaxed);
@@ -261,7 +291,7 @@ void FrameQueue::recordDelivered()
     framesDelivered_.fetch_add(1, std::memory_order_relaxed);
 }
 
-FrameQueue::PopStatus FrameQueue::pop(uint16_t *outPixels, IRFrameStamp &outStamp, int32_t timeoutMs,
+FrameQueue::PopStatus FrameQueue::pop(void *outPixels, IRFrameStamp &outStamp, int32_t timeoutMs,
                                       const std::function<bool()> &stopRequested,
                                       int32_t &terminalCode, std::string &terminalMessage)
 {
@@ -277,8 +307,9 @@ FrameQueue::PopStatus FrameQueue::pop(uint16_t *outPixels, IRFrameStamp &outStam
                 return PopStatus::cancelled;
 
             if (count_ > 0) {
-                std::copy_n(pool_.data() + static_cast<size_t>(head_) * static_cast<size_t>(queuePixelCount_),
-                            static_cast<size_t>(queuePixelCount_), outPixels);
+                std::memcpy(outPixels,
+                            pool_.data() + static_cast<size_t>(head_) * static_cast<size_t>(queueFrameBytes_),
+                            static_cast<size_t>(queueFrameBytes_));
                 outStamp = stamps_[static_cast<size_t>(head_)];
                 head_ = (head_ + 1) % capacity_;
                 --count_;
@@ -289,7 +320,7 @@ FrameQueue::PopStatus FrameQueue::pop(uint16_t *outPixels, IRFrameStamp &outStam
                 return PopStatus::gap;
             } else if (terminalStatus_ != IR_OK) {
                 terminalCode = terminalStatus_;
-                terminalMessage = terminalMessage_;
+                terminalMessage = terminalMessage_.data();
                 return PopStatus::terminal_error;
             } else if (stopped_) {
                 return PopStatus::stopped;
@@ -319,18 +350,18 @@ void FrameQueue::clearMeasurementQueue()
         count_ = 0;
         droppedSinceLastPush_ = 0;
         terminalStatus_ = IR_OK;
-        terminalMessage_.clear();
+        terminalMessage_[0] = '\0';
     }
     queueDepth_.store(0, std::memory_order_relaxed);
 }
 
-void FrameQueue::setTerminalError(int32_t code, std::string message)
+void FrameQueue::setTerminalError(int32_t code, const char *message)
 {
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         if (terminalStatus_ == IR_OK) {
             terminalStatus_ = code;
-            terminalMessage_ = std::move(message);
+            copyText(terminalMessage_.data(), static_cast<int32_t>(terminalMessage_.size()), message);
         }
         stopped_ = true;
     }
@@ -354,23 +385,41 @@ void FrameQueue::wakeWaiters()
     queueCv_.notify_all();
 }
 
-void FrameQueue::tryReadLatest(uint16_t *outPixels, int64_t pixelCapacity, IRGeometry *geometry,
-                               IRFrameStamp *stamp, int32_t &hasFrame)
+void FrameQueue::tryReadLatest(IRFrameBatchView &batch)
 {
-    hasFrame = 0;
+    const int32_t requestedType = batch.pixels.data_type;
+    const int32_t requestedWidth = batch.pixels.width;
+    const int32_t requestedHeight = batch.pixels.height;
+    const int32_t requestedFrames = batch.pixels.frames;
+    batch.pixels.frames = 0;
     std::unique_lock<std::mutex> lock(previewMutex_, std::try_to_lock);
     if (!lock.owns_lock())
         return;
-    if (geometry)
-        *geometry = previewGeometry_;
+    batch.pixels.data_type = previewDataType_;
+    batch.pixels.width = previewGeometry_.width;
+    batch.pixels.height = previewGeometry_.height;
+    batch.valid_bits = previewGeometry_.valid_bits;
     if (!hasLatest_)
         return;
 
-    needed(outPixels, pixelCapacity, previewPixelCount_);
-    std::copy_n(latestPixels_.data(), static_cast<size_t>(previewPixelCount_), outPixels);
-    if (stamp)
-        *stamp = latestStamp_;
-    hasFrame = 1;
+    require(requestedType == previewDataType_, IR_BAD_ARGUMENT, "Preview data type differs from source");
+    require(requestedWidth == previewGeometry_.width && requestedHeight == previewGeometry_.height,
+            IR_BAD_ARGUMENT, "Preview geometry differs from source");
+    require(requestedFrames >= 1, IR_BAD_ARGUMENT, "Preview batch must have capacity for one frame");
+    needed(batch.pixels.data, 1, 1);
+    require(batch.pixels.byte_size >= previewFrameBytes_, IR_BUFFER_TOO_SMALL,
+            "Preview pixel buffer is too small");
+    const uint64_t elementSize = bytesPerPixel(previewDataType_);
+    require(reinterpret_cast<std::uintptr_t>(batch.pixels.data) % elementSize == 0,
+            IR_BAD_ARGUMENT, "Preview buffer is not aligned for its data type");
+    if (batch.stamps) {
+        needed(batch.stamps, batch.stamp_capacity, 1);
+        batch.stamps[0] = latestStamp_;
+    } else {
+        require(batch.stamp_capacity == 0, IR_NULL_POINTER, "Missing preview stamp buffer");
+    }
+    std::memcpy(batch.pixels.data, latestPixels_.data(), static_cast<size_t>(previewFrameBytes_));
+    batch.pixels.frames = 1;
 }
 
 IRCaptureStats FrameQueue::stats()

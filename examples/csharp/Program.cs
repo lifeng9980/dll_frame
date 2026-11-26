@@ -23,6 +23,33 @@ internal static class IRStation
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    internal struct FrameSourceInfo
+    {
+        public Geometry Geometry;
+        public int DataType;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct MutableArrayView
+    {
+        public IntPtr Data;
+        public ulong ByteSize;
+        public int DataType;
+        public int Width;
+        public int Height;
+        public int Frames;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct FrameBatchView
+    {
+        public MutableArrayView Pixels;
+        public int ValidBits;
+        public IntPtr Stamps;
+        public int StampCapacity;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     internal struct RecipeResult
     {
         public int CompletedFrames;
@@ -137,15 +164,14 @@ internal static class IRStation
 
     [DllImport("IR_station", EntryPoint = "IR_OpenFrames", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int OpenFrames(int backend, byte[] source, int validBits,
-        out Geometry geometry, byte[] error, int errorBytes);
+        out FrameSourceInfo sourceInfo, byte[] error, int errorBytes);
 
     [DllImport("IR_station", EntryPoint = "IR_StartFrames", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int StartFrames(byte[] error, int errorBytes);
 
     [DllImport("IR_station", EntryPoint = "IR_ReadFrames", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int ReadFrames(int frames, int timeoutMs,
-        ushort[] pixels, long pixelCapacity, [Out] FrameStamp[] stamps, int stampCapacity,
-        out int completed, byte[] error, int errorBytes);
+    internal static extern int ReadFrames(int timeoutMs, ref FrameBatchView batch,
+        byte[] error, int errorBytes);
 
     [DllImport("IR_station", EntryPoint = "IR_StopFrames", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int StopFrames(byte[] error, int errorBytes);
@@ -158,9 +184,8 @@ internal static class IRStation
     internal static extern int SetFrameQueueCapacity(int capacity, byte[] error, int errorBytes);
 
     [DllImport("IR_station", EntryPoint = "IR_TryReadLatestFrame", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int TryReadLatestFrame(
-        ushort[]? pixels, long pixelCapacity, out Geometry geometry, out FrameStamp stamp,
-        out int hasFrame, byte[] error, int errorBytes);
+    internal static extern int TryReadLatestFrame(ref FrameBatchView batch,
+        byte[] error, int errorBytes);
 
     [DllImport("IR_station", EntryPoint = "IR_GetCaptureStats", CallingConvention = CallingConvention.Cdecl)]
     internal static extern int GetCaptureStats(out CaptureStats stats, byte[] error, int errorBytes);
@@ -287,8 +312,8 @@ internal static class IRStation
         {
             var packaged = Path.Combine(dir.FullName, platDir, subDir);
             if (Directory.Exists(packaged)) return packaged;
-            var buildDebug = Path.Combine(dir.FullName, "实验", "build-debug", subDir);
-            if (Directory.Exists(buildDebug)) return buildDebug;
+            var buildTest = Path.Combine(dir.FullName, "实验", "test", subDir);
+            if (Directory.Exists(buildTest)) return buildTest;
         }
         throw new InvalidOperationException("Set IR_SDK_LIB_DIR to the platform library directory.");
     }
@@ -337,10 +362,35 @@ internal static class Program
             var v1Map = new double[4];
             var vnMap = new double[4];
             var statSummary = new double[2];
-            var status = IRAnalysis.FrameStatisticsU16(t1Frames, 8, 2, 2, 2, 0,
+            var status = IRAnalysis.FrameStatistics(t1Frames, 2, 2, 2, 0,
                 v1Map, vnMap, 4, statSummary, 2, err, err.Length);
             if (status != 0)
-                throw new InvalidOperationException($"IR_FrameStatisticsU16 status={status}: {ErrorText(err)}");
+                throw new InvalidOperationException($"IR_FrameStatistics status={status}: {ErrorText(err)}");
+
+            var wideFrames = new uint[] { 70000, 70002 };
+            var widePin = GCHandle.Alloc(wideFrames, GCHandleType.Pinned);
+            try
+            {
+                var wideView = new IRAnalysis.ArrayView
+                {
+                    Data = widePin.AddrOfPinnedObject(),
+                    ByteSize = checked((ulong)wideFrames.LongLength * sizeof(uint)),
+                    DataType = IRAnalysis.DataTypeU32,
+                    Width = 1,
+                    Height = 1,
+                    Frames = 2,
+                };
+                var wideMean = new double[1];
+                var wideStd = new double[1];
+                status = IRAnalysis.FrameStatistics(wideView, 0, wideMean, wideStd, 1,
+                    statSummary, 2, err, err.Length);
+                if (status != 0 || wideMean[0] != 70001.0 || wideStd[0] != 1.0)
+                    throw new InvalidOperationException($"IR_FrameStatistics U32 status={status}: {ErrorText(err)}");
+            }
+            finally
+            {
+                widePin.Free();
+            }
 
             var v2Map = new[] { 30000.0, 30000.0, 30000.0, 30000.0 };
             var vmMap = new[] { 30100.0, 30100.0, 30100.0, 30100.0 };
@@ -418,10 +468,28 @@ internal static class Program
                 1000, 1000, 1000, 1000
             };
             var flickMask = new byte[4];
-            status = IRAnalysis.FlickerDetectU16(flickFrames, 16, 4, 1, 4, null, null, null,
-                1.5, 2, out var flickSum, null, flickMask, 4, null, null, 0, err, err.Length);
+            var flickPin = GCHandle.Alloc(flickFrames, GCHandleType.Pinned);
+            IRAnalysis.FlickerSummary flickSum = default;
+            try
+            {
+                var flickView = new IRAnalysis.ArrayView
+                {
+                    Data = flickPin.AddrOfPinnedObject(),
+                    ByteSize = checked((ulong)flickFrames.LongLength * sizeof(ushort)),
+                    DataType = IRAnalysis.DataTypeU16,
+                    Width = 4,
+                    Height = 1,
+                    Frames = 4,
+                };
+                status = IRAnalysis.FlickerDetect(ref flickView, null, null, null,
+                    1.5, 2, out flickSum, null, flickMask, 4, null, null, 0, err, err.Length);
+            }
+            finally
+            {
+                flickPin.Free();
+            }
             if (status != 0 || flickSum.FlickerCount != 1 || flickMask[3] != 1)
-                throw new InvalidOperationException($"IR_FlickerDetectU16 status={status}: {ErrorText(err)}");
+                throw new InvalidOperationException($"IR_FlickerDetect status={status}: {ErrorText(err)}");
 
             var fft2dIn = new double[16];
             for (var r = 0; r < 4; ++r)
@@ -477,7 +545,10 @@ internal static class Program
                 Marshal.SizeOf<IRStation.DetectorCurrentReading>() != 24 ||
                 Marshal.SizeOf<IRStation.CoolerReading>() != 16 ||
                 Marshal.SizeOf<IRStation.FrameStamp>() != 40 ||
-                Marshal.SizeOf<IRStation.CaptureStats>() != 64)
+                Marshal.SizeOf<IRStation.CaptureStats>() != 64 ||
+                Marshal.SizeOf<IRStation.FrameSourceInfo>() != 16 ||
+                Marshal.SizeOf<IRStation.MutableArrayView>() != 32 ||
+                Marshal.SizeOf<IRStation.FrameBatchView>() != 56)
                 throw new InvalidOperationException("The C# structures do not match the IR SDK x64 C ABI.");
             IRStation.ConfigureNativeLibraries(IRStation.ResolveLibraryDirectory());
             if (string.IsNullOrEmpty(IRStation.StationVersion()))
@@ -509,8 +580,8 @@ internal static class Program
 
             var source = Utf8Z(Path.GetFullPath(args[0]));
             var error = new byte[1024];
-            var geometry = new IRStation.Geometry();
-            var status = IRStation.OpenFrames(2, source, 0, out geometry, error, error.Length);
+            var sourceInfo = new IRStation.FrameSourceInfo();
+            var status = IRStation.OpenFrames(2, source, 0, out sourceInfo, error, error.Length);
             if (status != 0)
             {
                 Console.Error.WriteLine($"IR_OpenFrames status={status}: {ErrorText(error)}");
@@ -519,6 +590,9 @@ internal static class Program
 
             try
             {
+                var geometry = sourceInfo.Geometry;
+                if (sourceInfo.DataType != IRAnalysis.DataTypeU16)
+                    throw new InvalidOperationException("This capture sample currently demonstrates U16 raw-frame analysis.");
                 status = IRStation.StartFrames(error, error.Length);
                 if (status != 0)
                 {
@@ -527,28 +601,63 @@ internal static class Program
                 }
                 var pixels = new ushort[geometry.Width * geometry.Height * 2];
                 var stamps = new IRStation.FrameStamp[2];
-                status = IRStation.ReadFrames(2, 0, pixels, pixels.Length, stamps, stamps.Length, out var completed, error, error.Length);
-                if (status != 0)
+                var pixelPin = GCHandle.Alloc(pixels, GCHandleType.Pinned);
+                var stampPin = GCHandle.Alloc(stamps, GCHandleType.Pinned);
+                try
                 {
-                    Console.Error.WriteLine($"IR_ReadFrames status={status}: {ErrorText(error)}");
-                    return status;
+                    var batch = new IRStation.FrameBatchView
+                    {
+                        Pixels = new IRStation.MutableArrayView
+                        {
+                            Data = pixelPin.AddrOfPinnedObject(),
+                            ByteSize = checked((ulong)pixels.Length * sizeof(ushort)),
+                            DataType = sourceInfo.DataType,
+                            Width = geometry.Width,
+                            Height = geometry.Height,
+                            Frames = 2,
+                        },
+                        ValidBits = geometry.ValidBits,
+                        Stamps = stampPin.AddrOfPinnedObject(),
+                        StampCapacity = stamps.Length,
+                    };
+                    status = IRStation.ReadFrames(0, ref batch, error, error.Length);
+                    if (status != 0)
+                    {
+                        Console.Error.WriteLine($"IR_ReadFrames status={status}: {ErrorText(error)}");
+                        return status;
+                    }
+                    var completed = batch.Pixels.Frames;
+                    var pixelCount = (long)geometry.Height * geometry.Width;
+                    var meanMap = new double[pixelCount];
+                    var stdMap = new double[pixelCount];
+                    var summary = new double[2];
+                    var input = new IRAnalysis.ArrayView
+                    {
+                        Data = pixelPin.AddrOfPinnedObject(),
+                        ByteSize = checked((ulong)pixels.Length * sizeof(ushort)),
+                        DataType = sourceInfo.DataType,
+                        Width = geometry.Width,
+                        Height = geometry.Height,
+                        Frames = completed,
+                    };
+                    status = IRAnalysis.FrameStatistics(input, 1, meanMap, stdMap, pixelCount,
+                        summary, summary.Length, error, error.Length);
+                    Console.WriteLine($"width={geometry.Width} height={geometry.Height} valid_bits={geometry.ValidBits} data_type={sourceInfo.DataType}");
+                    Console.WriteLine($"status={status} completed={completed}");
+                    if (status == 0)
+                    {
+                        Console.WriteLine($"mean_dn={summary[0]:R}");
+                        Console.WriteLine($"temporal_noise_dn={summary[1]:R}");
+                        var statsStatus = IRStation.GetCaptureStats(out var stats, error, error.Length);
+                        if (statsStatus != 0 || stats.FramesDelivered < 2 || stats.QueueCapacity <= 0)
+                            throw new InvalidOperationException($"IR_GetCaptureStats failed status={statsStatus}: {ErrorText(error)}");
+                        Console.WriteLine($"frames_delivered={stats.FramesDelivered} queue_capacity={stats.QueueCapacity}");
+                    }
                 }
-                var pixelCount = (long)geometry.Height * geometry.Width;
-                var meanMap = new double[pixelCount];
-                var stdMap = new double[pixelCount];
-                var summary = new double[2];
-                status = IRAnalysis.FrameStatisticsU16(pixels, pixels.LongLength, 2, geometry.Height, geometry.Width, 1,
-                    meanMap, stdMap, pixelCount, summary, summary.Length, error, error.Length);
-                Console.WriteLine($"width={geometry.Width} height={geometry.Height} valid_bits={geometry.ValidBits}");
-                Console.WriteLine($"status={status} completed={completed}");
-                if (status == 0)
+                finally
                 {
-                    Console.WriteLine($"mean_dn={summary[0]:R}");
-                    Console.WriteLine($"temporal_noise_dn={summary[1]:R}");
-                    var statsStatus = IRStation.GetCaptureStats(out var stats, error, error.Length);
-                    if (statsStatus != 0 || stats.FramesDelivered < 2 || stats.QueueCapacity <= 0)
-                        throw new InvalidOperationException($"IR_GetCaptureStats failed status={statsStatus}: {ErrorText(error)}");
-                    Console.WriteLine($"frames_delivered={stats.FramesDelivered} queue_capacity={stats.QueueCapacity}");
+                    stampPin.Free();
+                    pixelPin.Free();
                 }
                 _ = IRStation.StopFrames(error, error.Length);
             }

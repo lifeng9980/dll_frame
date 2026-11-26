@@ -19,7 +19,7 @@ static_assert(sizeof(IRNoise3DCalibParams) == 40, "Unexpected IRNoise3DCalibPara
 static_assert(sizeof(IRNoise3DComputeParams) == 32, "Unexpected IRNoise3DComputeParams size");
 #if defined(_WIN64) || defined(__x86_64__) || defined(__LP64__)
 static_assert(sizeof(IRNoise3DCalibOutputs) == 64, "Unexpected IRNoise3DCalibOutputs x64 size");
-static_assert(sizeof(IRNoise3DComputeOutputs) == 120, "Unexpected IRNoise3DComputeOutputs x64 size");
+static_assert(sizeof(IRNoise3DComputeOutputs) == 104, "Unexpected IRNoise3DComputeOutputs x64 size");
 #endif
 
 using Clock = std::chrono::steady_clock;
@@ -109,18 +109,6 @@ double sampleStdSum(double sum, double sumSquares, size_t count)
     return std::sqrt(numerator / static_cast<double>(count - 1));
 }
 
-uint16_t clampU16(double value)
-{
-    if (!std::isfinite(value))
-        return 0;
-    const double rounded = std::round(value);
-    if (rounded <= 0.0)
-        return 0;
-    if (rounded >= 65535.0)
-        return 65535;
-    return static_cast<uint16_t>(rounded);
-}
-
 void addHistogramValue(double value, int32_t histInterval, double minValue, double maxValue,
                        double width, double *hist)
 {
@@ -164,17 +152,15 @@ void buildHistogram(const std::vector<double> &values, int32_t histInterval,
     }
 }
 
-double frameValue(const uint16_t *orgFrames, size_t base, size_t pixelIndex,
+template <typename T>
+double frameValue(const T *orgFrames, size_t base, size_t pixelIndex,
                   int32_t computeMode, const double *kMap, const double *bMap,
-                  double bAvg, uint16_t *outNucFrames)
+                  double bAvg)
 {
     const double org = static_cast<double>(orgFrames[base + pixelIndex]);
     if (computeMode == IR_NOISE3D_MODE_ORG)
         return org;
-    const double nuc = kMap[pixelIndex] * (org - bMap[pixelIndex]) + bAvg;
-    if (outNucFrames != nullptr)
-        outNucFrames[base + pixelIndex] = clampU16(nuc);
-    return nuc;
+    return kMap[pixelIndex] * (org - bMap[pixelIndex]) + bAvg;
 }
 
 void collectValidPixels(const uint8_t *totalBlindMask, int32_t rows, int32_t cols,
@@ -229,7 +215,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_Noise3DBuildCalibDn(
     const IRNoise3DCalibOutputs *outputs,
     char *err,
     int32_t err_bytes)
-{
+noexcept{
     return guarded(err, err_bytes, [&] {
         require(params != nullptr && outputs != nullptr, IR_NULL_POINTER,
                 "Noise3D calibration params and outputs must not be null");
@@ -366,11 +352,7 @@ extern "C" IR_ANALYSIS_API int32_t IR_Noise3DBuildCalibDn(
 }
 
 extern "C" IR_ANALYSIS_API int32_t IR_Noise3DComputeFramesDn(
-    const uint16_t *org_frames,
-    int64_t frame_elements,
-    int32_t frame_count,
-    int32_t rows,
-    int32_t cols,
+    const IRArrayView *org_frames,
     const uint8_t *total_blind_mask,
     int64_t mask_capacity,
     const double *k_map,
@@ -379,13 +361,24 @@ extern "C" IR_ANALYSIS_API int32_t IR_Noise3DComputeFramesDn(
     const IRNoise3DComputeParams *params,
     const IRNoise3DComputeOutputs *outputs,
     char *err,
-    int32_t err_bytes)
+    int32_t err_bytes) noexcept
 {
     return guarded(err, err_bytes, [&] {
-        require(params != nullptr && outputs != nullptr, IR_NULL_POINTER,
+        require(org_frames != nullptr && params != nullptr && outputs != nullptr, IR_NULL_POINTER,
                 "Noise3D compute params and outputs must not be null");
+        needed(org_frames->data, 1, 1);
+        const int32_t frame_count = org_frames->frames;
+        const int32_t rows = org_frames->height;
+        const int32_t cols = org_frames->width;
         require(frame_count >= 2 && rows > 0 && cols > 0, IR_BAD_ARGUMENT,
                 "frame_count must be >= 2 and rows/cols must be positive");
+        size_t elementBytes = 0;
+        switch (org_frames->data_type)
+        {
+        case IR_TYPE_U16: elementBytes = sizeof(uint16_t); break;
+        case IR_TYPE_U32: elementBytes = sizeof(uint32_t); break;
+        default: throw Error(IR_UNSUPPORTED, "Noise3D supports U16 and U32 input");
+        }
         require(params->compute_mode == IR_NOISE3D_MODE_ORG ||
                     params->compute_mode == IR_NOISE3D_MODE_NUC,
                 IR_BAD_ARGUMENT, "Noise3D compute_mode is invalid");
@@ -402,7 +395,11 @@ extern "C" IR_ANALYSIS_API int32_t IR_Noise3DComputeFramesDn(
                                   &frameColCount, &fullSampleCount),
                 IR_BAD_ARGUMENT, "Noise3D image dimensions exceed supported limits");
 
-        needed(org_frames, frame_elements, static_cast<int64_t>(fullSampleCount));
+        require(fullSampleCount <= UINT64_MAX / elementBytes &&
+                    org_frames->byte_size >= static_cast<uint64_t>(fullSampleCount) * elementBytes,
+                IR_BUFFER_TOO_SMALL, "Noise3D input array byte_size is too small");
+        require(reinterpret_cast<uintptr_t>(org_frames->data) % elementBytes == 0,
+                IR_BAD_ARGUMENT, "Noise3D input array is not aligned for its data type");
         needed(total_blind_mask, mask_capacity, static_cast<int64_t>(framePixels));
 
         if (params->compute_mode == IR_NOISE3D_MODE_NUC)
@@ -424,262 +421,257 @@ extern "C" IR_ANALYSIS_API int32_t IR_Noise3DComputeFramesDn(
         needed(outputs->map_ti, outputs->map_ti_capacity, static_cast<int64_t>(frameRowCount));
         needed(outputs->map_tj, outputs->map_tj_capacity, static_cast<int64_t>(frameColCount));
 
-        if (outputs->nuc_frames != nullptr && params->compute_mode == IR_NOISE3D_MODE_NUC)
-        {
-            needed(outputs->nuc_frames, outputs->nuc_frames_capacity, static_cast<int64_t>(fullSampleCount));
-        }
         if (outputs->meta != nullptr)
         {
             needed(outputs->meta, outputs->meta_capacity, IR_NOISE3D_META_COUNT);
         }
 
-        const auto totalBegin = Clock::now();
-        auto stageBegin = totalBegin;
+        const auto computeTyped = [&](const auto *typedOrgFrames) {
+            const auto totalBegin = Clock::now();
+            auto stageBegin = totalBegin;
 
-        std::vector<ValidPixelDn> validPixels;
-        std::vector<size_t> rowCounts;
-        std::vector<size_t> colCounts;
-        collectValidPixels(total_blind_mask, rows, cols, &validPixels, &rowCounts, &colCounts);
+            std::vector<ValidPixelDn> validPixels;
+            std::vector<size_t> rowCounts;
+            std::vector<size_t> colCounts;
+            collectValidPixels(total_blind_mask, rows, cols, &validPixels, &rowCounts, &colCounts);
 
-        uint16_t *outNucFrames =
-            (params->compute_mode == IR_NOISE3D_MODE_NUC) ? outputs->nuc_frames : nullptr;
-        if (outNucFrames != nullptr)
-        {
-            const uint16_t blindFill = clampU16(params->b_avg);
-            std::fill(outNucFrames, outNucFrames + fullSampleCount, blindFill);
-        }
+            const double maskSeconds = elapsedSeconds(stageBegin, Clock::now());
+            stageBegin = Clock::now();
 
-        const double maskSeconds = elapsedSeconds(stageBegin, Clock::now());
-        stageBegin = Clock::now();
+            const size_t validPixelCount = validPixels.size();
+            const size_t validSampleCount = validPixelCount * static_cast<size_t>(frame_count);
+            std::vector<double> frameRawSums(static_cast<size_t>(frame_count), 0.0);
+            std::vector<double> pixelRawSums(framePixels, 0.0);
+            double globalSum = 0.0;
 
-        const size_t validPixelCount = validPixels.size();
-        const size_t validSampleCount = validPixelCount * static_cast<size_t>(frame_count);
-        std::vector<double> frameRawSums(static_cast<size_t>(frame_count), 0.0);
-        std::vector<double> pixelRawSums(framePixels, 0.0);
-        double globalSum = 0.0;
-
-        for (int32_t t = 0; t < frame_count; ++t)
-        {
-            const size_t base = static_cast<size_t>(t) * framePixels;
-            double frameSum = 0.0;
-            for (const ValidPixelDn &pixel : validPixels)
+            for (int32_t t = 0; t < frame_count; ++t)
             {
-                const double value = frameValue(org_frames, base, pixel.index, params->compute_mode,
-                                                k_map, b_map, params->b_avg, outNucFrames);
-                frameSum += value;
-                pixelRawSums[pixel.index] += value;
+                const size_t base = static_cast<size_t>(t) * framePixels;
+                double frameSum = 0.0;
+                for (const ValidPixelDn &pixel : validPixels)
+                {
+                    const double value = frameValue(typedOrgFrames, base, pixel.index, params->compute_mode,
+                                                    k_map, b_map, params->b_avg);
+                    frameSum += value;
+                    pixelRawSums[pixel.index] += value;
+                }
+                frameRawSums[static_cast<size_t>(t)] = frameSum;
+                globalSum += frameSum;
             }
-            frameRawSums[static_cast<size_t>(t)] = frameSum;
-            globalSum += frameSum;
-        }
 
-        const double globalMean = globalSum / static_cast<double>(validSampleCount);
-        const double firstPassSeconds = elapsedSeconds(stageBegin, Clock::now());
-        stageBegin = Clock::now();
+            const double globalMean = globalSum / static_cast<double>(validSampleCount);
+            const double firstPassSeconds = elapsedSeconds(stageBegin, Clock::now());
+            stageBegin = Clock::now();
 
-        std::vector<double> frameMean(static_cast<size_t>(frame_count), 0.0);
-        std::vector<double> pixelMean(framePixels, 0.0);
-        std::vector<double> rowMean(static_cast<size_t>(rows), 0.0);
-        std::vector<double> colMean(static_cast<size_t>(cols), 0.0);
-        std::vector<double> mapTI(frameRowCount, 0.0);
-        std::vector<double> mapTJ(frameColCount, 0.0);
+            std::vector<double> frameMean(static_cast<size_t>(frame_count), 0.0);
+            std::vector<double> pixelMean(framePixels, 0.0);
+            std::vector<double> rowMean(static_cast<size_t>(rows), 0.0);
+            std::vector<double> colMean(static_cast<size_t>(cols), 0.0);
+            std::vector<double> mapTI(frameRowCount, 0.0);
+            std::vector<double> mapTJ(frameColCount, 0.0);
 
-        for (int32_t t = 0; t < frame_count; ++t)
-        {
-            frameMean[static_cast<size_t>(t)] =
-                frameRawSums[static_cast<size_t>(t)] / static_cast<double>(validPixelCount) - globalMean;
-        }
-        for (const ValidPixelDn &pixel : validPixels)
-        {
-            const double mean = pixelRawSums[pixel.index] / static_cast<double>(frame_count) - globalMean;
-            pixelMean[pixel.index] = mean;
-            rowMean[static_cast<size_t>(pixel.row)] += mean;
-            colMean[static_cast<size_t>(pixel.col)] += mean;
-        }
-        for (int32_t y = 0; y < rows; ++y)
-            rowMean[static_cast<size_t>(y)] /= static_cast<double>(rowCounts[static_cast<size_t>(y)]);
-        for (int32_t x = 0; x < cols; ++x)
-            colMean[static_cast<size_t>(x)] /= static_cast<double>(colCounts[static_cast<size_t>(x)]);
-
-        for (size_t p = 0; p < framePixels; ++p)
-            outputs->map_ij[p] = params->invalid_fill;
-        for (const ValidPixelDn &pixel : validPixels)
-        {
-            outputs->map_ij[pixel.index] = pixelMean[pixel.index] -
-                                           rowMean[static_cast<size_t>(pixel.row)] -
-                                           colMean[static_cast<size_t>(pixel.col)];
-        }
-
-        const double meanBuildSeconds = elapsedSeconds(stageBegin, Clock::now());
-        stageBegin = Clock::now();
-
-        for (int32_t t = 0; t < frame_count; ++t)
-        {
-            const size_t base = static_cast<size_t>(t) * framePixels;
-            const size_t tiBase = static_cast<size_t>(t) * static_cast<size_t>(rows);
-            const size_t tjBase = static_cast<size_t>(t) * static_cast<size_t>(cols);
+            for (int32_t t = 0; t < frame_count; ++t)
+            {
+                frameMean[static_cast<size_t>(t)] =
+                    frameRawSums[static_cast<size_t>(t)] / static_cast<double>(validPixelCount) - globalMean;
+            }
             for (const ValidPixelDn &pixel : validPixels)
             {
-                const double value = frameValue(org_frames, base, pixel.index, params->compute_mode,
-                                                k_map, b_map, params->b_avg, nullptr) - globalMean;
-                mapTI[tiBase + static_cast<size_t>(pixel.row)] += value;
-                mapTJ[tjBase + static_cast<size_t>(pixel.col)] += value;
+                const double mean = pixelRawSums[pixel.index] / static_cast<double>(frame_count) - globalMean;
+                pixelMean[pixel.index] = mean;
+                rowMean[static_cast<size_t>(pixel.row)] += mean;
+                colMean[static_cast<size_t>(pixel.col)] += mean;
             }
             for (int32_t y = 0; y < rows; ++y)
-            {
-                const size_t idx = tiBase + static_cast<size_t>(y);
-                mapTI[idx] = mapTI[idx] / static_cast<double>(rowCounts[static_cast<size_t>(y)]) -
-                             frameMean[static_cast<size_t>(t)] - rowMean[static_cast<size_t>(y)];
-                outputs->map_ti[idx] = mapTI[idx];
-            }
+                rowMean[static_cast<size_t>(y)] /= static_cast<double>(rowCounts[static_cast<size_t>(y)]);
             for (int32_t x = 0; x < cols; ++x)
-            {
-                const size_t idx = tjBase + static_cast<size_t>(x);
-                mapTJ[idx] = mapTJ[idx] / static_cast<double>(colCounts[static_cast<size_t>(x)]) -
-                             frameMean[static_cast<size_t>(t)] - colMean[static_cast<size_t>(x)];
-                outputs->map_tj[idx] = mapTJ[idx];
-            }
-        }
+                colMean[static_cast<size_t>(x)] /= static_cast<double>(colCounts[static_cast<size_t>(x)]);
 
-        const double tiTjSeconds = elapsedSeconds(stageBegin, Clock::now());
-        stageBegin = Clock::now();
-
-        std::fill(outputs->scalars, outputs->scalars + IR_NOISE3D_SCALAR_COUNT, 0.0);
-        std::fill(outputs->hist, outputs->hist + histCount, 0.0);
-        std::fill(outputs->hist_meta, outputs->hist_meta + IR_NOISE3D_HIST_GROUP_COUNT * 3, 0.0);
-
-        outputs->scalars[IR_NOISE3D_SCALAR_DELTA_T] = sampleStdVector(frameMean);
-        outputs->scalars[IR_NOISE3D_SCALAR_DELTA_I] = sampleStdVector(rowMean);
-        outputs->scalars[IR_NOISE3D_SCALAR_DELTA_J] = sampleStdVector(colMean);
-
-        double ijSum = 0.0;
-        double ijSumSquares = 0.0;
-        for (const ValidPixelDn &pixel : validPixels)
-        {
-            const double value = outputs->map_ij[pixel.index];
-            ijSum += value;
-            ijSumSquares += value * value;
-        }
-        outputs->scalars[IR_NOISE3D_SCALAR_DELTA_IJ] =
-            sampleStdSum(ijSum, ijSumSquares, validPixelCount);
-
-        const double tiSum = std::accumulate(mapTI.begin(), mapTI.end(), 0.0);
-        double tiSumSquares = 0.0;
-        for (double value : mapTI)
-            tiSumSquares += value * value;
-        outputs->scalars[IR_NOISE3D_SCALAR_DELTA_TI] =
-            sampleStdSum(tiSum, tiSumSquares, mapTI.size());
-
-        const double tjSum = std::accumulate(mapTJ.begin(), mapTJ.end(), 0.0);
-        double tjSumSquares = 0.0;
-        for (double value : mapTJ)
-            tjSumSquares += value * value;
-        outputs->scalars[IR_NOISE3D_SCALAR_DELTA_TJ] =
-            sampleStdSum(tjSum, tjSumSquares, mapTJ.size());
-
-        double tijSum = 0.0;
-        double tijSumSquares = 0.0;
-        double tijMin = std::numeric_limits<double>::infinity();
-        double tijMax = -std::numeric_limits<double>::infinity();
-        for (int32_t t = 0; t < frame_count; ++t)
-        {
-            const size_t base = static_cast<size_t>(t) * framePixels;
-            const size_t tiBase = static_cast<size_t>(t) * static_cast<size_t>(rows);
-            const size_t tjBase = static_cast<size_t>(t) * static_cast<size_t>(cols);
+            for (size_t p = 0; p < framePixels; ++p)
+                outputs->map_ij[p] = params->invalid_fill;
             for (const ValidPixelDn &pixel : validPixels)
             {
-                const double centered = frameValue(org_frames, base, pixel.index, params->compute_mode,
-                                                   k_map, b_map, params->b_avg, nullptr) - globalMean;
-                const double value =
-                    centered - frameMean[static_cast<size_t>(t)] -
-                    rowMean[static_cast<size_t>(pixel.row)] -
-                    colMean[static_cast<size_t>(pixel.col)] -
-                    outputs->map_ij[pixel.index] -
-                    mapTI[tiBase + static_cast<size_t>(pixel.row)] -
-                    mapTJ[tjBase + static_cast<size_t>(pixel.col)];
-                tijSum += value;
-                tijSumSquares += value * value;
-                tijMin = std::min(tijMin, value);
-                tijMax = std::max(tijMax, value);
+                outputs->map_ij[pixel.index] = pixelMean[pixel.index] -
+                                               rowMean[static_cast<size_t>(pixel.row)] -
+                                               colMean[static_cast<size_t>(pixel.col)];
             }
-        }
-        outputs->scalars[IR_NOISE3D_SCALAR_DELTA_TIJ] =
-            sampleStdSum(tijSum, tijSumSquares, validSampleCount);
 
-        double totalSquares = 0.0;
-        for (int32_t i = IR_NOISE3D_SCALAR_DELTA_T; i <= IR_NOISE3D_SCALAR_DELTA_TIJ; ++i)
-            totalSquares += outputs->scalars[i] * outputs->scalars[i];
-        outputs->scalars[IR_NOISE3D_SCALAR_DELTA_TOTAL] = std::sqrt(totalSquares);
-        outputs->scalars[IR_NOISE3D_SCALAR_DELTA_SYS] = std::sqrt(
-            outputs->scalars[IR_NOISE3D_SCALAR_DELTA_IJ] * outputs->scalars[IR_NOISE3D_SCALAR_DELTA_IJ] +
-            outputs->scalars[IR_NOISE3D_SCALAR_DELTA_TIJ] * outputs->scalars[IR_NOISE3D_SCALAR_DELTA_TIJ]);
-        outputs->scalars[IR_NOISE3D_SCALAR_GLOBAL_MEAN] = globalMean;
-        outputs->scalars[IR_NOISE3D_SCALAR_VALID_PIXEL_COUNT] = static_cast<double>(validPixelCount);
-        outputs->scalars[IR_NOISE3D_SCALAR_VALID_SAMPLE_COUNT] = static_cast<double>(validSampleCount);
-        outputs->scalars[IR_NOISE3D_SCALAR_FRAME_COUNT] = static_cast<double>(frame_count);
-        outputs->scalars[IR_NOISE3D_SCALAR_ROWS] = static_cast<double>(rows);
-        outputs->scalars[IR_NOISE3D_SCALAR_COLS] = static_cast<double>(cols);
+            const double meanBuildSeconds = elapsedSeconds(stageBegin, Clock::now());
+            stageBegin = Clock::now();
 
-        const size_t histBins = static_cast<size_t>(params->hist_interval);
-        buildHistogram(frameMean, params->hist_interval,
-                       outputs->hist + static_cast<size_t>(IR_NOISE3D_HIST_T) * histBins,
-                       outputs->hist_meta + static_cast<size_t>(IR_NOISE3D_HIST_T) * 3);
-        buildHistogram(rowMean, params->hist_interval,
-                       outputs->hist + static_cast<size_t>(IR_NOISE3D_HIST_I) * histBins,
-                       outputs->hist_meta + static_cast<size_t>(IR_NOISE3D_HIST_I) * 3);
-        buildHistogram(colMean, params->hist_interval,
-                       outputs->hist + static_cast<size_t>(IR_NOISE3D_HIST_J) * histBins,
-                       outputs->hist_meta + static_cast<size_t>(IR_NOISE3D_HIST_J) * 3);
+            for (int32_t t = 0; t < frame_count; ++t)
+            {
+                const size_t base = static_cast<size_t>(t) * framePixels;
+                const size_t tiBase = static_cast<size_t>(t) * static_cast<size_t>(rows);
+                const size_t tjBase = static_cast<size_t>(t) * static_cast<size_t>(cols);
+                for (const ValidPixelDn &pixel : validPixels)
+                {
+                    const double value = frameValue(typedOrgFrames, base, pixel.index, params->compute_mode,
+                                                    k_map, b_map, params->b_avg) - globalMean;
+                    mapTI[tiBase + static_cast<size_t>(pixel.row)] += value;
+                    mapTJ[tjBase + static_cast<size_t>(pixel.col)] += value;
+                }
+                for (int32_t y = 0; y < rows; ++y)
+                {
+                    const size_t idx = tiBase + static_cast<size_t>(y);
+                    mapTI[idx] = mapTI[idx] / static_cast<double>(rowCounts[static_cast<size_t>(y)]) -
+                                 frameMean[static_cast<size_t>(t)] - rowMean[static_cast<size_t>(y)];
+                    outputs->map_ti[idx] = mapTI[idx];
+                }
+                for (int32_t x = 0; x < cols; ++x)
+                {
+                    const size_t idx = tjBase + static_cast<size_t>(x);
+                    mapTJ[idx] = mapTJ[idx] / static_cast<double>(colCounts[static_cast<size_t>(x)]) -
+                                 frameMean[static_cast<size_t>(t)] - colMean[static_cast<size_t>(x)];
+                    outputs->map_tj[idx] = mapTJ[idx];
+                }
+            }
 
-        double *tijHist = outputs->hist + static_cast<size_t>(IR_NOISE3D_HIST_TIJ) * histBins;
-        double *tijMeta = outputs->hist_meta + static_cast<size_t>(IR_NOISE3D_HIST_TIJ) * 3;
-        const double tijWidth = (tijMax > tijMin)
-                                    ? ((tijMax - tijMin) / static_cast<double>(params->hist_interval))
-                                    : 1.0;
-        tijMeta[0] = tijMin;
-        tijMeta[1] = tijMax;
-        tijMeta[2] = tijWidth;
-        for (int32_t t = 0; t < frame_count; ++t)
-        {
-            const size_t base = static_cast<size_t>(t) * framePixels;
-            const size_t tiBase = static_cast<size_t>(t) * static_cast<size_t>(rows);
-            const size_t tjBase = static_cast<size_t>(t) * static_cast<size_t>(cols);
+            const double tiTjSeconds = elapsedSeconds(stageBegin, Clock::now());
+            stageBegin = Clock::now();
+
+            std::fill(outputs->scalars, outputs->scalars + IR_NOISE3D_SCALAR_COUNT, 0.0);
+            std::fill(outputs->hist, outputs->hist + histCount, 0.0);
+            std::fill(outputs->hist_meta, outputs->hist_meta + IR_NOISE3D_HIST_GROUP_COUNT * 3, 0.0);
+
+            outputs->scalars[IR_NOISE3D_SCALAR_DELTA_T] = sampleStdVector(frameMean);
+            outputs->scalars[IR_NOISE3D_SCALAR_DELTA_I] = sampleStdVector(rowMean);
+            outputs->scalars[IR_NOISE3D_SCALAR_DELTA_J] = sampleStdVector(colMean);
+
+            double ijSum = 0.0;
+            double ijSumSquares = 0.0;
             for (const ValidPixelDn &pixel : validPixels)
             {
-                const double centered = frameValue(org_frames, base, pixel.index, params->compute_mode,
-                                                   k_map, b_map, params->b_avg, nullptr) - globalMean;
-                const double value =
-                    centered - frameMean[static_cast<size_t>(t)] -
-                    rowMean[static_cast<size_t>(pixel.row)] -
-                    colMean[static_cast<size_t>(pixel.col)] -
-                    outputs->map_ij[pixel.index] -
-                    mapTI[tiBase + static_cast<size_t>(pixel.row)] -
-                    mapTJ[tjBase + static_cast<size_t>(pixel.col)];
-                addHistogramValue(value, params->hist_interval, tijMin, tijMax, tijWidth, tijHist);
+                const double value = outputs->map_ij[pixel.index];
+                ijSum += value;
+                ijSumSquares += value * value;
             }
-        }
+            outputs->scalars[IR_NOISE3D_SCALAR_DELTA_IJ] =
+                sampleStdSum(ijSum, ijSumSquares, validPixelCount);
 
-        require(isFiniteArray(outputs->scalars, IR_NOISE3D_SCALAR_COUNT) &&
-                    isFiniteArray(outputs->hist, static_cast<size_t>(histCount)) &&
-                    isFiniteArray(outputs->hist_meta, static_cast<size_t>(IR_NOISE3D_HIST_GROUP_COUNT) * 3) &&
-                    isFiniteArray(outputs->map_ij, framePixels) &&
-                    isFiniteArray(outputs->map_ti, frameRowCount) &&
-                    isFiniteArray(outputs->map_tj, frameColCount),
-                IR_COMPUTATION_FAILED, "Noise3D produced non-finite scalar, map, or histogram output");
+            const double tiSum = std::accumulate(mapTI.begin(), mapTI.end(), 0.0);
+            double tiSumSquares = 0.0;
+            for (double value : mapTI)
+                tiSumSquares += value * value;
+            outputs->scalars[IR_NOISE3D_SCALAR_DELTA_TI] =
+                sampleStdSum(tiSum, tiSumSquares, mapTI.size());
 
-        const double stdHistSeconds = elapsedSeconds(stageBegin, Clock::now());
-        const double totalSeconds = elapsedSeconds(totalBegin, Clock::now());
-        if (outputs->meta != nullptr)
-        {
-            std::fill(outputs->meta, outputs->meta + IR_NOISE3D_META_COUNT, 0.0);
-            (void)params->thread_count;
-            outputs->meta[IR_NOISE3D_META_EFFECTIVE_THREAD_COUNT] = 1.0;
-            outputs->meta[IR_NOISE3D_META_MASK_BUILD_SECONDS] = maskSeconds;
-            outputs->meta[IR_NOISE3D_META_FIRST_PASS_SECONDS] = firstPassSeconds;
-            outputs->meta[IR_NOISE3D_META_MEAN_BUILD_SECONDS] = meanBuildSeconds;
-            outputs->meta[IR_NOISE3D_META_TI_TJ_SECONDS] = tiTjSeconds;
-            outputs->meta[IR_NOISE3D_META_STD_HIST_SECONDS] = stdHistSeconds;
-            outputs->meta[IR_NOISE3D_META_TOTAL_SECONDS] = totalSeconds;
-        }
+            const double tjSum = std::accumulate(mapTJ.begin(), mapTJ.end(), 0.0);
+            double tjSumSquares = 0.0;
+            for (double value : mapTJ)
+                tjSumSquares += value * value;
+            outputs->scalars[IR_NOISE3D_SCALAR_DELTA_TJ] =
+                sampleStdSum(tjSum, tjSumSquares, mapTJ.size());
+
+            double tijSum = 0.0;
+            double tijSumSquares = 0.0;
+            double tijMin = std::numeric_limits<double>::infinity();
+            double tijMax = -std::numeric_limits<double>::infinity();
+            for (int32_t t = 0; t < frame_count; ++t)
+            {
+                const size_t base = static_cast<size_t>(t) * framePixels;
+                const size_t tiBase = static_cast<size_t>(t) * static_cast<size_t>(rows);
+                const size_t tjBase = static_cast<size_t>(t) * static_cast<size_t>(cols);
+                for (const ValidPixelDn &pixel : validPixels)
+                {
+                    const double centered = frameValue(typedOrgFrames, base, pixel.index, params->compute_mode,
+                                                       k_map, b_map, params->b_avg) - globalMean;
+                    const double value =
+                        centered - frameMean[static_cast<size_t>(t)] -
+                        rowMean[static_cast<size_t>(pixel.row)] -
+                        colMean[static_cast<size_t>(pixel.col)] -
+                        outputs->map_ij[pixel.index] -
+                        mapTI[tiBase + static_cast<size_t>(pixel.row)] -
+                        mapTJ[tjBase + static_cast<size_t>(pixel.col)];
+                    tijSum += value;
+                    tijSumSquares += value * value;
+                    tijMin = std::min(tijMin, value);
+                    tijMax = std::max(tijMax, value);
+                }
+            }
+            outputs->scalars[IR_NOISE3D_SCALAR_DELTA_TIJ] =
+                sampleStdSum(tijSum, tijSumSquares, validSampleCount);
+
+            double totalSquares = 0.0;
+            for (int32_t i = IR_NOISE3D_SCALAR_DELTA_T; i <= IR_NOISE3D_SCALAR_DELTA_TIJ; ++i)
+                totalSquares += outputs->scalars[i] * outputs->scalars[i];
+            outputs->scalars[IR_NOISE3D_SCALAR_DELTA_TOTAL] = std::sqrt(totalSquares);
+            outputs->scalars[IR_NOISE3D_SCALAR_DELTA_SYS] = std::sqrt(
+                outputs->scalars[IR_NOISE3D_SCALAR_DELTA_IJ] * outputs->scalars[IR_NOISE3D_SCALAR_DELTA_IJ] +
+                outputs->scalars[IR_NOISE3D_SCALAR_DELTA_TIJ] * outputs->scalars[IR_NOISE3D_SCALAR_DELTA_TIJ]);
+            outputs->scalars[IR_NOISE3D_SCALAR_GLOBAL_MEAN] = globalMean;
+            outputs->scalars[IR_NOISE3D_SCALAR_VALID_PIXEL_COUNT] = static_cast<double>(validPixelCount);
+            outputs->scalars[IR_NOISE3D_SCALAR_VALID_SAMPLE_COUNT] = static_cast<double>(validSampleCount);
+            outputs->scalars[IR_NOISE3D_SCALAR_FRAME_COUNT] = static_cast<double>(frame_count);
+            outputs->scalars[IR_NOISE3D_SCALAR_ROWS] = static_cast<double>(rows);
+            outputs->scalars[IR_NOISE3D_SCALAR_COLS] = static_cast<double>(cols);
+
+            const size_t histBins = static_cast<size_t>(params->hist_interval);
+            buildHistogram(frameMean, params->hist_interval,
+                           outputs->hist + static_cast<size_t>(IR_NOISE3D_HIST_T) * histBins,
+                           outputs->hist_meta + static_cast<size_t>(IR_NOISE3D_HIST_T) * 3);
+            buildHistogram(rowMean, params->hist_interval,
+                           outputs->hist + static_cast<size_t>(IR_NOISE3D_HIST_I) * histBins,
+                           outputs->hist_meta + static_cast<size_t>(IR_NOISE3D_HIST_I) * 3);
+            buildHistogram(colMean, params->hist_interval,
+                           outputs->hist + static_cast<size_t>(IR_NOISE3D_HIST_J) * histBins,
+                           outputs->hist_meta + static_cast<size_t>(IR_NOISE3D_HIST_J) * 3);
+
+            double *tijHist = outputs->hist + static_cast<size_t>(IR_NOISE3D_HIST_TIJ) * histBins;
+            double *tijMeta = outputs->hist_meta + static_cast<size_t>(IR_NOISE3D_HIST_TIJ) * 3;
+            const double tijWidth = (tijMax > tijMin)
+                                        ? ((tijMax - tijMin) / static_cast<double>(params->hist_interval))
+                                        : 1.0;
+            tijMeta[0] = tijMin;
+            tijMeta[1] = tijMax;
+            tijMeta[2] = tijWidth;
+            for (int32_t t = 0; t < frame_count; ++t)
+            {
+                const size_t base = static_cast<size_t>(t) * framePixels;
+                const size_t tiBase = static_cast<size_t>(t) * static_cast<size_t>(rows);
+                const size_t tjBase = static_cast<size_t>(t) * static_cast<size_t>(cols);
+                for (const ValidPixelDn &pixel : validPixels)
+                {
+                    const double centered = frameValue(typedOrgFrames, base, pixel.index, params->compute_mode,
+                                                       k_map, b_map, params->b_avg) - globalMean;
+                    const double value =
+                        centered - frameMean[static_cast<size_t>(t)] -
+                        rowMean[static_cast<size_t>(pixel.row)] -
+                        colMean[static_cast<size_t>(pixel.col)] -
+                        outputs->map_ij[pixel.index] -
+                        mapTI[tiBase + static_cast<size_t>(pixel.row)] -
+                        mapTJ[tjBase + static_cast<size_t>(pixel.col)];
+                    addHistogramValue(value, params->hist_interval, tijMin, tijMax, tijWidth, tijHist);
+                }
+            }
+
+            require(isFiniteArray(outputs->scalars, IR_NOISE3D_SCALAR_COUNT) &&
+                        isFiniteArray(outputs->hist, static_cast<size_t>(histCount)) &&
+                        isFiniteArray(outputs->hist_meta, static_cast<size_t>(IR_NOISE3D_HIST_GROUP_COUNT) * 3) &&
+                        isFiniteArray(outputs->map_ij, framePixels) &&
+                        isFiniteArray(outputs->map_ti, frameRowCount) &&
+                        isFiniteArray(outputs->map_tj, frameColCount),
+                    IR_COMPUTATION_FAILED, "Noise3D produced non-finite scalar, map, or histogram output");
+
+            const double stdHistSeconds = elapsedSeconds(stageBegin, Clock::now());
+            const double totalSeconds = elapsedSeconds(totalBegin, Clock::now());
+            if (outputs->meta != nullptr)
+            {
+                std::fill(outputs->meta, outputs->meta + IR_NOISE3D_META_COUNT, 0.0);
+                (void)params->thread_count;
+                outputs->meta[IR_NOISE3D_META_EFFECTIVE_THREAD_COUNT] = 1.0;
+                outputs->meta[IR_NOISE3D_META_MASK_BUILD_SECONDS] = maskSeconds;
+                outputs->meta[IR_NOISE3D_META_FIRST_PASS_SECONDS] = firstPassSeconds;
+                outputs->meta[IR_NOISE3D_META_MEAN_BUILD_SECONDS] = meanBuildSeconds;
+                outputs->meta[IR_NOISE3D_META_TI_TJ_SECONDS] = tiTjSeconds;
+                outputs->meta[IR_NOISE3D_META_STD_HIST_SECONDS] = stdHistSeconds;
+                outputs->meta[IR_NOISE3D_META_TOTAL_SECONDS] = totalSeconds;
+            }
+        };
+
+        if (org_frames->data_type == IR_TYPE_U16)
+            computeTyped(static_cast<const uint16_t *>(org_frames->data));
+        else
+            computeTyped(static_cast<const uint32_t *>(org_frames->data));
     });
 }

@@ -11,10 +11,11 @@ int main()
     double deviations[1]{};
     double summary[2]{};
     char error[512]{};
-    const auto status = IR_FrameStatisticsU16(pixels, 2, 2, 1, 1, 1,
-        means, deviations, 1, summary, 2, error, sizeof error);
+    const IRArrayView input{pixels, sizeof pixels, IR_TYPE_U16, 1, 1, 2};
+    const auto status = IR_FrameStatistics(&input, 1, means, deviations,
+        1, summary, 2, error, sizeof error);
     if (status != IR_OK) {
-        std::fprintf(stderr, "IR_FrameStatisticsU16: %s\n", error);
+        std::fprintf(stderr, "IR_FrameStatistics: %s\n", error);
         return status;
     }
     const char *stationVersion = IR_StationVersion();

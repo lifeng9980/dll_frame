@@ -156,20 +156,24 @@ void checkDestination(const fs::path &path)
             "Specify a new capture directory under an existing parent");
 }
 
-void writeFrameBatchFiles(const fs::path &directory, IRGeometry geometry,
-    const std::vector<uint16_t> &frames, const std::vector<IRFrameStamp> &stamps)
+void writeFrameBatchFiles(const fs::path &directory, const recipe::FrameBatch &batch)
 {
     static_assert(std::endian::native == std::endian::little);
+    const auto pixels = recipe::frameBatchArrayView(batch);
+    const auto elementBytes = recipe::pixelElementBytes(pixels.data_type);
+    const auto pixelFormat = recipe::pixelFormatName(pixels.data_type);
+    require(elementBytes != 0, IR_UNSUPPORTED, "Cannot archive unsupported frame pixel type");
+    const auto geometry = batch.geometry;
     fs::create_directories(directory);
-    writeFile(directory / "frames.raw", reinterpret_cast<const char *>(frames.data()),
-              frames.size() * sizeof(uint16_t));
+    writeFile(directory / "frames.raw", static_cast<const char *>(pixels.data),
+              static_cast<size_t>(pixels.byte_size));
 
     std::ostringstream csv;
     csv.imbue(std::locale::classic());
     csv << "frame_index,application_sequence,driver_frame_number,lost_frames,width,height,stride_bytes,pixel_format,bit_depth,endianness,"
            "source_timestamp_ns,received_monotonic_ns,monotonic_ms,relative_time_ms,callback_sequence,pixels_inverted,timestamp_ms,time_origin,delta_ms\n";
-    for (size_t index = 0; index < stamps.size(); ++index) {
-        const auto &stamp = stamps[index];
+    for (size_t index = 0; index < batch.stamps.size(); ++index) {
+        const auto &stamp = batch.stamps[index];
         const auto sourceTime = stamp.time_origin == IR_TIME_SOURCE ? integerText(stamp.timestamp_ns) : "";
         const auto hostTime = stamp.time_origin == IR_TIME_HOST ? integerText(stamp.timestamp_ns) : "";
         const auto monotonic = stamp.time_origin == IR_TIME_RECORDED_MONOTONIC
@@ -180,15 +184,16 @@ void writeFrameBatchFiles(const fs::path &directory, IRGeometry geometry,
             ? decimalMilliseconds(stamp.timestamp_ns) : "";
         std::string deltaMs;
         if (index > 0 && stamp.time_origin != IR_TIME_UNKNOWN &&
-            stamps[index - 1].time_origin == stamp.time_origin) {
-            deltaMs = decimalMilliseconds(stamp.timestamp_ns - stamps[index - 1].timestamp_ns);
+            batch.stamps[index - 1].time_origin == stamp.time_origin) {
+            deltaMs = decimalMilliseconds(stamp.timestamp_ns - batch.stamps[index - 1].timestamp_ns);
         }
 
         csv << index << ','
             << (stamp.fields & IR_HAS_SEQUENCE ? integerText(stamp.sequence) : "") << ','
             << (stamp.fields & IR_HAS_DRIVER_SEQUENCE ? integerText(stamp.driver_sequence) : "") << ','
             << (stamp.fields & IR_HAS_LOSS ? std::to_string(stamp.lost_frames) : "") << ','
-            << geometry.width << ',' << geometry.height << ',' << geometry.width * 2 << ",RAW16_LE,"
+            << geometry.width << ',' << geometry.height << ','
+            << static_cast<uint64_t>(geometry.width) * elementBytes << ',' << pixelFormat << ','
             << geometry.valid_bits << ",little," << sourceTime << ',' << hostTime << ',' << monotonic << ','
             << relative << ',' << ((stamp.fields & IR_SEQUENCE_IS_CALLBACK) ? 1 : 0) << ','
             << ((stamp.fields & IR_PIXELS_INVERTED) ? 1 : 0) << ','
@@ -206,11 +211,11 @@ void saveRecipeArtifacts(const fs::path &destination, const std::vector<SavedBat
     StagingDirectory stage(destination.parent_path().empty() ? fs::current_path() : destination.parent_path());
 
     for (const auto &batch : batches) {
-        require(batch.frames != nullptr && batch.stamps != nullptr, IR_NULL_POINTER, "Missing batch buffer");
+        require(batch.batch != nullptr, IR_NULL_POINTER, "Missing batch buffer");
         const auto targetDir = batch.subdir.empty()
             ? stage.path()
             : (stage.path() / ir::utf8::pathFromUtf8(batch.subdir));
-        writeFrameBatchFiles(targetDir, batch.geometry, *batch.frames, *batch.stamps);
+        writeFrameBatchFiles(targetDir, *batch.batch);
     }
     writeFile(stage.path() / "result.json", resultJson.data(), resultJson.size());
     stage.publish(destination);

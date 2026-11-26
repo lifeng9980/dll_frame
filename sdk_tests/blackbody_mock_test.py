@@ -22,6 +22,10 @@ class Geometry(c.Structure):
     _fields_ = [("width", c.c_int32), ("height", c.c_int32), ("valid_bits", c.c_int32)]
 
 
+class FrameSourceInfo(c.Structure):
+    _fields_ = [("geometry", Geometry), ("data_type", c.c_int32)]
+
+
 class NoiseRecipe(c.Structure):
     _fields_ = [
         ("recipe_id", c.c_char_p), ("detector", c.c_uint64), ("blackbody", c.c_uint64),
@@ -288,7 +292,7 @@ def exercise_saved_recipe(sdk, controller, config, fixture):
     error_args = [c.c_char_p, c.c_int32]
     sdk.IR_OpenDevice.argtypes = [c.c_int32, c.c_char_p, c.POINTER(c.c_uint64), *error_args]
     sdk.IR_CloseDevice.argtypes = [c.c_uint64, *error_args]
-    sdk.IR_OpenFrames.argtypes = [c.c_int32, c.c_char_p, c.c_int32, c.POINTER(Geometry), *error_args]
+    sdk.IR_OpenFrames.argtypes = [c.c_int32, c.c_char_p, c.c_int32, c.POINTER(FrameSourceInfo), *error_args]
     sdk.IR_CloseFrames.argtypes = error_args
     sdk.IR_RunNoise.argtypes = [c.POINTER(NoiseRecipe), c.c_char_p, c.POINTER(NoiseResult), *error_args]
 
@@ -297,7 +301,7 @@ def exercise_saved_recipe(sdk, controller, config, fixture):
     handle = c.c_uint64()
     status = sdk.IR_OpenDevice(kind, json.dumps(config).encode(), c.byref(handle), error, len(error))
     assert status == 0, error.value
-    geometry = Geometry()
+    geometry = FrameSourceInfo()
     try:
         status = sdk.IR_OpenFrames(2, str(fixture).encode(), 0, c.byref(geometry), error, len(error))
         assert status == 0, error.value
@@ -466,7 +470,7 @@ def exercise_recipe_ownership(args, sdk, controller, config):
         def run_recipe():
             def execute_attempt(name):
                 worker_error = c.create_string_buffer(1024)
-                geometry = (c.c_int32 * 3)()
+                geometry = (c.c_int32 * 4)()
                 fixture_name = str(fixture).encode()
                 opened = sdk.IR_OpenFrames(2, fixture_name, 0, geometry, worker_error, len(worker_error))
                 if opened != 0:
@@ -624,7 +628,7 @@ def exercise_concurrent_polling_regression(args, sdk, controller, config):
     sdk.IR_CloseDevice.argtypes = [c.c_uint64, *error_args]
     sdk.IR_SetBlackbody.argtypes = [c.c_uint64, c.c_double, c.POINTER(c.c_double), *error_args]
     sdk.IR_ReadBlackbody.argtypes = [c.c_uint64, c.POINTER(Reading), *error_args]
-    sdk.IR_OpenFrames.argtypes = [c.c_int32, c.c_char_p, c.c_int32, c.POINTER(Geometry), *error_args]
+    sdk.IR_OpenFrames.argtypes = [c.c_int32, c.c_char_p, c.c_int32, c.POINTER(FrameSourceInfo), *error_args]
     sdk.IR_CloseFrames.argtypes = error_args
     sdk.IR_RunNoise.argtypes = [c.POINTER(NoiseRecipe), c.c_char_p, c.POINTER(NoiseResult), *error_args]
 
@@ -651,7 +655,7 @@ def exercise_concurrent_polling_regression(args, sdk, controller, config):
 
         def run_worker():
             worker_error = c.create_string_buffer(1024)
-            geometry = Geometry()
+            geometry = FrameSourceInfo()
             opened = sdk.IR_OpenFrames(2, str(fixture).encode(), 0, c.byref(geometry),
                                        worker_error, len(worker_error))
             if opened != 0:
