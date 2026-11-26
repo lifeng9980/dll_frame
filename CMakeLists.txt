@@ -73,6 +73,7 @@ add_library(IR_station SHARED)
 add_dependencies(IR_station ir_build_info)
 # 仪器控制：型号协议使用同一份 Asio TCP / 串口实现。
 target_sources(IR_station PRIVATE
+    shared/utf8_path.cpp
     station/version.cpp
     station/instruments/device_api.cpp
     station/instruments/discovery.cpp

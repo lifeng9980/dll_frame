@@ -59,38 +59,6 @@ bool isNonEmptyCString(const char *s) noexcept
     return s != nullptr && s[0] != '\0';
 }
 
-#if defined(_WIN32)
-std::string formatWin32Error(DWORD code)
-{
-    if (code == 0)
-        return "unknown Win32 error";
-    LPWSTR wideBuf = nullptr;
-    const DWORD flags = FORMAT_MESSAGE_ALLOCATE_BUFFER |
-                        FORMAT_MESSAGE_FROM_SYSTEM |
-                        FORMAT_MESSAGE_IGNORE_INSERTS;
-    const DWORD len = FormatMessageW(
-        flags, nullptr, code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-        reinterpret_cast<LPWSTR>(&wideBuf), 0, nullptr);
-    std::string out;
-    if (len > 0 && wideBuf != nullptr) {
-        const int needed = WideCharToMultiByte(
-            CP_UTF8, 0, wideBuf, static_cast<int>(len), nullptr, 0, nullptr, nullptr);
-        if (needed > 0) {
-            out.resize(static_cast<size_t>(needed));
-            WideCharToMultiByte(
-                CP_UTF8, 0, wideBuf, static_cast<int>(len), out.data(), needed, nullptr, nullptr);
-        }
-    }
-    if (wideBuf != nullptr)
-        LocalFree(wideBuf);
-    while (!out.empty() && (out.back() == '\r' || out.back() == '\n' || out.back() == ' '))
-        out.pop_back();
-    if (out.empty())
-        out = "Win32 error " + std::to_string(code);
-    return out;
-}
-#endif
-
 struct NativeLibraryCache {
     std::mutex mutex;
     std::unordered_map<std::string, std::shared_ptr<LibraryHandle>> handles;
@@ -123,8 +91,9 @@ std::shared_ptr<LibraryHandle> openNativeLibrary(
     const DWORD flags = LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
     handle->native = LoadLibraryExW(targetPath.c_str(), nullptr, flags);
     if (handle->native == nullptr) {
+        const std::error_code error(static_cast<int>(GetLastError()), std::system_category());
         setError(errOut, "Failed to load plugin library '" + targetUtf8 + "': " +
-                             formatWin32Error(GetLastError()));
+                             utf8::systemErrorText(error));
         return nullptr;
     }
 #else

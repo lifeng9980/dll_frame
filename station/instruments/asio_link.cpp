@@ -1,5 +1,6 @@
 #include "asio_link.h"
 #include "api_common.h"
+#include "utf8_path.h"
 #include <asio/connect.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/read.hpp>
@@ -20,6 +21,15 @@
 
 namespace ir::transport {
 namespace {
+std::string systemErrorText(const std::error_code &code)
+{
+#ifdef _WIN32
+    if (code.category() == asio::system_category())
+        return utf8::systemErrorText({code.value(), std::system_category()});
+#endif
+    return utf8::systemErrorText(code);
+}
+
 using Tcp = asio::ip::tcp;
 using ir::api::Error;
 using ir::api::require;
@@ -79,7 +89,7 @@ void withDeadline(asio::io_context &io, Deadline deadline, const char *operation
     io.run();
     if (completion == Completion::timer) throw Error(IR_TIMEOUT, std::string(operation) + " timed out");
     if (completion == Completion::cancelled) throw Error(IR_CANCELLED, std::string(operation) + " cancelled");
-    if (result) throw Error(IR_IO_ERROR, std::string(operation) + ": " + result.message());
+    if (result) throw Error(IR_IO_ERROR, std::string(operation) + ": " + systemErrorText(result));
 }
 }
 
@@ -220,7 +230,7 @@ AsioLink::AsioLink(const SerialEndpoint &endpoint) : state_(std::make_unique<Sta
 #endif
     } catch (const std::system_error &error) {
         throw Error(IR_IO_ERROR,
-                    "Cannot open/configure serial port '" + endpoint.port + "': " + error.what());
+                    "Cannot open/configure serial port '" + endpoint.port + "': " + systemErrorText(error.code()));
     }
 }
 
@@ -301,7 +311,7 @@ void AsioLink::discardSerialInput()
             throw std::system_error(errno, std::generic_category(), "tcflush");
 #endif
     } catch (const std::system_error &error) {
-        throw Error(IR_IO_ERROR, std::string("Serial buffer flush failed: ") + error.what());
+        throw Error(IR_IO_ERROR, std::string("Serial buffer flush failed: ") + systemErrorText(error.code()));
     }
 }
 }

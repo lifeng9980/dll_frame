@@ -216,8 +216,11 @@ struct RuntimeState {
             return;
         std::error_code error;
         const bool created = fs::create_directory(destination, error);
-        require(created && !error, IR_IO_ERROR,
-                "Cannot exclusively create the recipe output directory");
+        if (!created || error) {
+            throw Error(IR_IO_ERROR, "Cannot exclusively create the recipe output directory '" +
+                        utf8::pathToUtf8(destination) + "'" +
+                        (error ? ": " + utf8::systemErrorText(error) : ": already exists"));
+        }
         destinationCreated = true;
     }
 

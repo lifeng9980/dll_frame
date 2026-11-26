@@ -986,6 +986,12 @@ void testPreflightRejections()
     CHECK(IR_RunRecipeJson(stOk.c_str(), oneFrameRecipe.dump().c_str(), utf8(existingOut).c_str(), nullptr, &result, err, sizeof err) == IR_IO_ERROR);
     CHECK(readText(existingOut / "keep.txt") == "preserve");
 
+    // 公共错误缓冲区应保留输出路径的精确 UTF-8 字节。
+    const auto cnOut = root.path() / fs::path(u8"已存在输出");
+    fs::create_directory(cnOut);
+    CHECK(IR_RunRecipeJson(stOk.c_str(), oneFrameRecipe.dump().c_str(), utf8(cnOut).c_str(), nullptr, &result, err, sizeof err) == IR_IO_ERROR);
+    CHECK(std::string(err).find(utf8(cnOut)) != std::string::npos);
+
     // 6. Invalid station queue_capacity
     const Json rSimple = {
         {"schemav", 1},
@@ -1302,19 +1308,24 @@ void testFinalRecipeFailureDiagnostics()
     CHECK(relative.at("run_status") == "CANCELLED");
     CHECK(fs::is_regular_file(originalWorkDir / "run" / "burst_summary.csv"));
 
-    const Json save{{"id", "save"}, {"type", "save_raw"}, {"input", "b"}, {"subdir", "blocked"}};
+    const fs::path blockedName(u8"归档冲突");
+    const Json save{{"id", "save"}, {"type", "save_raw"}, {"input", "b"}, {"subdir", utf8(blockedName)}};
     const Json archiveRecipe{{"recipe_id", "archive-failure"}, {"steps", Json::array({burst, save})}};
     const auto archiveOut = root.path() / "archiving";
     run(archiveRecipe, archiveOut, {"save", [&] {
-        std::ofstream(archiveOut / "blocked", std::ios::binary) << "regular file";
+        std::ofstream(archiveOut / blockedName, std::ios::binary) << "regular file";
     }}, IR_IO_ERROR, IR_RECIPE_STAGE_ARCHIVE);
-    const auto archived = Json::parse(readText(archiveOut / "result.json"));
+    const auto diagnostic = readText(archiveOut / "result.json");
+    CHECK(!diagnostic.empty());
+    if (diagnostic.empty()) return;
+    const auto archived = Json::parse(diagnostic);
     CHECK(archived.at("run_status") == "ERROR");
     CHECK(archived.at("error_code") == IR_IO_ERROR);
+    CHECK(archived.at("error_message").get<std::string>().find(utf8(archiveOut / blockedName)) != std::string::npos);
     CHECK(archived.at("step_records").size() == 2);
     CHECK(archived.at("burst_runs").size() == 1);
     CHECK(fs::is_regular_file(archiveOut / "burst_summary.csv"));
-    CHECK(readText(archiveOut / "blocked") == "regular file");
+    CHECK(readText(archiveOut / blockedName) == "regular file");
 }
 
 bool isIso8601UtcMillis(const std::string &value)

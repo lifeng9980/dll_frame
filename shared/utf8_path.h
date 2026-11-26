@@ -3,8 +3,11 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 namespace ir::utf8 {
+
+std::string systemErrorText(const std::error_code &code);
 
 inline std::filesystem::path pathFromUtf8(std::string_view utf8)
 {

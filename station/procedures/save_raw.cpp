@@ -27,6 +27,13 @@ namespace ir::procedures {
 using namespace ir::api;
 namespace fs = std::filesystem;
 namespace {
+// 文件系统异常的 what() 使用 ANSI 代码页，路径会乱码；统一改为 UTF-8 文本。
+[[noreturn]] void throwIo(const char *what, const fs::path &path, const std::error_code &code)
+{
+    throw Error(IR_IO_ERROR, std::string(what) + " '" + utf8::pathToUtf8(path) + "': " +
+                                 utf8::systemErrorText(code));
+}
+
 const char *timeOriginName(int32_t origin) noexcept
 {
     switch (origin) {
@@ -82,10 +89,10 @@ public:
             std::error_code error;
             if (fs::create_directory(path_, error)) return;
             if (error && error != std::errc::file_exists)
-                throw fs::filesystem_error("Cannot create capture staging directory", path_, error);
+                throwIo("Cannot create capture staging directory", path_, error);
         }
-        throw std::system_error(std::make_error_code(std::errc::file_exists),
-                                "Cannot choose a unique capture staging directory");
+        throwIo("Cannot choose a unique capture staging directory", parent,
+                std::make_error_code(std::errc::file_exists));
     }
 
     StagingDirectory(const StagingDirectory &) = delete;
@@ -105,8 +112,8 @@ public:
     {
 #ifdef _WIN32
         if (!MoveFileW(path_.c_str(), destination.c_str()))
-            throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
-                                    "Cannot publish capture directory");
+            throwIo("Cannot publish capture directory", destination,
+                    std::error_code(static_cast<int>(GetLastError()), std::system_category()));
 #else
         bool published = false;
 #if defined(__linux__) && defined(SYS_renameat2) && defined(RENAME_NOREPLACE)
@@ -116,8 +123,8 @@ public:
         } else {
             const auto renameError = errno;
             if (renameError != EINVAL && renameError != ENOSYS && renameError != EOPNOTSUPP)
-                throw std::system_error(renameError, std::system_category(),
-                                        "Cannot publish capture directory");
+                throwIo("Cannot publish capture directory", destination,
+                        {renameError, std::system_category()});
         }
 #endif
         if (!published) {
@@ -125,11 +132,12 @@ public:
             const auto target = fs::symlink_status(destination, statusError);
             if (statusError == std::errc::no_such_file_or_directory) statusError.clear();
             if (statusError)
-                throw fs::filesystem_error("Cannot inspect capture destination", destination, statusError);
+                throwIo("Cannot inspect capture destination", destination, statusError);
             if (target.type() != fs::file_type::not_found)
-                throw std::system_error(std::make_error_code(std::errc::file_exists),
-                                        "Capture destination already exists");
-            fs::rename(path_, destination);
+                throwIo("Capture destination already exists", destination,
+                        std::make_error_code(std::errc::file_exists));
+            fs::rename(path_, destination, statusError);
+            if (statusError) throwIo("Cannot publish capture directory", destination, statusError);
         }
 #endif
         path_.clear();
@@ -146,9 +154,9 @@ void checkDestination(const fs::path &path)
     std::error_code error;
     const auto target = fs::symlink_status(path, error);
     if (error == std::errc::no_such_file_or_directory) error.clear();
-    require(!error, IR_IO_ERROR, "Cannot inspect capture destination");
-    require(target.type() == fs::file_type::not_found, IR_IO_ERROR,
-            "Capture destination already exists");
+    if (error) throwIo("Cannot inspect capture destination", path, error);
+    if (target.type() != fs::file_type::not_found)
+        throw Error(IR_IO_ERROR, "Capture destination already exists: '" + utf8::pathToUtf8(path) + "'");
 
     auto parent = path.parent_path();
     if (parent.empty()) parent = fs::current_path(error);
@@ -164,7 +172,11 @@ void writeFrameBatchFiles(const fs::path &directory, const recipe::FrameBatch &b
     const auto pixelFormat = recipe::pixelFormatName(pixels.data_type);
     require(elementBytes != 0, IR_UNSUPPORTED, "Cannot archive unsupported frame pixel type");
     const auto geometry = batch.geometry;
-    fs::create_directories(directory);
+    {
+        std::error_code ec;
+        fs::create_directories(directory, ec);
+        if (ec) throwIo("Cannot create output directory", directory, ec);
+    }
     writeFile(directory / "frames.raw", static_cast<const char *>(pixels.data),
               static_cast<size_t>(pixels.byte_size));
 
@@ -224,17 +236,20 @@ void saveRecipeArtifacts(const fs::path &destination, const std::vector<SavedBat
 void writeTextFileAtomicOrDirect(const fs::path &filePath, const std::string &content)
 {
     const auto parent = filePath.parent_path();
-    if (!parent.empty())
-        fs::create_directories(parent);
+    if (!parent.empty()) {
+        std::error_code ec;
+        fs::create_directories(parent, ec);
+        if (ec) throwIo("Cannot create output directory", parent, ec);
+    }
     fs::path tmpPath = filePath;
     tmpPath += ".tmp";
     writeFile(tmpPath, content.data(), content.size());
 #ifdef _WIN32
     if (!MoveFileExW(tmpPath.c_str(), filePath.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        const std::error_code cause(static_cast<int>(GetLastError()), std::system_category());
         std::error_code ec;
         fs::remove(tmpPath, ec);
-        throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
-                                "Cannot finalize output text file");
+        throwIo("Cannot finalize output text file", filePath, cause);
     }
 #else
     std::error_code ec;
@@ -242,7 +257,7 @@ void writeTextFileAtomicOrDirect(const fs::path &filePath, const std::string &co
     if (ec) {
         std::error_code rmEc;
         fs::remove(tmpPath, rmEc);
-        throw fs::filesystem_error("Cannot finalize output text file", filePath, ec);
+        throwIo("Cannot finalize output text file", filePath, ec);
     }
 #endif
 }
