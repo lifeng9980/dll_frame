@@ -7,12 +7,11 @@
 #include <memory>
 #include <string>
 #include <string_view>
-#include <variant>
 
 namespace ir::instruments {
 
 struct BlackbodyConfig {
-    using Endpoint = std::variant<transport::TcpEndpoint, transport::SerialEndpoint>;
+    using Endpoint = transport::Endpoint;
     Endpoint endpoint;
     std::chrono::milliseconds timeout{3000};
     std::chrono::milliseconds commandInterval{};
@@ -28,6 +27,7 @@ public:
 
 private:
     void open();
+    template <class Fn> auto withReconnect(Fn read);
     IRBlackbodyReading readOnce();
     std::string request(uint8_t function, std::string argument = {}, bool write = false);
     double number(uint8_t function);
@@ -41,7 +41,7 @@ private:
 };
 
 struct CoolerModbusConfig {
-    std::variant<transport::TcpEndpoint, transport::SerialEndpoint> endpoint;
+    transport::Endpoint endpoint;
     uint8_t slaveAddress{1};
     uint16_t registerAddress{0x7A52};
     std::chrono::milliseconds timeout{2000};
@@ -63,7 +63,7 @@ private:
 };
 
 struct DetectorSerialConfig {
-    std::variant<transport::TcpEndpoint, transport::SerialEndpoint> endpoint;
+    transport::Endpoint endpoint;
     std::chrono::milliseconds timeout{1200};
     std::chrono::milliseconds interCommandDelay{0};
 };
@@ -86,7 +86,7 @@ private:
 };
 
 struct Dmm6500Config {
-    std::variant<transport::TcpEndpoint, transport::SerialEndpoint> endpoint;
+    transport::Endpoint endpoint;
     std::chrono::milliseconds timeout{2000};
 };
 
@@ -108,7 +108,7 @@ private:
 };
 
 struct GwsStenConfig {
-    std::variant<transport::TcpEndpoint, transport::SerialEndpoint> endpoint;
+    transport::Endpoint endpoint;
     int address{1};
     std::string delimiter{"\r\n"};
     double minSetpointC{-45.0};
@@ -137,7 +137,7 @@ private:
 };
 
 struct It6332aConfig {
-    std::variant<transport::TcpEndpoint, transport::SerialEndpoint> endpoint;
+    transport::Endpoint endpoint;
     std::chrono::milliseconds timeout{1200};
 };
 

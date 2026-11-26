@@ -253,61 +253,82 @@ foreach ($bin in @($StationDll, $AnalysisDll, $CliExe, $AcceptExe)) {
         Assert-True (($dllLines -contains "IR_analysis.dll")) "IR_station.dll must depend on IR_analysis.dll"
     }
 }
-$stationExports = (Invoke-External -FilePath $dumpbinPath -Arguments @("/nologo", "/exports", $StationDll)).StdOut
-foreach ($sym in @(
-    "IR_StationVersion",
+function Assert-ExportSet([string]$Dll, [string[]]$Expected) {
+    $report = (Invoke-External -FilePath $dumpbinPath -Arguments @("/nologo", "/exports", $Dll)).StdOut
+    $symbols = @([regex]::Matches($report, '(?m)^[ \t]*\d+[ \t]+[0-9A-Fa-f]+[ \t]+[0-9A-Fa-f]+[ \t]+(\S+)') |
+        ForEach-Object { $_.Groups[1].Value })
+    $count = [regex]::Match($report, '(?m)^[ \t]*(\d+)[ \t]+number of functions[ \t]*\r?$')
+    $name = Split-Path -Leaf $Dll
+    Assert-True ($count.Success -and [int]$count.Groups[1].Value -eq $symbols.Count) `
+        "$name export table has unnamed or unrecognized entries"
+    $missing = @($Expected | Where-Object { $_ -cnotin $symbols })
+    $extra = @($symbols | Where-Object { $_ -cnotin $Expected })
+    Assert-True ($symbols.Count -eq $Expected.Count -and $missing.Count -eq 0 -and $extra.Count -eq 0) `
+        "$name export set mismatch (expected $($Expected.Count), found $($symbols.Count)). Missing: $($missing -join ', '). Unexpected: $($extra -join ', ')"
+    Write-Host "  $name exports verified ($($symbols.Count))"
+}
+
+Assert-ExportSet $StationDll @(
+    "IR_CheckRecipeJson",
+    "IR_CloseDevice",
+    "IR_CloseFrames",
     "IR_FlushFrames",
-    "IR_WaitBlackbodyStable",
-    "IR_SetFrameQueueCapacity",
-    "IR_TryReadLatestFrame",
     "IR_GetCaptureStats",
-    "IR_ListSerialPorts",
     "IR_ListCaptureDevices",
-    "IR_SetOven",
-    "IR_ReadOven",
-    "IR_StopOven",
-    "IR_WaitOvenStable",
-    "IR_SetDmmMode",
+    "IR_ListSerialPorts",
+    "IR_MeasureDetectorCurrent",
+    "IR_OpenDevice",
+    "IR_OpenFrames",
+    "IR_ReadBlackbody",
+    "IR_ReadCooler",
     "IR_ReadDmm",
-    "IR_SetDetectorTiming",
+    "IR_ReadFrames",
+    "IR_ReadOven",
+    "IR_ReadPower",
+    "IR_RequestStop",
+    "IR_RunRecipeJson",
+    "IR_SetBlackbody",
     "IR_SetDetectorGpol",
     "IR_SetDetectorRegister",
-    "IR_MeasureDetectorCurrent",
-    "IR_ReadCooler",
-    "IR_WaitPowerCurrentStable",
-    "IR_CheckRecipeJson",
-    "IR_RunRecipeJson",
-    "IR_RequestStop"
-)) {
-    Assert-True ($stationExports -match "(?m)^\s*\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+$([regex]::Escape($sym))(?:\s|$)") "IR_station.dll must export $sym"
-}
-$analysisExports = (Invoke-External -FilePath $dumpbinPath -Arguments @("/nologo", "/exports", $AnalysisDll)).StdOut
-foreach ($sym in @(
+    "IR_SetDetectorTiming",
+    "IR_SetDmmMode",
+    "IR_SetFrameQueueCapacity",
+    "IR_SetOven",
+    "IR_SetPowerChannel",
+    "IR_SetPowerOutput",
+    "IR_StartFrames",
+    "IR_StationVersion",
+    "IR_StopFrames",
+    "IR_StopOven",
+    "IR_TryReadLatestFrame",
+    "IR_WaitBlackbodyStable",
+    "IR_WaitOvenStable",
+    "IR_WaitPowerCurrentStable"
+)
+Assert-ExportSet $AnalysisDll @(
     "IR_AnalysisVersion",
+    "IR_ApplyAffineMapF64",
+    "IR_BuildTwoPointNucF64",
+    "IR_ChannelSpectrum",
+    "IR_ComputeRfft1D",
+    "IR_Fft2dMagnitudeF64",
+    "IR_FlickerDetect",
     "IR_FrameStatistics",
-    "IR_ROIMean",
+    "IR_FrameStatisticsNuc",
+    "IR_GbEvaluateMaps",
+    "IR_GbProcessBadPixels",
+    "IR_GjbEvaluateBurstMetrics",
+    "IR_GjbEvaluateMaps",
+    "IR_GjbProcessBadPixels",
+    "IR_MapBinaryOpF64",
+    "IR_MapSummaryF64",
+    "IR_MaskCombine",
     "IR_Noise3DBuildCalibDn",
     "IR_Noise3DComputeFramesDn",
-    "IR_GbProcessBadPixels",
-    "IR_GbEvaluateMaps",
-    "IR_GjbProcessBadPixels",
-    "IR_GjbEvaluateMaps",
-    "IR_BuildTwoPointNucF64",
-    "IR_ApplyAffineMapF64",
-    "IR_FrameStatisticsNuc",
-    "IR_MapSummaryF64",
+    "IR_ROIMean",
     "IR_SpatialLowHighPassF64",
-    "IR_MapBinaryOpF64",
-    "IR_ThresholdMaskF64",
-    "IR_MaskCombine",
-    "IR_ComputeRfft1D",
-    "IR_ChannelSpectrum",
-    "IR_GjbEvaluateBurstMetrics",
-    "IR_FlickerDetect",
-    "IR_Fft2dMagnitudeF64"
-)) {
-    Assert-True ($analysisExports -match "(?m)^\s*\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+$([regex]::Escape($sym))(?:\s|$)") "IR_analysis.dll must export $sym"
-}
+    "IR_ThresholdMaskF64"
+)
 
 Write-Step "5. Checking Windows VERSIONINFO FileVersion ($ExpectedFileVersion)"
 $DllComments = @{}

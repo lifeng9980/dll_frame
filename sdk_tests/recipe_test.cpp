@@ -1,5 +1,6 @@
 #include "IR_recipe.h"
 #include "IR_analysis.h"
+#include "IR_device.h"
 #include "IR_station.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -1417,6 +1418,53 @@ void testSchemavProvenanceAndTemplates(const fs::path *examplesDir)
     }
 }
 
+void testInstrumentConnectionPreflight()
+{
+    auto station = makeStation("unused-preflight-source");
+    constexpr const char *recipe = R"({"recipe_id":"connection-preflight","steps":[
+        {"id":"batch","type":"capture","frames":1,"frame_timeout_ms":0}]})";
+    station["devices"] = {
+        {"blackbody-tcp", {{"kind", "pcn7-lt"}, {"connection", {{"host", "unused.invalid"}}}}},
+        {"blackbody-serial", {{"kind", "dcn1000"},
+                              {"connection", {{"port", "unused-serial"}, {"expected_head_serial", " HEAD "}}}}},
+        {"supply", {{"kind", "it6332a"}, {"connection", {{"port", "unused-serial"}, {"parity", " EvEn "}}}}},
+        {"chamber", {{"kind", "gws-sten"}, {"connection", {{"host", "unused.invalid"}, {"delimiter", " CrLf "}}}}},
+        {"meter", {{"kind", "dmm6500"}, {"connection", {{"host", "unused.invalid"}}}}},
+        {"detector", {{"kind", "detector-serial"}, {"connection", {{"host", "unused.invalid"}}}}},
+        {"cooler", {{"kind", "cooler-modbus"}, {"connection", {{"port", "unused-serial"}}}}}
+    };
+
+    char error[1024]{};
+    CHECK(IR_CheckRecipeJson(station.dump().c_str(), recipe, error, sizeof error) == IR_OK);
+
+    const struct {
+        const char *kindName;
+        IRDeviceKind kind;
+        Json connection;
+        const char *field;
+    } invalid[] = {
+        {"pcn7-lt", IR_PCN7LT, {{"host", "unused.invalid"}, {"expected_head_serial", "HEAD"}}, ".expected_head_serial"},
+        {"dcn1000", IR_DCN1000, {{"port", "unused-serial"}, {"baud_rate", 115200}}, ".baud_rate"},
+        {"dcn1000", IR_DCN1000, {{"port", "unused-serial"}, {"head", 0}}, ".head"},
+        {"it6332a", IR_IT6332A, {{"host", "unused.invalid"}, {"port", "unused-serial"}}, ""},
+        {"gws-sten", IR_OVEN_GWS_STEN, {{"host", "unused.invalid"}, {"delimiter", "bad"}}, ".delimiter"},
+        {"dmm6500", IR_DMM6500, {{"host", " \t "}}, ".host"},
+        {"dmm6500", IR_DMM6500, {{"host", "127.0.0.1"}, {"tcp_port", 1}, {"timeout_ms", 20}, {"stop_bits", 2}}, ".stop_bits"},
+        {"detector-serial", IR_DETECTOR_SERIAL, {{"port", "unused-serial"}, {"tcp_port", 2102}}, ".tcp_port"},
+        {"cooler-modbus", IR_COOLER_MODBUS, {{"port", "unused-serial"}, {"slave_address", 248}}, ".slave_address"}
+    };
+    for (const auto &entry : invalid) {
+        station["devices"] = {{"instrument-a", {{"kind", entry.kindName}, {"connection", entry.connection}}}};
+        CHECK(IR_CheckRecipeJson(station.dump().c_str(), recipe, error, sizeof error) == IR_BAD_ARGUMENT);
+        CHECK(std::string_view(error).starts_with(std::string("station.devices.instrument-a.connection") + entry.field));
+
+        IRHandle handle{1};
+        CHECK(IR_OpenDevice(entry.kind, entry.connection.dump().c_str(), &handle, error, sizeof error) == IR_BAD_ARGUMENT);
+        CHECK(handle == 0);
+        CHECK(std::string_view(error).starts_with(std::string("connection") + entry.field));
+    }
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -1444,6 +1492,7 @@ int main(int argc, char **argv)
     run("testRepeatBurstCancelPreservesFlushedCsv", [] { testRepeatBurstCancelPreservesFlushedCsv(); });
     run("testBurstCsvQuotesMetricNames", [] { testBurstCsvQuotesMetricNames(); });
     run("testPreflightRejections", [] { testPreflightRejections(); });
+    run("testInstrumentConnectionPreflight", [] { testInstrumentConnectionPreflight(); });
     run("testGaussianFilterAndFlickerDetectV2", [] { testGaussianFilterAndFlickerDetectV2(); });
     run("testFft2dPipelineV2", [] { testFft2dPipelineV2(); });
     run("testRunRecipeJsonExStepCallbacks", [] { testRunRecipeJsonExStepCallbacks(); });

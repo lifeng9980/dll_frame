@@ -6,7 +6,6 @@
 #include <iomanip>
 #include <sstream>
 #include <system_error>
-#include <thread>
 
 namespace ir::instruments {
 namespace {
@@ -37,14 +36,7 @@ DetectorSerial::DetectorSerial(DetectorSerialConfig config) : config_(std::move(
 void DetectorSerial::connect()
 {
     link_.reset();
-    if (std::holds_alternative<transport::TcpEndpoint>(config_.endpoint)) {
-        link_ = std::make_unique<transport::AsioLink>(
-            std::get<transport::TcpEndpoint>(config_.endpoint),
-            Clock::now() + config_.timeout);
-    } else {
-        link_ = std::make_unique<transport::AsioLink>(
-            std::get<transport::SerialEndpoint>(config_.endpoint));
-    }
+    link_ = transport::openLink(config_.endpoint, Clock::now() + config_.timeout);
 }
 
 void DetectorSerial::sendCommandAndVerifyAck(uint8_t commandCode, const uint8_t *payload, size_t payloadLen)
@@ -55,7 +47,7 @@ void DetectorSerial::sendCommandAndVerifyAck(uint8_t commandCode, const uint8_t 
 
     if (!link_) connect();
     if (config_.interCommandDelay.count() > 0)
-        std::this_thread::sleep_for(config_.interCommandDelay);
+        transport::waitFor(config_.interCommandDelay);
 
     std::string frame;
     frame.reserve(payloadLen + 3);
@@ -155,11 +147,11 @@ IRDetectorCurrentReading DetectorSerial::measureCurrent(int32_t gainCode, uint16
     };
     sendCommandAndVerifyAck(0x30, channelPayload.data(), channelPayload.size());
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    transport::waitFor(std::chrono::milliseconds(2));
 
     if (!link_) connect();
     if (config_.interCommandDelay.count() > 0)
-        std::this_thread::sleep_for(config_.interCommandDelay);
+        transport::waitFor(config_.interCommandDelay);
 
     const std::string queryFrame{
         static_cast<char>(0xCC),

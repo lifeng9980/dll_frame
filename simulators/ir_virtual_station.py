@@ -405,9 +405,11 @@ def main():
     parser.add_argument("--ramp-c-per-s", type=float, default=0.0)
     parser.add_argument("--emit-station-json", type=Path, default=None)
     parser.add_argument("--emit-blackbody-config", type=Path, default=None)
-    parser.add_argument("--raw-source", type=Path, default=Path("examples/data/raw16"))
+    parser.add_argument("--raw-source", type=Path, help="RAW replay directory for --emit-station-json")
     parser.add_argument("--log-io", action="store_true")
     args = parser.parse_args()
+    if args.emit_station_json is not None and args.raw_source is None:
+        parser.error("--emit-station-json requires --raw-source")
 
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())

@@ -3,6 +3,7 @@
 #include "IR_device.h"
 #include "api_common.h"
 #include "utf8_path.h"
+#include "station/instruments/asio_link.h"
 #include "station/instruments/device_lease.h"
 #include "station/version.h"
 #include <algorithm>
@@ -460,8 +461,6 @@ int32_t executeRepeatBurstStep(RuntimeState &rt, const RepeatBurstStep &rb)
             break;
         const double elapsedBefore = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - loopStart).count();
-        if (rb.maxIterations == 0 && iterationsDone > 0 && elapsedBefore >= rb.durationSec)
-            break;
         if (rb.durationSec > 0.0 && iterationsDone > 0 && elapsedBefore >= rb.durationSec)
             break;
 
@@ -789,6 +788,10 @@ void runRecipe(const char *stationJson,
 
         std::exception_ptr failure;
         try {
+            // End the instrument cancellation scope before running safety cleanup.
+            const transport::CancellationScope instrumentCancellation(&rt.capture, [](const void *context) noexcept {
+                return static_cast<const acquisition::Capture *>(context)->isStopRequested();
+            });
             preflightRecipe(rt);
             openAndLeaseDevices(rt);
 

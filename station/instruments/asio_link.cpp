@@ -9,6 +9,7 @@
 #include <asio/write.hpp>
 #include <algorithm>
 #include <array>
+#include <thread>
 #include <variant>
 #ifdef _WIN32
 #include <windows.h>
@@ -23,15 +24,32 @@ using Tcp = asio::ip::tcp;
 using ir::api::Error;
 using ir::api::require;
 constexpr size_t MaxReplyBytes = 4096;
+constexpr auto CancellationPollInterval = std::chrono::milliseconds(25);
+thread_local const CancellationScope *activeCancellation = nullptr;
+
+void checkCancellation()
+{
+    if (activeCancellation && activeCancellation->stopRequested())
+        throw Error(IR_CANCELLED, "Instrument operation cancelled");
+}
+
+template<class Stream>
+void cancelStream(Stream &stream)
+{
+    asio::error_code error;
+    stream.cancel(error);
+    if (error) stream.close(error);
+}
 
 template<class Start, class Cancel>
 void withDeadline(asio::io_context &io, Deadline deadline, const char *operation, Start start, Cancel cancel)
 {
+    checkCancellation();
     require(std::chrono::steady_clock::now() < deadline, IR_TIMEOUT, operation);
     io.restart();
     asio::steady_timer timer(io, deadline);
     asio::error_code result;
-    enum class Completion { pending, io, timer };
+    enum class Completion { pending, io, timer, cancelled };
     Completion completion = Completion::pending;
     start([&](asio::error_code error) {
         if (completion != Completion::pending)
@@ -47,11 +65,57 @@ void withDeadline(asio::io_context &io, Deadline deadline, const char *operation
             cancel();
         }
     });
+    if (activeCancellation) {
+        while (completion == Completion::pending) {
+            io.run_one_for(CancellationPollInterval);
+            if (completion == Completion::pending && activeCancellation->stopRequested()) {
+                completion = Completion::cancelled;
+                timer.cancel();
+                cancel();
+            }
+        }
+    }
     // Finish the cancellation handler before caller-owned buffers go out of scope.
     io.run();
     if (completion == Completion::timer) throw Error(IR_TIMEOUT, std::string(operation) + " timed out");
+    if (completion == Completion::cancelled) throw Error(IR_CANCELLED, std::string(operation) + " cancelled");
     if (result) throw Error(IR_IO_ERROR, std::string(operation) + ": " + result.message());
 }
+}
+
+CancellationScope::CancellationScope(const void *context, Predicate predicate) noexcept
+    : context_(context), predicate_(predicate), previous_(activeCancellation)
+{
+    activeCancellation = this;
+}
+
+CancellationScope::~CancellationScope()
+{
+    activeCancellation = previous_;
+}
+
+void waitUntil(Deadline deadline)
+{
+    if (!activeCancellation) {
+        std::this_thread::sleep_until(deadline);
+        return;
+    }
+    for (;;) {
+        checkCancellation();
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) return;
+        std::this_thread::sleep_until(std::min(deadline, now + CancellationPollInterval));
+    }
+}
+
+void waitFor(std::chrono::milliseconds duration)
+{
+    waitUntil(std::chrono::steady_clock::now() + duration);
+}
+
+bool isRetryableError(int32_t status) noexcept
+{
+    return status == IR_IO_ERROR || status == IR_TIMEOUT;
 }
 
 std::vector<std::string> resolveTcpAddresses(const TcpEndpoint &endpoint, Deadline deadline)
@@ -127,6 +191,7 @@ AsioLink::AsioLink(const TcpEndpoint &endpoint, Deadline deadline)
 
 AsioLink::AsioLink(const SerialEndpoint &endpoint) : state_(std::make_unique<State>(false))
 {
+    checkCancellation();
     try {
         auto &port = std::get<asio::serial_port>(state_->stream);
         using Options = asio::serial_port_base;
@@ -161,16 +226,20 @@ AsioLink::AsioLink(const SerialEndpoint &endpoint) : state_(std::make_unique<Sta
 
 AsioLink::~AsioLink() = default;
 
+std::unique_ptr<AsioLink> openLink(const Endpoint &endpoint, Deadline deadline)
+{
+    if (const auto *tcp = std::get_if<TcpEndpoint>(&endpoint))
+        return std::make_unique<AsioLink>(*tcp, deadline);
+    return std::make_unique<AsioLink>(std::get<SerialEndpoint>(endpoint));
+}
+
 void AsioLink::writeAll(std::string_view bytes, Deadline deadline)
 {
     std::visit([&](auto &stream) {
         withDeadline(state_->io, deadline, "Instrument write", [&](auto done) {
             asio::async_write(stream, asio::buffer(bytes.data(), bytes.size()),
                 [done](auto error, auto) { done(error); });
-        }, [&] {
-            asio::error_code ignored;
-            stream.cancel(ignored);
-        });
+        }, [&] { cancelStream(stream); });
     }, state_->stream);
 }
 
@@ -190,10 +259,7 @@ std::string AsioLink::readDelimited(std::string_view delimiter, Deadline deadlin
                     size = count;
                     done(error);
                 });
-        }, [&] {
-            asio::error_code ignored;
-            stream.cancel(ignored);
-        });
+        }, [&] { cancelStream(stream); });
     }, state_->stream);
     auto reply = state_->pending.substr(0, size);
     state_->pending.erase(0, size);
@@ -212,10 +278,7 @@ std::string AsioLink::readExact(std::size_t count, Deadline deadline)
                 asio::async_read(stream, asio::dynamic_buffer(state_->pending, MaxReplyBytes),
                     asio::transfer_at_least(need),
                     [done](auto error, auto) { done(error); });
-            }, [&] {
-                asio::error_code ignored;
-                stream.cancel(ignored);
-            });
+            }, [&] { cancelStream(stream); });
         }, state_->stream);
     }
     require(state_->pending.size() >= count, IR_IO_ERROR, "Incomplete binary reply");

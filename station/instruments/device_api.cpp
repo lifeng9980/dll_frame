@@ -1,18 +1,19 @@
 #include "IR_device.h"
 #include "api_common.h"
+#include "device_config.h"
 #include "device_lease.h"
 #include "drivers.h"
 #include "utf8_path.h"
-#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cmath>
-#include <cctype>
 #include <filesystem>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -29,13 +30,17 @@ using ir::instruments::Dmm6500Config;
 using ir::instruments::Doc058Blackbody;
 using ir::instruments::GwsStenConfig;
 using ir::instruments::GwsStenOven;
+using ir::instruments::It6332aConfig;
+using ir::instruments::It6332aPower;
+using ir::transport::SerialEndpoint;
+using ir::transport::TcpEndpoint;
 using namespace ir::api;
 
 struct Session {
     std::vector<std::string> endpointKeys;
     std::mutex mutex;
     std::unique_ptr<Doc058Blackbody> blackbody;
-    std::unique_ptr<ir::instruments::It6332aPower> power;
+    std::unique_ptr<It6332aPower> power;
     std::unique_ptr<GwsStenOven> oven;
     std::unique_ptr<Dmm6500> dmm;
     std::unique_ptr<DetectorSerial> detector;
@@ -47,33 +52,219 @@ std::map<IRHandle, std::shared_ptr<Session>> devices;
 std::set<std::string> openingEndpoints;
 IRHandle nextHandle{1};
 
-std::string text(const Json &json, const char *key, bool required)
-{
-    const auto value = json.find(key);
-    if (value == json.end()) {
-        require(!required, IR_BAD_ARGUMENT, key);
-        return {};
+using Endpoint = BlackbodyConfig::Endpoint;
+using DeviceOptions = std::variant<BlackbodyConfig, It6332aConfig, GwsStenConfig, Dmm6500Config,
+                                   DetectorSerialConfig, CoolerModbusConfig>;
+
+class ConnectionFields {
+public:
+    ConnectionFields(const Json &json, std::string_view path) : json_(json), path_(path)
+    {
+        if (!json_.is_object()) fail({}, "must be an object");
     }
-    require(value->is_string(), IR_BAD_ARGUMENT, key);
-    auto result = value->get<std::string>();
-    const auto whitespace = [](unsigned char character) { return std::isspace(character) != 0; };
-    const auto first = std::find_if_not(result.begin(), result.end(), whitespace);
-    const auto last = std::find_if_not(result.rbegin(), result.rend(), whitespace).base();
-    result = first < last ? std::string(first, last) : std::string{};
-    require(!required || !result.empty(), IR_BAD_ARGUMENT, key);
-    require(result.find('\0') == std::string::npos, IR_BAD_ARGUMENT, key);
+
+    [[noreturn]] void fail(std::string_view key, std::string_view message) const
+    {
+        std::string path(path_);
+        if (!key.empty()) {
+            path += '.';
+            path += key;
+        }
+        path += ' ';
+        path += message;
+        throw Error(IR_BAD_ARGUMENT, path);
+    }
+
+    bool contains(const char *key) const { return json_.contains(key); }
+
+    void allow(std::initializer_list<std::string_view> fields,
+               std::initializer_list<std::string_view> extra = {}) const
+    {
+        for (auto field = json_.begin(); field != json_.end(); ++field) {
+            const std::string_view key = field.key();
+            if (std::find(fields.begin(), fields.end(), key) == fields.end() &&
+                std::find(extra.begin(), extra.end(), key) == extra.end())
+                fail(key, "is unsupported for this instrument or transport");
+        }
+    }
+
+    std::string text(const char *key, bool required = false) const
+    {
+        const auto value = json_.find(key);
+        if (value == json_.end()) {
+            if (required) fail(key, "is required");
+            return {};
+        }
+        if (!value->is_string()) fail(key, "must be a string");
+        const auto &input = value->get_ref<const std::string &>();
+        if (input.find('\0') != std::string::npos) fail(key, "must not contain NUL");
+        constexpr std::string_view whitespace = " \t\r\n\f\v";
+        const auto first = input.find_first_not_of(whitespace);
+        if (first == std::string::npos) {
+            if (required) fail(key, "must be nonempty");
+            return {};
+        }
+        return input.substr(first, input.find_last_not_of(whitespace) - first + 1);
+    }
+
+    double number(const char *key, double fallback) const
+    {
+        const auto value = json_.find(key);
+        if (value == json_.end()) return fallback;
+        if (!value->is_number()) fail(key, "must be a number");
+        const auto result = value->get<double>();
+        if (!std::isfinite(result)) fail(key, "must be finite");
+        return result;
+    }
+
+    int integer(const char *key, int fallback, int low, int high) const
+    {
+        const auto result = number(key, fallback);
+        if (result < low || result > high || std::trunc(result) != result)
+            fail(key, "must be an integer in [" + std::to_string(low) + ", " + std::to_string(high) + "]");
+        return static_cast<int>(result);
+    }
+
+    std::chrono::milliseconds timeout(std::chrono::milliseconds fallback) const
+    {
+        return std::chrono::milliseconds{integer("timeout_ms", static_cast<int>(fallback.count()), 1, 60000)};
+    }
+
+private:
+    const Json &json_;
+    std::string_view path_;
+};
+
+std::string lowercaseAscii(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](char c) {
+        return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+    });
+    return value;
+}
+
+int parseParity(const ConnectionFields &fields)
+{
+    const auto parity = lowercaseAscii(fields.text("parity"));
+    if (parity.empty() || parity == "none") return 0;
+    if (parity == "odd") return 1;
+    if (parity == "even") return 2;
+    fields.fail("parity", "must be none, odd, or even");
+}
+
+TcpEndpoint parseTcpEndpoint(const ConnectionFields &fields, int defaultPort)
+{
+    return {fields.text("host", true),
+            static_cast<uint16_t>(fields.integer("tcp_port", defaultPort, 1, 65535)), {}};
+}
+
+Endpoint parseTcpOrSerialEndpoint(const ConnectionFields &fields, int defaultTcpPort,
+                                  int defaultBaud, int defaultStopBits = 1,
+                                  std::initializer_list<std::string_view> extra = {})
+{
+    const bool hasHost = fields.contains("host");
+    if (hasHost == fields.contains("port"))
+        fields.fail({}, "must specify exactly one of 'host' or 'port'");
+    if (hasHost) {
+        fields.allow({"host", "tcp_port", "timeout_ms"}, extra);
+        return parseTcpEndpoint(fields, defaultTcpPort);
+    }
+    fields.allow({"port", "baud_rate", "data_bits", "parity", "stop_bits", "timeout_ms"}, extra);
+    return SerialEndpoint{fields.text("port", true),
+                          static_cast<unsigned>(fields.integer("baud_rate", defaultBaud, 1200, 921600)),
+                          static_cast<unsigned>(fields.integer("data_bits", 8, 5, 8)),
+                          parseParity(fields), fields.integer("stop_bits", defaultStopBits, 1, 2)};
+}
+
+BlackbodyConfig parseBlackbodyConfig(int32_t kind, const ConnectionFields &fields)
+{
+    BlackbodyConfig result;
+    result.timeout = fields.timeout(result.timeout);
+    result.expectedHead = fields.text("expected_head_serial");
+    if (kind == IR_PCN7LT) {
+        fields.allow({"host", "tcp_port", "head", "expected_head_serial", "timeout_ms"});
+        result.endpoint = parseTcpEndpoint(fields, 2101);
+        result.commandInterval = std::chrono::milliseconds{100};
+        result.head = fields.integer("head", result.head, -1, 1);
+        if (!result.expectedHead.empty() && result.head < 0)
+            fields.fail("expected_head_serial", "requires a head index of 0 or 1");
+    } else {
+        fields.allow({"port", "expected_head_serial", "timeout_ms"});
+        result.endpoint = SerialEndpoint{fields.text("port", true), 9600};
+        result.commandInterval = std::chrono::milliseconds{200};
+    }
     return result;
 }
 
-int integer(const Json &json, const char *key, int fallback, int low, int high)
+GwsStenConfig parseOvenConfig(const ConnectionFields &fields)
 {
-    const auto value = json.find(key);
-    if (value == json.end()) return fallback;
-    require(value->is_number(), IR_BAD_ARGUMENT, key);
-    const auto number = value->get<double>();
-    require(std::isfinite(number) && number >= low && number <= high &&
-            std::trunc(number) == number, IR_BAD_ARGUMENT, key);
-    return int(number);
+    GwsStenConfig result;
+    result.endpoint = parseTcpOrSerialEndpoint(fields, 5000, 9600, 1,
+                                               {"address", "delimiter", "min_setpoint_c", "max_setpoint_c"});
+    result.timeout = fields.timeout(result.timeout);
+    result.address = fields.integer("address", result.address, 1, 255);
+    result.minSetpointC = fields.number("min_setpoint_c", result.minSetpointC);
+    result.maxSetpointC = fields.number("max_setpoint_c", result.maxSetpointC);
+    if (result.minSetpointC > result.maxSetpointC)
+        fields.fail("min_setpoint_c", "must be <= max_setpoint_c");
+    const auto delimiter = lowercaseAscii(fields.text("delimiter"));
+    if (delimiter == "cr") result.delimiter = "\r";
+    else if (delimiter == "lf") result.delimiter = "\n";
+    else if (!delimiter.empty() && delimiter != "crlf")
+        fields.fail("delimiter", "must be crlf, cr, or lf");
+    return result;
+}
+
+DeviceOptions parseDeviceConnection(int32_t kind, const Json &json, std::string_view path)
+{
+    const ConnectionFields fields(json, path);
+    switch (kind) {
+    case IR_PCN7LT:
+    case IR_DCN1000:
+        return parseBlackbodyConfig(kind, fields);
+    case IR_IT6332A: {
+        It6332aConfig result;
+        result.endpoint = parseTcpOrSerialEndpoint(fields, 5026, 115200);
+        result.timeout = fields.timeout(result.timeout);
+        return result;
+    }
+    case IR_OVEN_GWS_STEN:
+        return parseOvenConfig(fields);
+    case IR_DMM6500: {
+        Dmm6500Config result;
+        result.endpoint = parseTcpOrSerialEndpoint(fields, 5025, 115200);
+        result.timeout = fields.timeout(result.timeout);
+        return result;
+    }
+    case IR_DETECTOR_SERIAL: {
+        DetectorSerialConfig result;
+        result.endpoint = parseTcpOrSerialEndpoint(fields, 2102, 115200, 1, {"inter_command_ms"});
+        result.timeout = fields.timeout(result.timeout);
+        result.interCommandDelay = std::chrono::milliseconds{fields.integer("inter_command_ms", 0, 0, 2000)};
+        return result;
+    }
+    case IR_COOLER_MODBUS: {
+        CoolerModbusConfig result;
+        result.endpoint = parseTcpOrSerialEndpoint(fields, 5020, 9600, 2,
+                                                   {"slave_address", "register_address"});
+        result.timeout = fields.timeout(result.timeout);
+        result.slaveAddress = static_cast<uint8_t>(fields.integer("slave_address", result.slaveAddress, 1, 247));
+        result.registerAddress = static_cast<uint16_t>(fields.integer("register_address", result.registerAddress, 0, 65535));
+        return result;
+    }
+    default:
+        throw Error(IR_UNSUPPORTED, "Unsupported instrument kind");
+    }
+}
+
+Json parseConfigJson(const char *config)
+{
+    require(config && *config, IR_BAD_ARGUMENT, "connection JSON is empty");
+    try {
+        return Json::parse(config);
+    } catch (const Json::parse_error &) {
+        throw Error(IR_BAD_ARGUMENT, "connection contains invalid JSON");
+    }
 }
 
 std::string serialEndpointKey(const std::string &name)
@@ -92,169 +283,21 @@ std::string serialEndpointKey(const std::string &name)
 #endif
 }
 
-Json parseConfigJson(const char *config)
+std::vector<std::string> resolveEndpointKeys(Endpoint &endpoint, std::chrono::milliseconds timeout)
 {
-    require(config && *config, IR_BAD_ARGUMENT, "Missing connection JSON");
-    Json json;
-    try {
-        json = Json::parse(config);
-    } catch (const Json::parse_error &) {
-        throw Error(IR_BAD_ARGUMENT, "Invalid connection JSON");
+    if (const auto *serial = std::get_if<SerialEndpoint>(&endpoint))
+        return {serialEndpointKey(serial->port)};
+    auto &tcp = std::get<TcpEndpoint>(endpoint);
+    tcp.resolvedAddresses = ir::transport::resolveTcpAddresses(tcp, std::chrono::steady_clock::now() + timeout);
+    std::vector<std::string> keys;
+    keys.reserve(tcp.resolvedAddresses.size());
+    for (const auto &address : tcp.resolvedAddresses) {
+        const auto formattedAddress = address.find(':') == std::string::npos ? address : '[' + address + ']';
+        keys.push_back("tcp:" + formattedAddress + ':' + std::to_string(tcp.port));
     }
-    require(json.is_object(), IR_BAD_ARGUMENT, "Connection JSON must contain an object");
-    return json;
-}
-
-std::pair<BlackbodyConfig, std::vector<std::string>> parseBlackbodyConfig(int kind, const char *config)
-{
-    using namespace ir::transport;
-    const auto json = parseConfigJson(config);
-
-    BlackbodyConfig result;
-    result.timeout = std::chrono::milliseconds(integer(json, "timeout_ms", 3000, 1, 60000));
-    result.commandInterval = std::chrono::milliseconds(kind == IR_PCN7LT ? 100 : 200);
-    result.expectedHead = text(json, "expected_head_serial", false);
-    if (kind == IR_PCN7LT) {
-        const auto host = text(json, "host", true);
-        const auto port = uint16_t(integer(json, "tcp_port", 2101, 1, 65535));
-        result.head = integer(json, "head", -1, -1, 1);
-        require(result.expectedHead.empty() || result.head >= 0, IR_BAD_ARGUMENT, "Expected head serial requires a head index");
-        TcpEndpoint endpoint{host, port};
-        endpoint.resolvedAddresses = resolveTcpAddresses(endpoint, std::chrono::steady_clock::now() + result.timeout);
-        std::vector<std::string> keys;
-        keys.reserve(endpoint.resolvedAddresses.size());
-        for (const auto &address : endpoint.resolvedAddresses) {
-            const auto formattedAddress = address.find(':') == std::string::npos ? address : '[' + address + ']';
-            keys.push_back("tcp:" + formattedAddress + ':' + std::to_string(port));
-        }
-        std::sort(keys.begin(), keys.end());
-        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-        result.endpoint = std::move(endpoint);
-        return {std::move(result), std::move(keys)};
-    }
-
-    const auto name = text(json, "port", true);
-    result.endpoint = SerialEndpoint{name, 9600};
-    return {std::move(result), {serialEndpointKey(name)}};
-}
-
-double floating(const Json &json, const char *key, double fallback)
-{
-    const auto value = json.find(key);
-    if (value == json.end()) return fallback;
-    require(value->is_number(), IR_BAD_ARGUMENT, key);
-    const auto num = value->get<double>();
-    require(std::isfinite(num), IR_BAD_ARGUMENT, key);
-    return num;
-}
-
-int parseParity(const std::string &parityText)
-{
-    std::string lower = parityText;
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (lower.empty() || lower == "none") return 0;
-    if (lower == "odd") return 1;
-    if (lower == "even") return 2;
-    throw Error(IR_BAD_ARGUMENT, "Invalid serial parity (expected none, odd, or even)");
-}
-
-std::pair<std::variant<ir::transport::TcpEndpoint, ir::transport::SerialEndpoint>, std::vector<std::string>>
-parseTcpOrSerialEndpoint(const Json &json, uint16_t defaultTcpPort, unsigned defaultBaud,
-                         std::chrono::milliseconds resolveTimeout, int defaultStopBits = 1)
-{
-    using namespace ir::transport;
-    const bool hasHost = json.contains("host");
-    const bool hasPort = json.contains("port");
-    require(hasHost != hasPort, IR_BAD_ARGUMENT, "Connection JSON must specify either 'host' or 'port'");
-    if (hasHost) {
-        const auto host = text(json, "host", true);
-        const auto tcpPort = static_cast<uint16_t>(integer(json, "tcp_port", defaultTcpPort, 1, 65535));
-        TcpEndpoint ep{host, tcpPort};
-        ep.resolvedAddresses = resolveTcpAddresses(ep, std::chrono::steady_clock::now() + resolveTimeout);
-        std::vector<std::string> keys;
-        keys.reserve(ep.resolvedAddresses.size());
-        for (const auto &address : ep.resolvedAddresses) {
-            const auto fmt = address.find(':') == std::string::npos ? address : '[' + address + ']';
-            keys.push_back("tcp:" + fmt + ':' + std::to_string(tcpPort));
-        }
-        std::sort(keys.begin(), keys.end());
-        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-        return {std::move(ep), std::move(keys)};
-    }
-    const auto portName = text(json, "port", true);
-    SerialEndpoint sp;
-    sp.port = portName;
-    sp.baud = static_cast<unsigned>(integer(json, "baud_rate", static_cast<int>(defaultBaud), 1200, 921600));
-    sp.dataBits = static_cast<unsigned>(integer(json, "data_bits", 8, 5, 8));
-    sp.parity = parseParity(text(json, "parity", false));
-    sp.stopBits = integer(json, "stop_bits", defaultStopBits, 1, 2);
-    return {std::move(sp), {serialEndpointKey(portName)}};
-}
-
-std::pair<ir::instruments::It6332aConfig, std::vector<std::string>> parsePowerConfig(const char *config)
-{
-    const auto json = parseConfigJson(config);
-    ir::instruments::It6332aConfig result;
-    result.timeout = std::chrono::milliseconds(integer(json, "timeout_ms", 1200, 1, 60000));
-    auto [ep, keys] = parseTcpOrSerialEndpoint(json, 5026, 115200, result.timeout, 1);
-    result.endpoint = std::move(ep);
-    return {std::move(result), std::move(keys)};
-}
-
-std::pair<GwsStenConfig, std::vector<std::string>> parseOvenConfig(const char *config)
-{
-    const auto json = parseConfigJson(config);
-    GwsStenConfig result;
-    result.timeout = std::chrono::milliseconds(integer(json, "timeout_ms", 2000, 1, 60000));
-    result.address = integer(json, "address", 1, 1, 255);
-    result.minSetpointC = floating(json, "min_setpoint_c", -45.0);
-    result.maxSetpointC = floating(json, "max_setpoint_c", 70.0);
-    require(result.minSetpointC <= result.maxSetpointC, IR_BAD_ARGUMENT,
-            "min_setpoint_c must be <= max_setpoint_c");
-    auto delim = text(json, "delimiter", false);
-    std::transform(delim.begin(), delim.end(), delim.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (delim.empty() || delim == "crlf") result.delimiter = "\r\n";
-    else if (delim == "cr") result.delimiter = "\r";
-    else if (delim == "lf") result.delimiter = "\n";
-    else throw Error(IR_BAD_ARGUMENT, "Unsupported oven delimiter (expected crlf, cr, or lf)");
-    auto [ep, keys] = parseTcpOrSerialEndpoint(json, 5000, 9600, result.timeout);
-    result.endpoint = std::move(ep);
-    return {std::move(result), std::move(keys)};
-}
-
-std::pair<Dmm6500Config, std::vector<std::string>> parseDmmConfig(const char *config)
-{
-    const auto json = parseConfigJson(config);
-    Dmm6500Config result;
-    result.timeout = std::chrono::milliseconds(integer(json, "timeout_ms", 2000, 1, 60000));
-    auto [ep, keys] = parseTcpOrSerialEndpoint(json, 5025, 115200, result.timeout);
-    result.endpoint = std::move(ep);
-    return {std::move(result), std::move(keys)};
-}
-
-std::pair<DetectorSerialConfig, std::vector<std::string>> parseDetectorConfig(const char *config)
-{
-    const auto json = parseConfigJson(config);
-    DetectorSerialConfig result;
-    result.timeout = std::chrono::milliseconds(integer(json, "timeout_ms", 1200, 1, 60000));
-    result.interCommandDelay = std::chrono::milliseconds(integer(json, "inter_command_ms", 0, 0, 2000));
-    auto [ep, keys] = parseTcpOrSerialEndpoint(json, 2102, 115200, result.timeout);
-    result.endpoint = std::move(ep);
-    return {std::move(result), std::move(keys)};
-}
-
-std::pair<CoolerModbusConfig, std::vector<std::string>> parseCoolerConfig(const char *config)
-{
-    const auto json = parseConfigJson(config);
-    CoolerModbusConfig result;
-    result.timeout = std::chrono::milliseconds(integer(json, "timeout_ms", 2000, 1, 60000));
-    result.slaveAddress = static_cast<uint8_t>(integer(json, "slave_address", 1, 1, 247));
-    result.registerAddress = static_cast<uint16_t>(integer(json, "register_address", 0x7A52, 0, 65535));
-    auto [ep, keys] = parseTcpOrSerialEndpoint(json, 5020, 9600, result.timeout, 2);
-    result.endpoint = std::move(ep);
-    return {std::move(result), std::move(keys)};
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    return keys;
 }
 
 auto findDevice(IRHandle handle)
@@ -332,6 +375,11 @@ template<class Action> void useCooler(IRHandle handle, Action action)
 namespace ir::instruments {
 using ir::api::require;
 
+void validateDeviceConnection(int32_t kind, const nlohmann::json &connection, std::string_view path)
+{
+    (void)parseDeviceConnection(kind, connection, path);
+}
+
 DeviceLease::DeviceLease(const IRHandle *handles, std::size_t count)
 {
     require(handles || count == 0, IR_NULL_POINTER, "Instrument handle list is NULL");
@@ -382,42 +430,10 @@ noexcept{
     if (out) *out = 0;
     return guarded(err, bytes, [&] {
         needed(out, 1, 1);
-        require(kind == IR_PCN7LT || kind == IR_DCN1000 || kind == IR_IT6332A ||
-                kind == IR_OVEN_GWS_STEN || kind == IR_DMM6500 || kind == IR_DETECTOR_SERIAL ||
-                kind == IR_COOLER_MODBUS,
-                IR_UNSUPPORTED, "Unsupported instrument kind");
-        BlackbodyConfig blackbodyOptions;
-        ir::instruments::It6332aConfig powerOptions;
-        GwsStenConfig ovenOptions;
-        Dmm6500Config dmmOptions;
-        DetectorSerialConfig detectorOptions;
-        CoolerModbusConfig coolerOptions;
-        std::vector<std::string> endpointKeys;
-        if (kind == IR_IT6332A) {
-            auto parsed = parsePowerConfig(config);
-            powerOptions = std::move(parsed.first);
-            endpointKeys = std::move(parsed.second);
-        } else if (kind == IR_OVEN_GWS_STEN) {
-            auto parsed = parseOvenConfig(config);
-            ovenOptions = std::move(parsed.first);
-            endpointKeys = std::move(parsed.second);
-        } else if (kind == IR_DMM6500) {
-            auto parsed = parseDmmConfig(config);
-            dmmOptions = std::move(parsed.first);
-            endpointKeys = std::move(parsed.second);
-        } else if (kind == IR_DETECTOR_SERIAL) {
-            auto parsed = parseDetectorConfig(config);
-            detectorOptions = std::move(parsed.first);
-            endpointKeys = std::move(parsed.second);
-        } else if (kind == IR_COOLER_MODBUS) {
-            auto parsed = parseCoolerConfig(config);
-            coolerOptions = std::move(parsed.first);
-            endpointKeys = std::move(parsed.second);
-        } else {
-            auto parsed = parseBlackbodyConfig(kind, config);
-            blackbodyOptions = std::move(parsed.first);
-            endpointKeys = std::move(parsed.second);
-        }
+        auto parsed = parseDeviceConnection(kind, parseConfigJson(config), "connection");
+        const auto endpointKeys = std::visit([](auto &options) {
+            return resolveEndpointKeys(options.endpoint, options.timeout);
+        }, parsed);
         {
             std::lock_guard lock(devicesMutex);
             for (const auto &endpoint : endpointKeys) {
@@ -435,18 +451,21 @@ noexcept{
         try {
             device = std::make_shared<Session>();
             device->endpointKeys = endpointKeys;
-            if (kind == IR_IT6332A)
-                device->power = std::make_unique<ir::instruments::It6332aPower>(std::move(powerOptions));
-            else if (kind == IR_OVEN_GWS_STEN)
-                device->oven = std::make_unique<GwsStenOven>(std::move(ovenOptions));
-            else if (kind == IR_DMM6500)
-                device->dmm = std::make_unique<Dmm6500>(std::move(dmmOptions));
-            else if (kind == IR_DETECTOR_SERIAL)
-                device->detector = std::make_unique<DetectorSerial>(std::move(detectorOptions));
-            else if (kind == IR_COOLER_MODBUS)
-                device->cooler = std::make_unique<CoolerModbus>(std::move(coolerOptions));
-            else
-                device->blackbody = std::make_unique<Doc058Blackbody>(std::move(blackbodyOptions));
+            std::visit([&](auto &options) {
+                using Config = std::remove_reference_t<decltype(options)>;
+                if constexpr (std::is_same_v<Config, BlackbodyConfig>)
+                    device->blackbody = std::make_unique<Doc058Blackbody>(std::move(options));
+                else if constexpr (std::is_same_v<Config, It6332aConfig>)
+                    device->power = std::make_unique<It6332aPower>(std::move(options));
+                else if constexpr (std::is_same_v<Config, GwsStenConfig>)
+                    device->oven = std::make_unique<GwsStenOven>(std::move(options));
+                else if constexpr (std::is_same_v<Config, Dmm6500Config>)
+                    device->dmm = std::make_unique<Dmm6500>(std::move(options));
+                else if constexpr (std::is_same_v<Config, DetectorSerialConfig>)
+                    device->detector = std::make_unique<DetectorSerial>(std::move(options));
+                else
+                    device->cooler = std::make_unique<CoolerModbus>(std::move(options));
+            }, parsed);
         } catch (...) {
             std::lock_guard lock(devicesMutex);
             for (const auto &endpoint : endpointKeys) openingEndpoints.erase(endpoint);

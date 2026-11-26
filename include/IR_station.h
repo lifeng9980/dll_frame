@@ -66,8 +66,8 @@ IR_STATION_API int32_t IR_ReadFrames(int32_t timeout_ms, IRFrameBatchView *batch
  */
 IR_STATION_API int32_t IR_FlushFrames(int32_t discard_frames, int32_t timeout_ms,
     int32_t *discarded, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
-/* 可以从其他线程请求停止当前采集或自动流程。等待取帧时分段检查取消，
-   同步设备事务结束后也会检查。原工作线程负责停流和收尾。空闲时的请求不影响下一次运行。 */
+/* 可以从其他线程请求停止本进程的活动采集或测量。取帧、仪器传输和重连等待支持取消。
+   原工作线程负责停流和收尾。空闲时的请求不影响下一次运行。 */
 IR_STATION_API void IR_RequestStop(void) IR_STATION_NOEXCEPT;
 /* 在采集线程停止源，保留打开状态，可再次启动。 */
 IR_STATION_API int32_t IR_StopFrames(char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;

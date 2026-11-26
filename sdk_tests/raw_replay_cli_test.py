@@ -67,6 +67,13 @@ def verify_offline_recipe(cli, work):
     assert check.stdout.strip() == "recipe=VALID", check.stdout
     bad_check = run_cli(cli, "--check", *station_args, *recipe_args, "--output", "check", cwd=cwd)
     assert bad_check.returncode != 0, bad_check.stdout
+
+    empty_output = run_cli(cli, "--run", *station_args, *recipe_args, "--output", "", cwd=cwd)
+    expect_exit(empty_output, 2)
+    assert "--run requires --output" in empty_output.stderr, empty_output.stderr
+    empty_check = run_cli(cli, "--check", *station_args, *recipe_args, "--output", "", cwd=cwd)
+    expect_exit(empty_check, 2)
+    assert "--output is only used with --run" in empty_check.stderr, empty_check.stderr
     assert not any(cwd.iterdir())
 
     missing_parent = cwd / "missing-parent"

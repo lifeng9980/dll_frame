@@ -147,7 +147,7 @@ typedef struct IRNoise3DCalibOutputs
 typedef struct IRNoise3DComputeParams
 {
     int32_t compute_mode;
-    int32_t thread_count;
+    int32_t thread_count; /* Reserved. The current implementation uses one thread. */
     int32_t hist_interval;
     int32_t reserved;
     double b_avg;

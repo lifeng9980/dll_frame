@@ -3,7 +3,6 @@
 #include <charconv>
 #include <cctype>
 #include <cmath>
-#include <thread>
 #include <utility>
 
 namespace ir::instruments {
@@ -14,8 +13,6 @@ using Clock = std::chrono::steady_clock;
 constexpr auto Escape = '\x1b';
 constexpr auto Return = '\r';
 constexpr auto NegativeAck = '\x15';
-constexpr int ReconnectRetries = 3;
-constexpr auto ReconnectDelay = std::chrono::milliseconds(500);
 constexpr uint8_t Name = 135, Serial = 136, HeadSerial = 56, Mode = 73, Temperature = 114,
                   Setpoint = 97, LowLimit = 67, HighLimit = 66, Stable = 92;
 
@@ -51,11 +48,6 @@ double numeric(std::string_view s)
             IR_IO_ERROR, "Invalid numeric DOC058 response");
     return value;
 }
-
-bool transportError(const Error &error)
-{
-    return error.code == IR_IO_ERROR || error.code == IR_TIMEOUT;
-}
 }
 
 Doc058Blackbody::Doc058Blackbody(BlackbodyConfig config) : config_(std::move(config)) { open(); }
@@ -65,11 +57,7 @@ bool Doc058Blackbody::tcp() const { return std::holds_alternative<transport::Tcp
 void Doc058Blackbody::open()
 {
     try {
-        if (tcp())
-            link_ = std::make_unique<transport::AsioLink>(std::get<transport::TcpEndpoint>(config_.endpoint),
-                                                         Clock::now() + config_.timeout);
-        else
-            link_ = std::make_unique<transport::AsioLink>(std::get<transport::SerialEndpoint>(config_.endpoint));
+        link_ = transport::openLink(config_.endpoint, Clock::now() + config_.timeout);
     } catch (...) {
         reconnectable_ = true;
         throw;
@@ -100,7 +88,7 @@ void Doc058Blackbody::open()
 std::string Doc058Blackbody::request(uint8_t function, std::string argument, bool write)
 {
     require(bool(link_), IR_IO_ERROR, "Blackbody is disconnected");
-    std::this_thread::sleep_until(nextCommand_);
+    transport::waitUntil(nextCommand_);
     if (tcp() && config_.head >= 0) {
         // PCN7-LT prefixes the probe index on the selected read functions.
         // The setpoint write carries it after the value instead.
@@ -140,25 +128,33 @@ std::string Doc058Blackbody::request(uint8_t function, std::string argument, boo
 
 double Doc058Blackbody::number(uint8_t function) { return numeric(request(function)); }
 
-double Doc058Blackbody::numberWithReconnect(uint8_t function)
+template <class Fn>
+auto Doc058Blackbody::withReconnect(Fn read)
 {
     int reconnects = 0;
     for (;;) {
         try {
             if (!link_) {
                 if (reconnectable_) {
-                    if (reconnects == ReconnectRetries)
+                    if (reconnects == transport::ReconnectRetries)
                         throw Error(IR_IO_ERROR, "Blackbody reconnect limit reached");
-                    std::this_thread::sleep_for(ReconnectDelay);
+                    transport::waitFor(transport::ReconnectDelay);
                     ++reconnects;
                 }
                 open();
             }
-            return number(function);
+            return read();
+        } catch (const Error &error) {
+            if (error.code == IR_CANCELLED || !reconnectable_ || reconnects == transport::ReconnectRetries) throw;
         } catch (...) {
-            if (!reconnectable_ || reconnects == ReconnectRetries) throw;
+            if (!reconnectable_ || reconnects == transport::ReconnectRetries) throw;
         }
     }
+}
+
+double Doc058Blackbody::numberWithReconnect(uint8_t function)
+{
+    return withReconnect([&] { return number(function); });
 }
 
 IRBlackbodyReading Doc058Blackbody::readOnce()
@@ -174,23 +170,7 @@ IRBlackbodyReading Doc058Blackbody::readOnce()
 
 IRBlackbodyReading Doc058Blackbody::read()
 {
-    int reconnects = 0;
-    for (;;) {
-        try {
-            if (!link_) {
-                if (reconnectable_) {
-                    if (reconnects == ReconnectRetries)
-                        throw Error(IR_IO_ERROR, "Blackbody reconnect limit reached");
-                    std::this_thread::sleep_for(ReconnectDelay);
-                    ++reconnects;
-                }
-                open();
-            }
-            return readOnce();
-        } catch (...) {
-            if (!reconnectable_ || reconnects == ReconnectRetries) throw;
-        }
-    }
+    return withReconnect([&] { return readOnce(); });
 }
 
 double Doc058Blackbody::set(double target)
@@ -209,7 +189,7 @@ double Doc058Blackbody::set(double target)
     try {
         request(Setpoint, std::string(digits, converted.ptr), true);
     } catch (const Error &error) {
-        if (!reconnectable_ || !transportError(error)) throw;
+        if (!reconnectable_ || !transport::isRetryableError(error.code)) throw;
         // The controller may have applied the setpoint before the link failed.
         // Reconnect and confirm it without sending the write a second time.
     }

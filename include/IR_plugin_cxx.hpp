@@ -22,6 +22,9 @@ inline int32_t ir_plugin_guard(char *err, int32_t err_bytes, Fn &&fn) noexcept
         const size_t max_len = static_cast<size_t>(err_bytes - 1);
         if (len > max_len)
             len = max_len;
+        // If UTF-8 text was cut inside a character, omit the incomplete character.
+        while (len > 0 && (static_cast<unsigned char>(msg[len]) & 0xc0) == 0x80)
+            --len;
         std::memcpy(err, msg, len);
         err[len] = '\0';
     };

@@ -4,19 +4,11 @@
 #include <charconv>
 #include <cmath>
 #include <system_error>
-#include <thread>
 
 namespace ir::instruments {
 namespace {
 using api::Error;
 using api::require;
-constexpr int ReconnectRetries = 3;
-constexpr auto ReconnectDelay = std::chrono::milliseconds(500);
-
-bool transportFailure(const Error &error)
-{
-    return error.code == IR_IO_ERROR || error.code == IR_TIMEOUT;
-}
 
 std::string cleanReply(std::string text)
 {
@@ -87,14 +79,7 @@ void Dmm6500::connect()
 {
     link_.reset();
     try {
-        if (std::holds_alternative<transport::TcpEndpoint>(config_.endpoint)) {
-            link_ = std::make_unique<transport::AsioLink>(
-                std::get<transport::TcpEndpoint>(config_.endpoint),
-                Clock::now() + config_.timeout);
-        } else {
-            link_ = std::make_unique<transport::AsioLink>(
-                std::get<transport::SerialEndpoint>(config_.endpoint));
-        }
+        link_ = transport::openLink(config_.endpoint, Clock::now() + config_.timeout);
         const auto idn = upper(query("*IDN?"));
         require(idn.find("DMM6500") != std::string::npos, IR_IO_ERROR,
                 "Device is not a Keithley DMM6500: " + idn);
@@ -153,7 +138,7 @@ void Dmm6500::setMode(int32_t mode)
         const int32_t actual = classifyFunction(query(":SENS:FUNC?"));
         require(actual == mode, IR_IO_ERROR, "DMM6500 mode readback mismatch after switch");
     } catch (const Error &err) {
-        if (transportFailure(err)) {
+        if (transport::isRetryableError(err.code)) {
             link_.reset();
             connect();
             const int32_t actual = classifyFunction(query(":SENS:FUNC?"));
@@ -183,12 +168,10 @@ IRDmmReading Dmm6500::read(int32_t expectedMode)
             if (!link_) connect();
             return readOnce(expectedMode);
         } catch (const Error &err) {
-            if (!transportFailure(err) || attempt >= ReconnectRetries) {
-                if (transportFailure(err)) link_.reset();
-                throw;
-            }
+            if (!transport::isRetryableError(err.code)) throw;
             link_.reset();
-            std::this_thread::sleep_for(ReconnectDelay);
+            if (attempt >= transport::ReconnectRetries) throw;
+            transport::waitFor(transport::ReconnectDelay);
         } catch (...) {
             link_.reset();
             throw;

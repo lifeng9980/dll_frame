@@ -65,7 +65,7 @@ typedef struct IRRecipeRunOptions {
  * options 可传 NULL；非 NULL 时可接收步骤级运行事件回调（IRRecipeStepCallback）。
  * IR_OK 表示测量完整完成；产品限值未满足时仍返回 IR_OK，result.json 的 run_status 为 NG。
  * 设备只在本配方引用时连接。同一进程一次只运行一条配方，其间其他采集调用返回 IR_BUSY。
- * 其他线程可以调用 IR_RequestStop。当前同步事务或计算结束后检查停止，由原线程完成收尾。
+ * 其他线程可以调用 IR_RequestStop。仪器传输等待和重连间隔支持提前取消，计算或同步后端操作返回后也会检查。原线程负责收尾。
  * result 由调用方持有，可传 NULL。执行和收尾均失败时，返回执行错误，收尾状态单独写入 result。
  */
 IR_STATION_API int32_t IR_RunRecipeJson(const char *station_json_utf8,

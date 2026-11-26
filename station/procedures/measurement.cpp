@@ -1,6 +1,7 @@
 #include "measurement.h"
 #include "api_common.h"
 #include "station/acquisition/frame_source.h"
+#include "station/instruments/asio_link.h"
 #include "station/instruments/device_lease.h"
 #include <algorithm>
 #include <chrono>
@@ -229,9 +230,13 @@ struct StandaloneStopGuard
 {
     ir::acquisition::Capture &capture;
     ir::acquisition::Capture::OperationScope scope;
+    const ir::transport::CancellationScope instrumentCancellation;
 
     explicit StandaloneStopGuard(ir::acquisition::Capture &c)
-        : capture(c), scope(c.enterOperationScope())
+        : capture(c), scope(c.enterOperationScope()),
+          instrumentCancellation(&c, [](const void *context) noexcept {
+              return static_cast<const ir::acquisition::Capture *>(context)->isStopRequested();
+          })
     {
         ir::api::require(scope != ir::acquisition::Capture::OperationScope::unavailable,
                          IR_BUSY, "Another cancellable SDK operation is active");

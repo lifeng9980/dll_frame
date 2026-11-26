@@ -1,6 +1,6 @@
 #include "IR_recipe.h"
 #include "IR_station.h"
-#include "IR_plugin_abi.h"
+#include "IR_plugin_cxx.hpp"
 #include <nlohmann/json.hpp>
 #include <atomic>
 #include <chrono>
@@ -9,9 +9,18 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 extern "C" int32_t ir_plugin_query(const IRMetricPlugin **out_list, uint32_t *out_count);
 
@@ -23,6 +32,28 @@ namespace {
 int gFailures = 0;
 void check(bool cond, const char *label, int line);
 #define CHECK(cond) check((cond), #cond, __LINE__)
+
+void testPluginGuardUtf8Error()
+{
+    const auto throwUtf8 = []() -> int32_t { throw std::runtime_error("A\xE6\xB5\x8B!"); };
+    const struct {
+        int32_t capacity;
+        std::string_view expected;
+    } cases[]{
+        {0, ""}, {1, ""}, {2, "A"}, {3, "A"}, {4, "A"},
+        {5, "A\xE6\xB5\x8B"}, {6, "A\xE6\xB5\x8B!"}
+    };
+    for (const auto &[capacity, expected] : cases) {
+        char err[] = "#######";
+        CHECK(ir_plugin_guard(err, capacity, throwUtf8) == IR_COMPUTATION_FAILED);
+        if (capacity > 0) {
+            CHECK(std::string_view(err, expected.size()) == expected);
+            CHECK(err[expected.size()] == '\0');
+        }
+        CHECK(err[capacity] == '#');
+    }
+    CHECK(ir_plugin_guard(nullptr, 0, throwUtf8) == IR_COMPUTATION_FAILED);
+}
 
 struct U32PluginHost {
     IRArrayView array{};
@@ -233,6 +264,7 @@ int main(int argc, char **argv)
     }
 
     try {
+    testPluginGuardUtf8Error();
     testU32PluginView();
     const fs::path srcPluginDir(argv[1]);
     const fs::path srcGood = srcPluginDir / pluginFilename("ir_test_plugin_good");
@@ -256,7 +288,7 @@ int main(int argc, char **argv)
     fs::copy_file(srcGood, goodCopy, fs::copy_options::overwrite_existing);
     fs::copy_file(srcBad, badCopy, fs::copy_options::overwrite_existing);
     const fs::path analysisLibrary(argv[2]);
-    const auto auxiliaryCopy = goodPluginDir / analysisLibrary.filename();
+    const auto auxiliaryCopy = goodPluginDir / pluginFilename("ir_test_auxiliary");
     fs::copy_file(analysisLibrary, auxiliaryCopy);
 
     const Json stationGood{
@@ -341,6 +373,9 @@ int main(int argc, char **argv)
                              err, sizeof err) == IR_BAD_ARGUMENT);
     CHECK(IR_CheckRecipeJson(stGood.c_str(), goodPassRecipe.dump().c_str(),
                              err, sizeof err) == IR_OK);
+#ifdef _WIN32
+    CHECK(GetModuleHandleW(auxiliaryCopy.c_str()) != nullptr);
+#endif
     auto stationWithExplicitAuxiliary = stationGood;
     stationWithExplicitAuxiliary["plugins"] = Json::array({utf8(auxiliaryCopy)});
     CHECK(IR_CheckRecipeJson(stationWithExplicitAuxiliary.dump().c_str(), goodPassRecipe.dump().c_str(),

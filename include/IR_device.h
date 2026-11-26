@@ -22,8 +22,9 @@ typedef struct IRBlackbodyReading {
     int32_t reserved;   /* 对齐保留，置 0 */
 } IRBlackbodyReading;
 
-/* PCN7-LT 配置 JSON 含 host，可选 tcp_port（默认 2101）、head（默认 -1）
- * 和 expected_head_serial。DCN1000 配置含 port，使用 9600 8N1。
+/* PCN7-LT 配置 JSON 含 host，可选 tcp_port（默认 2101）和 head（默认 -1）。
+ * 指定 expected_head_serial 时，head 须为 0 或 1。
+ * DCN1000 配置含 port，使用 9600 8N1，可选 expected_head_serial 校验探头 0 的序列号。
  * IT6332A 配置含 port，可选 baud_rate（默认 115200）。
  * 黑体 timeout_ms 默认 3000，IT6332A 默认 1200；单位均为毫秒。
  * 打开时确认设备身份。handle 由调用方提供，失败时写 0，成功后由 IR_CloseDevice 释放。

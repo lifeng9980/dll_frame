@@ -2,19 +2,11 @@
 #include "api_common.h"
 #include <array>
 #include <system_error>
-#include <thread>
 
 namespace ir::instruments {
 namespace {
 using api::Error;
 using api::require;
-constexpr int ReconnectRetries = 3;
-constexpr auto ReconnectDelay = std::chrono::milliseconds(500);
-
-bool transportFailure(const Error &error)
-{
-    return error.code == IR_IO_ERROR || error.code == IR_TIMEOUT;
-}
 
 uint16_t modbusCrc16(const uint8_t *data, size_t length)
 {
@@ -43,14 +35,7 @@ void CoolerModbus::connect()
 {
     link_.reset();
     try {
-        if (std::holds_alternative<transport::TcpEndpoint>(config_.endpoint)) {
-            link_ = std::make_unique<transport::AsioLink>(
-                std::get<transport::TcpEndpoint>(config_.endpoint),
-                Clock::now() + config_.timeout);
-        } else {
-            link_ = std::make_unique<transport::AsioLink>(
-                std::get<transport::SerialEndpoint>(config_.endpoint));
-        }
+        link_ = transport::openLink(config_.endpoint, Clock::now() + config_.timeout);
         (void)readOnce();
     } catch (...) {
         link_.reset();
@@ -67,8 +52,8 @@ auto CoolerModbus::withReconnect(Fn fn)
             return fn();
         } catch (const Error &err) {
             link_.reset();
-            if (!transportFailure(err) || attempt >= ReconnectRetries) throw;
-            std::this_thread::sleep_for(ReconnectDelay);
+            if (!transport::isRetryableError(err.code) || attempt >= transport::ReconnectRetries) throw;
+            transport::waitFor(transport::ReconnectDelay);
         } catch (...) {
             link_.reset();
             throw;

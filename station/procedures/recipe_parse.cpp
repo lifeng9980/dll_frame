@@ -1,6 +1,7 @@
 #include "recipe_config.h"
 #include "IR_device.h"
 #include "api_common.h"
+#include "station/instruments/device_config.h"
 #include <algorithm>
 #include <climits>
 #include <cmath>
@@ -233,79 +234,8 @@ StationConfig parseStation(const char *text)
         else if (kind == "cooler-modbus") config.kind = IR_COOLER_MODBUS;
         else throw Error(IR_BAD_ARGUMENT, path + ".kind is unsupported");
         const auto &connection = objectField(device.value(), "connection", path);
+        instruments::validateDeviceConnection(config.kind, connection, path + ".connection");
         config.connectionJson = connection.dump();
-        const auto validateTcpOrSerial = [&](std::vector<const char *> extraFields, int defaultTcpPort, int defaultBaud) {
-            const std::string connPath = path + ".connection";
-            const bool hasHost = connection.contains("host");
-            const bool hasPort = connection.contains("port");
-            require(hasHost != hasPort, IR_BAD_ARGUMENT,
-                    connPath + " must specify either 'host' or 'port', not both");
-            std::vector<const char *> allowed;
-            if (hasHost) {
-                allowed = {"host", "tcp_port", "timeout_ms"};
-                allowed.insert(allowed.end(), extraFields.begin(), extraFields.end());
-                for (auto it = connection.begin(); it != connection.end(); ++it) {
-                    require(std::any_of(allowed.begin(), allowed.end(), [&](const char *k) { return it.key() == k; }),
-                            IR_BAD_ARGUMENT, connPath + " has unknown or serial-only field: " + it.key());
-                }
-                (void)stringField(connection, "host", connPath);
-                (void)optionalInteger(connection, "tcp_port", defaultTcpPort, 1, 65535, connPath);
-            } else {
-                allowed = {"port", "baud_rate", "data_bits", "parity", "stop_bits", "timeout_ms"};
-                allowed.insert(allowed.end(), extraFields.begin(), extraFields.end());
-                for (auto it = connection.begin(); it != connection.end(); ++it) {
-                    require(std::any_of(allowed.begin(), allowed.end(), [&](const char *k) { return it.key() == k; }),
-                            IR_BAD_ARGUMENT, connPath + " has unknown or TCP-only field: " + it.key());
-                }
-                (void)stringField(connection, "port", connPath);
-                (void)optionalInteger(connection, "baud_rate", defaultBaud, 1200, 921600, connPath);
-                (void)optionalInteger(connection, "data_bits", 8, 5, 8, connPath);
-                const auto pText = optionalString(connection, "parity", "none", connPath);
-                require(pText == "none" || pText == "odd" || pText == "even",
-                        IR_BAD_ARGUMENT, connPath + ".parity must be none, odd, or even");
-                (void)optionalInteger(connection, "stop_bits", 1, 1, 2, connPath);
-            }
-            (void)optionalInteger(connection, "timeout_ms", 2000, 1, 60000, connPath);
-        };
-        if (config.kind == IR_PCN7LT) {
-            allowFields(connection, {"host", "tcp_port", "head", "expected_head_serial", "timeout_ms"},
-                        path + ".connection");
-            (void)stringField(connection, "host", path + ".connection");
-            (void)optionalInteger(connection, "tcp_port", 2101, 1, 65535, path + ".connection");
-            (void)optionalInteger(connection, "head", -1, -1, 1, path + ".connection");
-            (void)optionalInteger(connection, "timeout_ms", 3000, 1, 60000, path + ".connection");
-            const auto expected = optionalString(connection, "expected_head_serial", "",
-                                                 path + ".connection");
-            const auto head = connection.contains("head")
-                ? integerField(connection, "head", -1, 1, path + ".connection") : -1;
-            require(expected.empty() || head >= 0, IR_BAD_ARGUMENT,
-                    path + ".connection.expected_head_serial requires a head index");
-        } else if (config.kind == IR_IT6332A) {
-            validateTcpOrSerial({}, 5026, 115200);
-        } else if (config.kind == IR_OVEN_GWS_STEN) {
-            validateTcpOrSerial({"address", "delimiter", "min_setpoint_c", "max_setpoint_c"}, 5000, 9600);
-            (void)optionalInteger(connection, "address", 1, 1, 255, path + ".connection");
-            const auto delim = optionalString(connection, "delimiter", "crlf", path + ".connection");
-            require(delim == "crlf" || delim == "cr" || delim == "lf",
-                    IR_BAD_ARGUMENT, path + ".connection.delimiter must be crlf, cr, or lf");
-            const double minSp = optionalNumber(connection, "min_setpoint_c", -45.0, path + ".connection");
-            const double maxSp = optionalNumber(connection, "max_setpoint_c", 70.0, path + ".connection");
-            require(minSp <= maxSp, IR_BAD_ARGUMENT,
-                    path + ".connection min_setpoint_c must be <= max_setpoint_c");
-        } else if (config.kind == IR_DMM6500) {
-            validateTcpOrSerial({}, 5025, 115200);
-        } else if (config.kind == IR_DETECTOR_SERIAL) {
-            validateTcpOrSerial({"inter_command_ms"}, 2102, 115200);
-            (void)optionalInteger(connection, "inter_command_ms", 0, 0, 2000, path + ".connection");
-        } else if (config.kind == IR_COOLER_MODBUS) {
-            validateTcpOrSerial({"slave_address", "register_address"}, 5020, 9600);
-            (void)optionalInteger(connection, "slave_address", 1, 1, 247, path + ".connection");
-            (void)optionalInteger(connection, "register_address", 0x7A52, 0, 65535, path + ".connection");
-        } else {
-            allowFields(connection, {"port", "timeout_ms"}, path + ".connection");
-            (void)stringField(connection, "port", path + ".connection");
-            (void)optionalInteger(connection, "timeout_ms", 3000, 1, 60000, path + ".connection");
-        }
         station.devices.emplace(device.key(), std::move(config));
     }
     return station;

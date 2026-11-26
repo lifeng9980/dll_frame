@@ -5,20 +5,12 @@
 #include <charconv>
 #include <cmath>
 #include <system_error>
-#include <thread>
 #include <vector>
 
 namespace ir::instruments {
 namespace {
 using api::Error;
 using api::require;
-constexpr int ReconnectRetries = 3;
-constexpr auto ReconnectDelay = std::chrono::milliseconds(500);
-
-bool transportFailure(const Error &error)
-{
-    return error.code == IR_IO_ERROR || error.code == IR_TIMEOUT;
-}
 
 std::string_view trim(std::string_view s)
 {
@@ -110,14 +102,7 @@ void GwsStenOven::connect()
 {
     link_.reset();
     try {
-        if (std::holds_alternative<transport::TcpEndpoint>(config_.endpoint)) {
-            link_ = std::make_unique<transport::AsioLink>(
-                std::get<transport::TcpEndpoint>(config_.endpoint),
-                Clock::now() + config_.timeout);
-        } else {
-            link_ = std::make_unique<transport::AsioLink>(
-                std::get<transport::SerialEndpoint>(config_.endpoint));
-        }
+        link_ = transport::openLink(config_.endpoint, Clock::now() + config_.timeout);
         const auto modeReply = query("MODE?");
         (void)parseMode(modeReply);
     } catch (...) {
@@ -157,8 +142,8 @@ auto GwsStenOven::withReconnect(Fn fn)
             return fn();
         } catch (const Error &err) {
             link_.reset();
-            if (!transportFailure(err) || attempt >= ReconnectRetries) throw;
-            std::this_thread::sleep_for(ReconnectDelay);
+            if (!transport::isRetryableError(err.code) || attempt >= transport::ReconnectRetries) throw;
+            transport::waitFor(transport::ReconnectDelay);
         } catch (...) {
             link_.reset();
             throw;
@@ -199,7 +184,7 @@ double GwsStenOven::set(double targetC)
         require(r2.starts_with("OK"), IR_IO_ERROR, "GWS STEN rejected MODE, CONSTANT: " + r2);
     } catch (const Error &err) {
         link_.reset();
-        if (!transportFailure(err)) throw;
+        if (!transport::isRetryableError(err.code)) throw;
     }
     const auto readback = read();
     require(std::abs(readback.setpoint_c - targetC) <= 0.11, IR_IO_ERROR,
@@ -215,7 +200,7 @@ void GwsStenOven::stop()
         require(r1.starts_with("OK"), IR_IO_ERROR, "GWS STEN rejected MODE, STANDBY: " + r1);
     } catch (const Error &err) {
         link_.reset();
-        if (!transportFailure(err)) throw;
+        if (!transport::isRetryableError(err.code)) throw;
     }
     const auto verified = withReconnect([&] { return parseMode(query("MODE?")); });
     require(verified == IR_OVEN_MODE_STANDBY, IR_IO_ERROR,

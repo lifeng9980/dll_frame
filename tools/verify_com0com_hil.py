@@ -11,7 +11,6 @@ import json
 import math
 import os
 from pathlib import Path
-import shutil
 import subprocess
 from tempfile import TemporaryDirectory
 import time
@@ -188,39 +187,11 @@ def assert_safe_station_state(snap: dict):
     assert math.isclose(snap["blackbody"]["target_c"], 25.0, abs_tol=1e-6), snap["blackbody"]
 
 
-def find_dotnet10(explicit: Path | None) -> Path | None:
-    if explicit is not None:
-        return explicit if explicit.is_file() else None
-    candidates = []
-    which = shutil.which("dotnet")
-    if which and "Program Files (x86)" not in which:
-        candidates.append(Path(which))
-    candidates.extend([
-        Path(r"C:\Program Files\dotnet\dotnet.exe"),
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "dotnet" / "dotnet.exe",
-        Path.home() / ".dotnet" / "dotnet.exe",
-    ])
-    for cand in candidates:
-        if cand.is_file():
-            try:
-                out = subprocess.check_output([str(cand), "--list-sdks"], text=True, stderr=subprocess.DEVNULL)
-                for line in out.splitlines():
-                    head = line.strip().split(".", 1)[0]
-                    if head.isdigit() and int(head) >= 10:
-                        return cand
-            except Exception:
-                continue
-    return None
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--station-lib", type=Path, required=True)
     parser.add_argument("--cli", type=Path, required=True)
     parser.add_argument("--serial-map", type=Path, default=REPO_ROOT / "实验" / "hil_serial_map.json")
-    parser.add_argument("--csharp-project", type=Path, default=REPO_ROOT / "examples" / "csharp" / "IRSdkSample.csproj")
-    parser.add_argument("--python-recipe", type=Path, default=REPO_ROOT / "examples" / "python" / "ir_recipe.py")
-    parser.add_argument("--dotnet", type=Path, default=None)
     parser.add_argument("--work-parent", type=Path, default=None)
     args = parser.parse_args()
 

@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -38,6 +39,7 @@ fs::path pathFromUtf8(const std::string &value)
 #ifdef _WIN32
 std::string wideToUtf8(const std::wstring &value)
 {
+    if (value.empty()) return {};
     const int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
         static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
     if (bytes <= 0) throw std::runtime_error("Cannot convert command-line text to UTF-8");
@@ -117,7 +119,7 @@ struct Arguments {
     std::string mode;
     fs::path station;
     fs::path recipe;
-    fs::path output;
+    std::optional<fs::path> output;
 };
 
 constexpr char usage[] =
@@ -206,9 +208,9 @@ Arguments parseArguments(const std::vector<std::string> &values)
     }
     if (arguments.mode.empty() || arguments.station.empty() || arguments.recipe.empty())
         throw std::runtime_error(usage);
-    if (arguments.mode == "--run" && arguments.output.empty())
+    if (arguments.mode == "--run" && (!arguments.output || arguments.output->empty()))
         throw std::runtime_error("--run requires --output");
-    if (arguments.mode == "--check" && !arguments.output.empty())
+    if (arguments.mode == "--check" && arguments.output)
         throw std::runtime_error("--output is only used with --run");
     return arguments;
 }
@@ -238,7 +240,7 @@ int execute(const std::vector<std::string> &values)
             std::puts("recipe=VALID");
             return 0;
         }
-        const auto outputPath = fs::absolute(arguments.output).lexically_normal();
+        const auto outputPath = fs::absolute(*arguments.output).lexically_normal();
         checkOutputDirectory(outputPath);
 
         const auto outputText = pathUtf8(outputPath);

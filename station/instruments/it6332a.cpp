@@ -5,21 +5,13 @@
 #include <cctype>
 #include <cmath>
 #include <system_error>
-#include <thread>
 
 namespace ir::instruments {
 namespace {
 using api::Error;
 using api::require;
-constexpr int ReconnectRetries = 3;
-constexpr auto ReconnectDelay = std::chrono::milliseconds(500);
 constexpr double VoltageToleranceV = 0.05;
 constexpr double CurrentToleranceA = 0.02;
-
-bool transportFailure(const Error &error)
-{
-    return error.code == IR_IO_ERROR || error.code == IR_TIMEOUT;
-}
 
 std::string upper(std::string value)
 {
@@ -67,25 +59,18 @@ void It6332aPower::connect()
 {
     link_.reset();
     try {
-        if (std::holds_alternative<transport::TcpEndpoint>(config_.endpoint)) {
-            link_ = std::make_unique<transport::AsioLink>(
-                std::get<transport::TcpEndpoint>(config_.endpoint),
-                Clock::now() + config_.timeout);
-        } else {
-            link_ = std::make_unique<transport::AsioLink>(
-                std::get<transport::SerialEndpoint>(config_.endpoint));
-        }
-    } catch (const Error &) {
-        link_.reset();
-        throw;
+        link_ = transport::openLink(config_.endpoint, Clock::now() + config_.timeout);
+        const auto identity = query("*IDN?");
+        require(upper(identity).find("IT6332A") != std::string::npos,
+                IR_IO_ERROR, "Device is not an IT6332A: " + identity);
+        remote_ = false;
     } catch (const std::system_error &error) {
         link_.reset();
         throw Error(IR_IO_ERROR, std::string("Cannot open IT6332A transport: ") + error.what());
+    } catch (...) {
+        link_.reset();
+        throw;
     }
-    const auto identity = query("*IDN?");
-    if (upper(identity).find("IT6332A") == std::string::npos)
-        throw Error(IR_IO_ERROR, "Device is not an IT6332A: " + identity);
-    remote_ = false;
 }
 
 void It6332aPower::ensureRemote()
@@ -168,8 +153,8 @@ It6332aReading It6332aPower::read(int channel)
             return readOnce(channel);
         } catch (const Error &error) {
             link_.reset();
-            if (!transportFailure(error) || attempt >= ReconnectRetries) throw;
-            std::this_thread::sleep_for(ReconnectDelay);
+            if (!transport::isRetryableError(error.code) || attempt >= transport::ReconnectRetries) throw;
+            transport::waitFor(transport::ReconnectDelay);
         } catch (...) {
             link_.reset();
             throw;
@@ -194,7 +179,7 @@ It6332aReading It6332aPower::setChannel(int channel, double voltageV, double cur
         write("CURR " + currentText);
     } catch (const Error &error) {
         link_.reset();
-        if (!transportFailure(error)) throw;
+        if (!transport::isRetryableError(error.code)) throw;
         // A serial write can have reached the instrument before its link failed.
         // Reconnect and verify the state; never resend an uncertain write.
     }
@@ -216,7 +201,7 @@ It6332aReading It6332aPower::setOutput(int channel, bool enabled)
         write(enabled ? "CHAN:OUTP ON" : "CHAN:OUTP OFF");
     } catch (const Error &error) {
         link_.reset();
-        if (!transportFailure(error)) throw;
+        if (!transport::isRetryableError(error.code)) throw;
         // Confirm after reconnect instead of repeating an output command.
     }
 

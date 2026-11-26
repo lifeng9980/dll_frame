@@ -36,9 +36,13 @@ class Controller:
         self.stable = True
         self.writes = 0
         self.error = None
-        self.stable_reply = threading.Event()
-        self.stable_reply_count = 0
-        self.stable_reply_cond = threading.Condition()
+        self.temperature_requests = 0
+        self.silent_temperature = False
+        self.silent_temperature_request = threading.Event()
+
+    def silence_next_temperature_read(self):
+        self.silent_temperature_request.clear()
+        self.silent_temperature = True
 
     def reply(self, request, send):
         assert request[:1] == b"\x1b"
@@ -61,14 +65,20 @@ class Controller:
             assert direction == ord("0")
             head_reads = (56, 66, 67, 92, 97, 114) if self.tcp else (56,)
             assert arg == (b"0" if function in head_reads else b""), (function, arg)
-            if function == 114 and self.fail_read:
-                self.fail_read = False
-                if not self.tcp:
-                    return True  # Omit one response and trigger the serial deadline.
-                return False  # Disconnect and require fresh controller identification.
-            if function == 114 and self.disconnect_reads:
-                self.disconnect_reads -= 1
-                return not self.tcp
+            if function == 114:
+                self.temperature_requests += 1
+                if self.silent_temperature:
+                    self.silent_temperature = False
+                    self.silent_temperature_request.set()
+                    return True
+                if self.fail_read:
+                    self.fail_read = False
+                    if not self.tcp:
+                        return True  # Omit one response and trigger the serial deadline.
+                    return False  # Disconnect and require fresh controller identification.
+                if self.disconnect_reads:
+                    self.disconnect_reads -= 1
+                    return not self.tcp
             payload = {
                 135: b"PCN7-LT" if self.tcp else b"DCN1000",
                 136: b"DOC058-MOCK",
@@ -90,11 +100,6 @@ class Controller:
             send(payload + b"\r")
         else:
             send(b"\x1b" + bytes([function]) + payload + b"\r")
-        if function == 92:
-            self.stable_reply.set()
-            with self.stable_reply_cond:
-                self.stable_reply_count += 1
-                self.stable_reply_cond.notify_all()
         return True
 
     def serve(self, read, send, stop):
@@ -181,6 +186,7 @@ def exercise(sdk, controller, config):
 
 
 def exercise_wait_blackbody_stable(sdk, controller, config):
+    config = dict(config, timeout_ms=4000)
     handle = c.c_uint64()
     error = c.create_string_buffer(1024)
     error_args = [c.c_char_p, c.c_int32]
@@ -214,8 +220,8 @@ def exercise_wait_blackbody_stable(sdk, controller, config):
         )
         assert status == 7, (status, error.value)
 
-        with controller.stable_reply_cond:
-            before_replies = controller.stable_reply_count
+        before_requests = controller.temperature_requests
+        controller.silence_next_temperature_read()
         worker_status = []
         worker_err = c.create_string_buffer(1024)
         worker_reading = Reading()
@@ -231,19 +237,21 @@ def exercise_wait_blackbody_stable(sdk, controller, config):
         t = threading.Thread(target=wait_worker)
         t.start()
         try:
-            with controller.stable_reply_cond:
-                assert controller.stable_reply_cond.wait_for(
-                    lambda: controller.stable_reply_count > before_replies, timeout=2.0
-                ), "IR_WaitBlackbodyStable did not poll controller"
+            assert controller.silent_temperature_request.wait(2), "Standalone wait did not request a temperature"
             readback = c.c_double()
             assert sdk.IR_ReadBlackbody(handle, c.byref(reading), error, len(error)) == 9, error.value
             assert sdk.IR_SetBlackbody(handle, target, c.byref(readback), error, len(error)) == 9, error.value
             assert sdk.IR_CloseDevice(handle, error, len(error)) == 9, error.value
         finally:
             sdk.IR_RequestStop()
-            t.join(5)
-            assert not t.is_alive()
+            t.join(2)
+            finished_promptly = not t.is_alive()
+            if not finished_promptly:
+                t.join(8)
+                assert not t.is_alive(), "Standalone wait did not return after its I/O deadline"
+        assert finished_promptly, "Standalone cancellation waited for the instrument I/O timeout"
         assert worker_status == [8], (worker_status, worker_err.value)
+        assert controller.temperature_requests == before_requests + 1
 
         controller.stable = True
         status = sdk.IR_WaitBlackbodyStable(
@@ -373,6 +381,7 @@ def exercise_json_recipe(sdk, controller, config, fixture):
 
 
 def exercise_json_recipe_ownership(args, sdk, controller, config):
+    config = dict(config, timeout_ms=4000)
     error_args = [c.c_char_p, c.c_int32]
     sdk.IR_OpenDevice.argtypes = [c.c_int32, c.c_char_p, c.POINTER(c.c_uint64), *error_args]
     sdk.IR_RunRecipeJson.argtypes = [c.c_char_p, c.c_char_p, c.c_char_p, c.c_void_p, c.POINTER(RecipeResult), *error_args]
@@ -387,6 +396,7 @@ def exercise_json_recipe_ownership(args, sdk, controller, config):
             "0,1,1,2,RAW16_LE,16,little\n1,1,1,2,RAW16_LE,16,little\n", encoding="utf8")
 
         kind = "pcn7-lt" if controller.tcp else "dcn1000"
+        standby_target = 24.5
         station = {
             "schemav": 1,
             "acquisition": {"backend": "raw_replay", "source": str(fixture), "valid_bits": 16},
@@ -404,6 +414,7 @@ def exercise_json_recipe_ownership(args, sdk, controller, config):
                  "name": "noise", "input": "batch"},
                 {"id": "archive", "type": "save_raw", "input": "batch"},
             ],
+            "safety": {"blackbody_standby": [{"device": "bb", "target_c": standby_target}]},
         }
         retry_recipe = json.loads(json.dumps(recipe))
         retry_recipe["recipe_id"] = "json-retry-after-cancel"
@@ -413,7 +424,9 @@ def exercise_json_recipe_ownership(args, sdk, controller, config):
         retry_json = json.dumps(retry_recipe).encode()
 
         controller.stable = True
-        controller.stable_reply.clear()
+        before_requests = controller.temperature_requests
+        before_writes = controller.writes
+        controller.silence_next_temperature_read()
         first_output = fixture / "cancelled-run"
         retry_output = fixture / "retry-run"
         outcome = {}
@@ -440,30 +453,38 @@ def exercise_json_recipe_ownership(args, sdk, controller, config):
 
         worker = threading.Thread(target=run_recipe)
         worker.start()
-        assert controller.stable_reply.wait(4), "JSON recipe did not reach blackbody stabilization"
+        try:
+            assert controller.silent_temperature_request.wait(4), "JSON recipe did not request a temperature"
 
-        blocked_handle = c.c_uint64()
-        error = c.create_string_buffer(1024)
-        status = sdk.IR_OpenDevice(2 if controller.tcp else 3, json.dumps(config).encode(),
-                                   c.byref(blocked_handle), error, len(error))
-        assert status == 9 and blocked_handle.value == 0, (status, error.value)
+            blocked_handle = c.c_uint64()
+            error = c.create_string_buffer(1024)
+            status = sdk.IR_OpenDevice(2 if controller.tcp else 3, json.dumps(config).encode(),
+                                       c.byref(blocked_handle), error, len(error))
+            assert status == 9 and blocked_handle.value == 0, (status, error.value)
 
-        second = RecipeResult()
-        second_output = fixture / "concurrent-run"
-        status = sdk.IR_RunRecipeJson(station_json, retry_json, str(second_output).encode(),
-                                      None, c.byref(second), error, len(error))
-        assert status == 9 and second.failed_stage == 2 and not second_output.exists(), (status, error.value)
+            second = RecipeResult()
+            second_output = fixture / "concurrent-run"
+            status = sdk.IR_RunRecipeJson(station_json, retry_json, str(second_output).encode(),
+                                          None, c.byref(second), error, len(error))
+            assert status == 9 and second.failed_stage == 2 and not second_output.exists(), (status, error.value)
 
-        sdk.IR_RequestStop()
-        assert first_finished.wait(5), "JSON recipe did not finish cancellation"
-        assert outcome["first"][0] == 8 and b"stable" in outcome["first"][1].lower(), outcome["first"]
-        details = outcome["first"][2]
-        assert (details.completed_frames, details.failed_stage, details.failed_step_index, details.cleanup_status) == (0, 4, 0, 0)
-        assert json.loads((first_output / "result.json").read_text(encoding="utf-8"))["run_status"] == "CANCELLED"
+            sdk.IR_RequestStop()
+            assert first_finished.wait(2.5), "JSON recipe cancellation waited for the instrument I/O timeout"
+            assert outcome["first"][0] == 8 and b"stable" in outcome["first"][1].lower(), outcome["first"]
+            details = outcome["first"][2]
+            assert (details.completed_frames, details.failed_stage, details.failed_step_index,
+                    details.cleanup_status) == (0, 4, 0, 0)
+            result = json.loads((first_output / "result.json").read_text(encoding="utf-8"))
+            assert result["run_status"] == "CANCELLED"
+            assert controller.temperature_requests == before_requests + 1
+            assert controller.writes == before_writes + 2 and controller.target == standby_target
+        finally:
+            if not first_finished.is_set():
+                sdk.IR_RequestStop()
+            retry_allowed.set()
+            worker.join(8)
+            assert not worker.is_alive(), "JSON recipe did not finish after cancellation"
 
-        retry_allowed.set()
-        worker.join(8)
-        assert not worker.is_alive(), "JSON recipe did not finish after cancellation"
         assert outcome["retry"][0] == 0, outcome["retry"]
         result = json.loads((retry_output / "result.json").read_text(encoding="utf8"))
         assert result["completed_frames"] == 2 and result["run_status"] == "COMPLETED"

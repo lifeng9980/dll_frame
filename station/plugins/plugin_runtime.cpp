@@ -140,14 +140,12 @@ std::shared_ptr<LibraryHandle> openNativeLibrary(
     return handle;
 }
 
-void cacheNativeLibrary(const std::string &targetUtf8,
-                        std::shared_ptr<LibraryHandle> &handle)
+std::shared_ptr<LibraryHandle> cacheNativeLibrary(
+    const std::string &targetUtf8, const std::shared_ptr<LibraryHandle> &handle)
 {
     auto &cache = nativeLibraryCache();
     std::lock_guard<std::mutex> lock(cache.mutex);
-    const auto [it, inserted] = cache.handles.emplace(targetUtf8, handle);
-    if (!inserted)
-        handle = it->second;
+    return cache.handles.try_emplace(targetUtf8, handle).first->second;
 }
 
 bool isPluginFileExtension(const std::filesystem::path &p)
@@ -895,8 +893,11 @@ int32_t PluginMetricProvider::loadLibrary(const std::filesystem::path &libraryPa
     const auto rawSym = dlsym(lib->native, IR_PLUGIN_QUERY_SYMBOL);
 #endif
     if (rawSym == nullptr) {
-        if (!requireQuerySymbol)
+        if (!requireQuerySymbol) {
+            if (!fromCache)
+                cacheNativeLibrary(targetUtf8, lib);
             return IR_OK;
+        }
         setError(errOut, "Plugin missing symbol '" IR_PLUGIN_QUERY_SYMBOL "': " + targetUtf8);
         return IR_UNSUPPORTED;
     }
@@ -949,7 +950,7 @@ int32_t PluginMetricProvider::loadLibrary(const std::filesystem::path &libraryPa
         }
     }
     if (!fromCache)
-        cacheNativeLibrary(targetUtf8, lib);
+        lib = cacheNativeLibrary(targetUtf8, lib);
     for (auto &entry : candidateEntries) {
         entry.library = lib;
         metrics_.emplace(entry.methodName, std::move(entry));

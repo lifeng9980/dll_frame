@@ -94,34 +94,6 @@ class FrameSourceInfo(c.Structure):
     _fields_ = [("geometry", Geometry), ("data_type", c.c_int32)]
 
 
-class NoiseRecipe(c.Structure):
-    _fields_ = [
-        ("recipe_id", c.c_char_p),
-        ("detector", c.c_uint64),
-        ("blackbody", c.c_uint64),
-        ("integration_us", c.c_int32),
-        ("frame_hz", c.c_int32),
-        ("empty_us", c.c_int32),
-        ("temperature_c", c.c_double),
-        ("tolerance_c", c.c_double),
-        ("stable_window_ms", c.c_int32),
-        ("stable_timeout_ms", c.c_int32),
-        ("require_device_stable", c.c_int32),
-        ("frames", c.c_int32),
-        ("frame_timeout_ms", c.c_int32),
-    ]
-
-
-class NoiseResult(c.Structure):
-    _fields_ = [
-        ("completed", c.c_int32),
-        ("mean_dn", c.c_double),
-        ("noise_dn", c.c_double),
-        ("failed_step", c.c_int32),
-        ("cleanup_status", c.c_int32),
-    ]
-
-
 class RecipeResult(c.Structure):
     _fields_ = [
         ("completed_frames", c.c_int32),
