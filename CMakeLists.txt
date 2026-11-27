@@ -233,6 +233,9 @@ if(BUILD_TESTING)
     ir_add_metric_plugin(ir_test_plugin_bad_abi sdk_tests/plugins/test_plugin_bad_abi.cpp)
     ir_add_metric_plugin(ir_test_plugin_duplicate sdk_tests/plugins/test_plugin_duplicate.cpp)
     ir_add_metric_plugin(ir_test_power_driver sdk_tests/plugins/mock_power_driver.cpp)
+    if(WIN32)
+        target_link_libraries(ir_test_power_driver PRIVATE winhttp)
+    endif()
     add_executable(plugin_abi_test
         sdk_tests/plugin_abi_test.cpp
         sdk_tests/plugins/test_plugin_good.cpp)
@@ -293,7 +296,9 @@ if(BUILD_TESTING)
 
         add_test(NAME virtual_station_hil COMMAND "${Python3_EXECUTABLE}" -B
             "${PROJECT_SOURCE_DIR}/sdk_tests/virtual_station_hil_test.py"
-            "$<TARGET_FILE:IR_station>" "$<TARGET_FILE:ir_run_recipe>" --fixture-parent "${PROJECT_BINARY_DIR}")
+            "$<TARGET_FILE:IR_station>" "$<TARGET_FILE:ir_run_recipe>"
+            --fixture-parent "${PROJECT_BINARY_DIR}"
+            --power-driver "$<TARGET_FILE:ir_test_power_driver>")
         set_tests_properties(virtual_station_hil PROPERTIES TIMEOUT 60)
         if(WIN32 AND IR_ENABLE_COM0COM_HIL)
             add_test(NAME com0com_hil COMMAND "${Python3_EXECUTABLE}" -B

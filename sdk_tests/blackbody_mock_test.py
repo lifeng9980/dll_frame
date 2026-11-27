@@ -8,10 +8,50 @@ from pathlib import Path
 import select
 import socket
 import subprocess
+import sys
 import threading
 import time
 from tempfile import TemporaryDirectory
 
+
+def exercise_resident_simulator_protocol():
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "simulators"))
+    from ir_sim_devices import Blackbody
+
+    def ask(model, direction, function, arg=b""):
+        prefix = b"\x1b" + bytes([function])
+        reply = model.handle(b"\x1b" + direction + bytes([function]) + arg)
+        assert reply.startswith(prefix) and reply.endswith(b"\r"), reply
+        return reply[len(prefix):-1]
+
+    pcn = Blackbody(True, 20.0, True)
+    dcn = Blackbody(False, 20.0, True)
+    assert ask(pcn, b"0", 135) == b"PCN7-LT"
+    assert ask(dcn, b"0", 135) == b"DCN1000"
+    assert ask(dcn, b"0", 56, b"0") == b"0,HEAD-SIMULATOR"
+    assert ask(pcn, b"0", 56, b"1") == b"1,HEAD-SIMULATOR-1"
+    assert ask(pcn, b"1", 97, b"35.000,1") == b"\x06"
+    assert ask(pcn, b"0", 97, b"1") == b"35.000,1"
+    assert ask(pcn, b"0", 114, b"0") == b"20.000,0"
+    assert ask(pcn, b"0", 92, b"1") == b"1,1"
+    assert ask(dcn, b"0", 67) == b"-5"
+    assert ask(dcn, b"1", 97, b"nan") == b"\x15"
+    assert ask(dcn, b"1", 97, b"-6") == b"\x15"
+    assert ask(dcn, b"1", 97, b"30") == b"\x06"
+    assert ask(dcn, b"0", 114) == b"30.000"
+    assert ask(dcn, b"0", 56, b"1") == b"\x15"
+
+    from unittest.mock import patch
+
+    with patch("ir_sim_devices.time.monotonic", return_value=0.0) as now:
+        ramp = Blackbody(True, 20.0, True, ramp_c_per_s=2.0)
+        assert ask(ramp, b"1", 97, b"24") == b"\x06"
+        now.return_value = 1.0
+        assert ask(ramp, b"0", 114) == b"22.000"
+        assert ask(ramp, b"0", 92) == b"0"
+        now.return_value = 2.0
+        assert ask(ramp, b"0", 114) == b"24.000"
+        assert ask(ramp, b"0", 92) == b"1"
 
 
 class Reading(c.Structure):
@@ -491,6 +531,7 @@ def exercise_json_recipe_ownership(args, sdk, controller, config):
 
 
 def main():
+    exercise_resident_simulator_protocol()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=["tcp", "serial"])
     parser.add_argument("library", type=Path)

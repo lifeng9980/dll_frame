@@ -27,8 +27,12 @@ IR_IT6332A = 4
 IR_DMM6500 = 6
 IR_DETECTOR_SERIAL = 7
 IR_COOLER_MODBUS = 8
+IR_UDP6730 = 9
+IR_EXTERNAL_POWER = 10
 IR_DMM_MODE_DIODE = 4
 IR_IO_ERROR = 6
+IR_TIMEOUT = 7
+IR_UNSUPPORTED = 10
 
 
 class PowerReading(c.Structure):
@@ -87,6 +91,10 @@ def load_sdk(path: Path):
         c.c_uint64, c.c_int32, c.c_uint16, c.POINTER(DetectorCurrentReading), *err_args,
     ]
     sdk.IR_ReadCooler.argtypes = [c.c_uint64, c.POINTER(CoolerReading), *err_args]
+    sdk.IR_SetDetectorRegister.argtypes = [
+        c.c_uint64, c.c_uint8, c.POINTER(c.c_uint8), c.c_int32, *err_args,
+    ]
+    sdk.IR_CheckRecipeJson.argtypes = [c.c_char_p, c.c_char_p, *err_args]
     return sdk
 
 
@@ -198,11 +206,170 @@ def verify_cli_cancel(cli, work, station, control_url):
             kernel.FreeConsole()
 
 
+def verify_split_power_mode(sdk, work: Path, power_driver: Path | None):
+    sim_cmd = [
+        sys.executable, "-B",
+        str(REPO_ROOT / "simulators/ir_virtual_station.py"),
+        "--mode", "tcp",
+        "--power-mode", "split",
+        "--blackbody-port", "0",
+        "--power-port", "0",
+        "--oven-port", "0",
+        "--dmm-port", "0",
+        "--detector-port", "0",
+        "--cooler-port", "0",
+        "--control-port", "0",
+        "--interlock-detector-power",
+    ]
+    proc = subprocess.Popen(
+        sim_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    control_url = None
+    try:
+        endpoints = None
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                err = proc.stderr.read()
+                raise RuntimeError(f"split virtual station exited early (rc={proc.poll()}): {err}")
+            if line.startswith("VIRTUAL_STATION_READY="):
+                endpoints = json.loads(line.split("=", 1)[1])
+                break
+        control_url = endpoints["control_url"]
+        ctrl_port = int(endpoints["control_port"])
+
+        h_udp = c.c_uint64()
+        h_dmm = c.c_uint64()
+        h_det = c.c_uint64()
+        h_cool = c.c_uint64()
+        check(sdk.IR_OpenDevice, IR_UDP6730,
+              json.dumps({"host": "127.0.0.1", "tcp_port": endpoints["power"]["tcp_port"], "timeout_ms": 1200}).encode(),
+              c.byref(h_udp))
+        check(sdk.IR_OpenDevice, IR_DMM6500,
+              json.dumps({"host": "127.0.0.1", "tcp_port": endpoints["dmm"]["tcp_port"], "timeout_ms": 1200}).encode(),
+              c.byref(h_dmm))
+        check(sdk.IR_OpenDevice, IR_DETECTOR_SERIAL,
+              json.dumps({"host": "127.0.0.1", "tcp_port": endpoints["detector"]["tcp_port"], "timeout_ms": 1200}).encode(),
+              c.byref(h_det))
+        check(sdk.IR_OpenDevice, IR_COOLER_MODBUS,
+              json.dumps({"host": "127.0.0.1", "tcp_port": endpoints["cooler"]["tcp_port"], "timeout_ms": 1200}).encode(),
+              c.byref(h_cool))
+        try:
+            c_read = CoolerReading()
+            d_read = DmmReading()
+            p_read = PowerReading()
+            det_curr = DetectorCurrentReading()
+
+            # Baseline: UDP6730 OFF -> cooler 500 mV, DMM 0.500 V
+            check(sdk.IR_ReadCooler, h_cool, c.byref(c_read))
+            assert math.isclose(c_read.voltage_mv, 500.0, abs_tol=1e-6)
+            check(sdk.IR_ReadDmm, h_dmm, IR_DMM_MODE_DIODE, c.byref(d_read))
+            assert math.isclose(d_read.value, 0.500, abs_tol=1e-6)
+            check(sdk.IR_MeasureDetectorCurrent, h_det, 0, 1, c.byref(det_curr), expected=IR_TIMEOUT)
+
+            # Turn UDP6730 ON -> cooler 1080 mV, DMM 1.080 V; set_channel unsupported
+            check(sdk.IR_SetPowerChannel, h_udp, 1, 12.0, 2.0, c.byref(p_read), expected=IR_UNSUPPORTED)
+            check(sdk.IR_SetPowerOutput, h_udp, 1, 1, c.byref(p_read))
+            assert p_read.output_enabled == 1 and math.isclose(p_read.measured_v, 12.0, abs_tol=1e-3)
+            check(sdk.IR_ReadCooler, h_cool, c.byref(c_read))
+            assert math.isclose(c_read.voltage_mv, 1080.0, abs_tol=1e-6)
+            check(sdk.IR_ReadDmm, h_dmm, IR_DMM_MODE_DIODE, c.byref(d_read))
+            assert math.isclose(d_read.value, 1.080, abs_tol=1e-6)
+
+            if os.name == "nt" and power_driver is not None:
+                dp_cfg = {
+                    "driver_path": str(power_driver),
+                    "driver_id": "mock_power",
+                    "driver_config": {"control_port": ctrl_port, "timeout_ms": 1500},
+                }
+                dp_cfg_bytes = json.dumps(dp_cfg).encode()
+                h_dp = c.c_uint64()
+                check(sdk.IR_OpenDevice, IR_EXTERNAL_POWER, dp_cfg_bytes, c.byref(h_dp))
+                try:
+                    dp_read = PowerReading()
+                    check(sdk.IR_ReadPower, h_dp, 1, c.byref(dp_read))
+                    assert dp_read.output_enabled == 0
+                    check(sdk.IR_SetPowerChannel, h_dp, 1, 12.0, 2.0, c.byref(dp_read), expected=IR_UNSUPPORTED)
+                    check(sdk.IR_SetPowerOutput, h_dp, 1, 1, c.byref(dp_read))
+                    assert dp_read.output_enabled == 1 and math.isclose(dp_read.measured_v, 12.0, abs_tol=1e-6)
+                finally:
+                    check(sdk.IR_CloseDevice, h_dp)
+
+                # Shared state must persist across close & reopen
+                h_dp2 = c.c_uint64()
+                check(sdk.IR_OpenDevice, IR_EXTERNAL_POWER, dp_cfg_bytes, c.byref(h_dp2))
+                try:
+                    dp_read2 = PowerReading()
+                    check(sdk.IR_ReadPower, h_dp2, 1, c.byref(dp_read2))
+                    assert dp_read2.output_enabled == 1
+
+                    # Detector responds & retains registers while DP100 is ON
+                    reg_val = (c.c_uint8 * 1)(8)
+                    check(sdk.IR_SetDetectorRegister, h_det, 0x65, reg_val, 1)
+                    check(sdk.IR_MeasureDetectorCurrent, h_det, 0, 1, c.byref(det_curr))
+                    assert math.isclose(det_curr.current_ma, 15.0, abs_tol=1e-2)
+                    snap = http_json(f"{control_url}/state")
+                    assert snap["power"]["mode"] == "split"
+                    assert snap["power"]["output"] == [True, True, False]
+                    assert snap["detector"]["powered"] and snap["detector"]["registers"]
+
+                    # Recipe precheck rejects power_set on external-power
+                    raw_dir = work / "split-raw"
+                    write_raw_replay_fixture(raw_dir)
+                    split_station = {
+                        "schemav": 1,
+                        "acquisition": {"backend": "raw_replay", "source": str(raw_dir), "valid_bits": 16},
+                        "devices": {"detector_power": {"kind": "external-power", "connection": dp_cfg}},
+                    }
+                    bad_recipe = {
+                        "schemav": 1,
+                        "recipe_id": "reject-set",
+                        "steps": [{"id": "s1", "type": "power_set", "device": "detector_power",
+                                   "channel": 1, "voltage_v": 12.0, "current_limit_a": 2.0}],
+                    }
+                    check(sdk.IR_CheckRecipeJson, json.dumps(split_station).encode(),
+                          json.dumps(bad_recipe).encode(), expected=IR_UNSUPPORTED)
+
+                    # Turn DP100 OFF -> detector registers cleared & no ACK (IR_TIMEOUT)
+                    check(sdk.IR_SetPowerOutput, h_dp2, 1, 0, c.byref(dp_read2))
+                    assert dp_read2.output_enabled == 0
+                    check(sdk.IR_MeasureDetectorCurrent, h_det, 0, 1, c.byref(det_curr), expected=IR_TIMEOUT)
+                    snap = http_json(f"{control_url}/state")
+                    assert not snap["detector"]["powered"] and not snap["detector"]["registers"]
+                    assert snap["power"]["output"] == [True, False, False]
+                finally:
+                    check(sdk.IR_CloseDevice, h_dp2)
+
+            check(sdk.IR_SetPowerOutput, h_udp, 1, 0, c.byref(p_read))
+            check(sdk.IR_ReadDmm, h_dmm, IR_DMM_MODE_DIODE, c.byref(d_read))
+            assert math.isclose(d_read.value, 0.500, abs_tol=1e-6)
+        finally:
+            check(sdk.IR_CloseDevice, h_cool)
+            check(sdk.IR_CloseDevice, h_det)
+            check(sdk.IR_CloseDevice, h_dmm)
+            check(sdk.IR_CloseDevice, h_udp)
+    finally:
+        if control_url:
+            try:
+                http_json(f"{control_url}/shutdown", {})
+            except Exception:
+                pass
+        if proc.poll() is None:
+            proc.terminate()
+        proc.wait(timeout=5)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("library", type=Path)
     parser.add_argument("cli", type=Path)
     parser.add_argument("--fixture-parent", type=Path, default=None)
+    parser.add_argument("--power-driver", type=Path, default=None)
     args = parser.parse_args()
 
     assert c.sizeof(PowerReading) == 40
@@ -230,6 +397,7 @@ def main():
             "--detector-port", "0",
             "--cooler-port", "0",
             "--control-port", "0",
+            "--interlock-detector-power",
             "--emit-station-json", str(station_path),
             "--emit-blackbody-config", str(host_bb_path),
             "--raw-source", str(raw_dir),
@@ -260,7 +428,9 @@ def main():
             assert host_bb["driver"] == "pcn7lt" and host_bb["transport"] == "tcp"
             assert host_bb["driver_options"]["expected_head_serial"] == "HEAD-SIMULATOR"
             amb = query_doc058_fn116(host_bb["connection"]["host"], host_bb["connection"]["port"])
-            assert math.isclose(float(amb), 25.0, abs_tol=1e-3), amb
+            ambient_value, separator, ambient_head = amb.partition(",")
+            assert separator and ambient_head == "0", amb
+            assert math.isclose(float(ambient_value), 25.0, abs_tol=1e-3), amb
 
             # Step A: coupled HIL physics via direct C ABI
             h_pwr = c.c_uint64()
@@ -289,8 +459,8 @@ def main():
                 assert math.isclose(c_read.voltage_mv, 500.0, abs_tol=1e-6), c_read.voltage_mv
                 check(sdk.IR_ReadDmm, h_dmm, IR_DMM_MODE_DIODE, c.byref(d_read))
                 assert math.isclose(d_read.value, 0.500, abs_tol=1e-6), d_read.value
-                check(sdk.IR_MeasureDetectorCurrent, h_det, 0, 1, c.byref(det_curr))
-                assert math.isclose(det_curr.current_ma, 0.0, abs_tol=1e-3), det_curr.current_ma
+                check(sdk.IR_MeasureDetectorCurrent, h_det, 0, 1, c.byref(det_curr), expected=IR_TIMEOUT)
+                assert not http_json(f"{control_url}/state")["detector"]["powered"]
 
                 # Turn CH1 ON -> observe startup >=0.3 A then steady <0.3 A, plus cooler/DMM transition
                 p_read = PowerReading()
@@ -325,6 +495,8 @@ def main():
 
                 # Turn outputs OFF before recipe CLI run
                 check(sdk.IR_SetPowerOutput, h_pwr, 2, 0, c.byref(p_read))
+                check(sdk.IR_MeasureDetectorCurrent, h_det, 0, 1, c.byref(det_curr), expected=IR_TIMEOUT)
+                assert not http_json(f"{control_url}/state")["detector"]["registers"]
                 check(sdk.IR_SetPowerOutput, h_pwr, 1, 0, c.byref(p_read))
             finally:
                 check(sdk.IR_CloseDevice, h_cool)
@@ -367,7 +539,8 @@ def main():
             assert snap["power"]["output"] == [False, False, False], snap["power"]
             assert snap["oven"]["mode"] == "STANDBY", snap["oven"]
             assert math.isclose(snap["blackbody"]["target_c"], 25.0, abs_tol=1e-6), snap["blackbody"]
-            assert snap["detector"]["registers"].get("0x65") == "08", snap["detector"]
+            assert not snap["detector"]["powered"] and not snap["detector"]["registers"], snap["detector"]
+            assert snap["detector"]["frames_received"] > 3, snap["detector"]
             if os.name == "nt":
                 verify_cli_cancel(args.cli, work, station_path, control_url)
         finally:
@@ -379,6 +552,7 @@ def main():
             if proc.poll() is None:
                 proc.terminate()
             proc.wait(timeout=5)
+        verify_split_power_mode(sdk, work, args.power_driver.resolve() if args.power_driver else None)
 
 
 if __name__ == "__main__":

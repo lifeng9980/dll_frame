@@ -2,6 +2,8 @@
 """Small TCP and serial simulators for the IR SDK's device examples."""
 
 import argparse
+from dataclasses import dataclass
+import math
 import os
 import select
 import signal
@@ -56,12 +58,22 @@ def parse_doc058_drop_spec(spec):
     return (direction, function)
 
 
+@dataclass
+class BlackbodyHead:
+    target: float
+    actual: float
+    serial: bytes
+
+
 class Blackbody:
     def __init__(self, tcp, temperature, stable, drop_command="", drop_count=0, log_io=False,
                  ramp_c_per_s=0.0):
         self.tcp = tcp
-        self.target = temperature
-        self.actual = temperature
+        self._heads = [BlackbodyHead(temperature, temperature, b"HEAD-SIMULATOR")]
+        if tcp:
+            self._heads.append(BlackbodyHead(temperature, temperature, b"HEAD-SIMULATOR-1"))
+        self.minimum = -60 if tcp else -5
+        self.maximum = 100
         self.stable = stable
         self.drop_command = drop_command
         self.drop_count = drop_count
@@ -70,19 +82,33 @@ class Blackbody:
         self._last_mono = time.monotonic()
         self._drop_spec = parse_doc058_drop_spec(drop_command) if drop_command else None
 
+    @property
+    def target(self):
+        return self._heads[0].target
+
+    @target.setter
+    def target(self, value):
+        self._heads[0].target = value
+
+    @property
+    def actual(self):
+        return self._heads[0].actual
+
+    @actual.setter
+    def actual(self, value):
+        self._heads[0].actual = value
+
     def _advance_ramp(self):
         now = time.monotonic()
         dt = max(0.0, now - self._last_mono)
         self._last_mono = now
-        if self.ramp_c_per_s <= 0.0:
-            self.actual = self.target
-            return
-        delta = self.target - self.actual
         step = self.ramp_c_per_s * dt
-        if abs(delta) <= step:
-            self.actual = self.target
-        else:
-            self.actual += step if delta > 0 else -step
+        for head in self._heads:
+            delta = head.target - head.actual
+            if self.ramp_c_per_s <= 0.0 or abs(delta) <= step:
+                head.actual = head.target
+            else:
+                head.actual += math.copysign(step, delta)
 
     def _should_drop(self, direction, function):
         if not self.drop_command or self.drop_count <= 0:
@@ -105,31 +131,23 @@ class Blackbody:
         direction = request[1]
         function = request[2]
         argument = request[3:]
-        if direction == ord("1") and function == 97:
-            try:
-                self.target = float(argument.split(b",", 1)[0])
+        try:
+            if direction == ord("1") and function == 97:
+                value, separator, index = argument.partition(b",")
+                head = self._get_head(index) if separator else self._heads[0]
+                target = float(value)
+                if not self.minimum <= target <= self.maximum:
+                    raise ValueError("setpoint outside simulated range")
+                head.target = target
                 if self.ramp_c_per_s <= 0.0:
-                    self.actual = self.target
-            except ValueError:
-                return b"\x1b" + bytes([function]) + b"\x15\r"
-            payload = b"\x06"
-        elif direction == ord("0"):
-            is_stable = self.stable and (abs(self.actual - self.target) <= 0.02)
-            payloads = {
-                135: b"PCN7-LT" if self.tcp else b"DCN1000",
-                136: b"IR-SIMULATOR",
-                56: b"0,HEAD-SIMULATOR",
-                73: b"0",
-                114: f"{self.actual:.3f}".encode("ascii"),
-                116: b"25.000",
-                97: f"{self.target:.3f}".encode("ascii"),
-                67: b"-60",
-                66: b"100",
-                92: b"1" if is_stable else b"0",
-            }
-            payload = payloads.get(function, b"")
-        else:
-            return b""
+                    head.actual = target
+                payload = b"\x06"
+            elif direction == ord("0"):
+                payload = self._read(function, argument)
+            else:
+                payload = b"\x15"
+        except ValueError:
+            payload = b"\x15"
         if self._should_drop(direction, function):
             self.drop_count -= 1
             if self.log_io:
@@ -139,6 +157,35 @@ class Blackbody:
                 )
             return None
         return b"\x1b" + bytes([function]) + payload + b"\r"
+
+    def _get_head(self, index):
+        if index == b"0":
+            return self._heads[0]
+        if index == b"1" and self.tcp:
+            return self._heads[1]
+        raise ValueError("unknown head")
+
+    def _read(self, function, argument):
+        identity = {135: b"PCN7-LT" if self.tcp else b"DCN1000", 136: b"IR-SIMULATOR", 73: b"0"}
+        if function in identity:
+            if argument:
+                return b"\x15"
+            return identity[function]
+        head = self._get_head(argument) if argument else self._heads[0]
+        if function == 56:
+            return (argument or b"0") + b"," + head.serial
+        is_stable = self.stable and abs(head.actual - head.target) <= 0.02
+        readings = {
+            114: f"{head.actual:.3f}".encode("ascii"),
+            116: b"25.000",
+            97: f"{head.target:.3f}".encode("ascii"),
+            67: str(self.minimum).encode("ascii"),
+            66: str(self.maximum).encode("ascii"),
+            92: b"1" if is_stable else b"0",
+        }
+        if function not in readings:
+            return b"\x15"
+        return readings[function] + (b"," + argument if argument else b"")
 
 
 class It6332a:
@@ -230,23 +277,31 @@ class It6332a:
 
 
 class Udp6730:
-    def __init__(self, voltage=12.0, current_limit=2.0, output=False):
+    def __init__(self, voltage=12.0, current_limit=2.0, output=False, log_io=False, on_output_changed=None):
         self.voltage = float(voltage)
         self.current_limit = float(current_limit)
         self.output = bool(output)
+        self.log_io = log_io
+        self.on_output_changed = on_output_changed
 
     def handle(self, command):
         command = command.strip().decode("ascii", errors="replace")
         upper = command.upper()
+        if self.log_io:
+            print(f"[UDP6730] <- {command}", flush=True)
         if upper == "*IDN?":
             return b"UNI-T,UDP6730,IR-SIMULATOR,1.0\n"
         if upper == "OUTP?" or upper == "OUTPUT?":
             return (b"ON\n" if self.output else b"OFF\n")
         if upper in ("OUTP ON", "OUTPUT ON"):
             self.output = True
+            if self.on_output_changed:
+                self.on_output_changed(1, True)
             return None
         if upper in ("OUTP OFF", "OUTPUT OFF"):
             self.output = False
+            if self.on_output_changed:
+                self.on_output_changed(1, False)
             return None
         if upper in ("VOLT?", "VOLTAGE?"):
             return f"{self.voltage:.4f}\n".encode("ascii")
@@ -363,16 +418,21 @@ class Dmm6500:
 
 
 class DetectorController:
-    def __init__(self, bad_ack=False, log_io=False, current_ma_fn=None):
+    def __init__(self, bad_ack=False, log_io=False, current_ma_fn=None, powered_fn=None):
         self.bad_ack = bad_ack
         self.log_io = log_io
         self.current_ma_fn = current_ma_fn
+        self.powered_fn = powered_fn
         self.gain_code = 0
         self.channel_code = 0
         self.registers = {}
         self.frames = []
 
     def handle_frame(self, frame):
+        if self.powered_fn is not None and not self.powered_fn():
+            if self.log_io:
+                print("[DET DROP] detector power off", flush=True)
+            return None
         cmd_code = frame[2]
         payload = frame[3:]
         self.frames.append((cmd_code, bytes(payload)))
@@ -703,6 +763,8 @@ def main():
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--temperature", type=float, default=24.875)
     parser.add_argument("--unstable", action="store_true", help="report the blackbody as not stable")
+    parser.add_argument("--ramp-c-per-s", type=float, default=0.0,
+                        help="blackbody ramp rate in degrees C per second (0 changes instantly)")
     parser.add_argument("--cooler-profile", action="store_true",
                         help="simulate IT6332A CH1 startup current (>0.3 A) settling to <0.3 A")
     parser.add_argument("--address", type=int, default=1, help="oven station address (1..255)")
@@ -725,6 +787,13 @@ def main():
                         help="log received requests, dropped commands, and transmitted replies")
     args = parser.parse_args()
 
+    if args.mode.startswith("blackbody-"):
+        minimum = -60 if args.mode == "blackbody-tcp" else -5
+        if not minimum <= args.temperature <= 100:
+            parser.error(f"--temperature must be in {minimum}..100 for {args.mode}")
+        if not math.isfinite(args.ramp_c_per_s) or args.ramp_c_per_s < 0:
+            parser.error("--ramp-c-per-s must be finite and nonnegative")
+
     drop_command = args.drop_command.strip()
     drop_count = args.drop_count
     if drop_count is None:
@@ -741,11 +810,22 @@ def main():
 
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())
-    if args.mode == "blackbody-tcp":
-        controller = Blackbody(True, args.temperature, not args.unstable,
-                               drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
-        serve_tcp(args.host, args.port, controller, stop, delimiter=b"\r",
-                  fragment=args.fragment, log_io=args.log_io)
+    if args.mode.startswith("blackbody-"):
+        controller = Blackbody(
+            args.mode == "blackbody-tcp", args.temperature, not args.unstable,
+            drop_command=drop_command, drop_count=drop_count, log_io=args.log_io,
+            ramp_c_per_s=args.ramp_c_per_s,
+        )
+        if args.mode == "blackbody-tcp":
+            serve_tcp(args.host, args.port, controller, stop, delimiter=b"\r",
+                      fragment=args.fragment, log_io=args.log_io)
+        elif args.mode == "blackbody-pty":
+            serve_pty(controller, b"\r", 9600, stop, fragment=args.fragment, log_io=args.log_io)
+        else:
+            if not args.device:
+                parser.error("--device is required for serial modes")
+            serve_serial(args.device, 9600, controller, b"\r", stop,
+                         fragment=args.fragment, log_io=args.log_io)
         return
     if args.mode == "oven-tcp":
         controller = GwsStenOven(args.address, args.temperature, args.temperature, "CONSTANT",
@@ -776,11 +856,6 @@ def main():
         serve_tcp(args.host, args.port, controller, stop, delimiter=None,
                   fragment=args.fragment, log_io=args.log_io, consume_fn=_consume_modbus_buffer)
         return
-    if args.mode == "blackbody-pty":
-        controller = Blackbody(False, args.temperature, not args.unstable,
-                               drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
-        serve_pty(controller, b"\r", 9600, stop, fragment=args.fragment, log_io=args.log_io)
-        return
     if args.mode == "oven-pty":
         controller = GwsStenOven(args.address, args.temperature, args.temperature, "CONSTANT",
                                  args.alarm, drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
@@ -810,12 +885,7 @@ def main():
         parser.error("--device is required for serial modes")
     stop_bits = 1
     consume_fn = None
-    if args.mode == "blackbody-serial":
-        controller = Blackbody(False, args.temperature, not args.unstable,
-                               drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
-        delimiter = b"\r"
-        baud = 9600
-    elif args.mode == "oven-serial":
+    if args.mode == "oven-serial":
         controller = GwsStenOven(args.address, args.temperature, args.temperature, "CONSTANT",
                                  args.alarm, drop_command=drop_command, drop_count=drop_count, log_io=args.log_io)
         delimiter = b"\r\n"

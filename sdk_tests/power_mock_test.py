@@ -607,6 +607,36 @@ def test_udp6730_and_external_power(sdk, root, base_station, base_recipe, power_
             ext_set = dict(base_recipe, steps=[{"id": "s", "type": "power_set", "device": "ext", "channel": 1, "voltage_v": 5.0, "current_limit_a": 1.0}])
             assert sdk.IR_CheckRecipeJson(json.dumps(ext_station).encode(), json.dumps(ext_set).encode(), err, len(err)) == 10
             assert sdk.IR_CloseDevice(ext_h, err, len(err)) == 6
+
+            if os.name == "nt":
+                # 5. Verify control_port config validation (no connection during validate) & bounded error when offline
+                for bad_ctrl in (
+                    {"control_port": "29101"},
+                    {"control_port": 0},
+                    {"control_port": 70000},
+                    {"control_port": 29101, "host": "127.0.0.1"},
+                ):
+                    bad_ctrl_cfg = {"driver_path": str(power_driver), "driver_id": "mock_power", "driver_config": bad_ctrl}
+                    assert sdk.IR_OpenDevice(10, json.dumps(bad_ctrl_cfg).encode(), c.byref(ext_h), err, len(err)) == 2
+
+                # Pick an unused ephemeral port; IR_CheckRecipeJson must pass without connecting
+                probe_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                probe_sock.bind(("127.0.0.1", 0))
+                unused_port = probe_sock.getsockname()[1]
+                probe_sock.close()
+                offline_cfg = {
+                    "driver_path": str(power_driver),
+                    "driver_id": "mock_power",
+                    "driver_config": {"control_port": unused_port, "timeout_ms": 200},
+                }
+                offline_station = dict(base_station, devices={"ext": {"kind": "external-power", "connection": offline_cfg}})
+                assert sdk.IR_CheckRecipeJson(json.dumps(offline_station).encode(), json.dumps(base_recipe).encode(), err, len(err)) == 0, err.value
+                assert sdk.IR_CheckRecipeJson(json.dumps(offline_station).encode(), json.dumps(ext_set).encode(), err, len(err)) == 10
+                t0 = time.monotonic()
+                rc_offline = sdk.IR_OpenDevice(10, json.dumps(offline_cfg).encode(), c.byref(ext_h), err, len(err))
+                elapsed = time.monotonic() - t0
+                assert rc_offline in (6, 7), (rc_offline, err.value)
+                assert elapsed < 3.0, elapsed
     finally:
         stop_srv.set()
         it_srv.close()

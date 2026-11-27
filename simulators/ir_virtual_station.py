@@ -20,6 +20,7 @@ from ir_sim_devices import (
     Dmm6500,
     GwsStenOven,
     It6332a,
+    Udp6730,
     _consume_modbus_buffer,
     _dispatch_buffer,
     close_serial,
@@ -31,35 +32,93 @@ from ir_sim_devices import (
 class VirtualStationState:
     """Thread-safe shared physical model linking power, cooler, DMM, blackbody, oven, and detector."""
 
-    def __init__(self, ramp_c_per_s=0.0, log_io=False):
+    def __init__(self, ramp_c_per_s=0.0, log_io=False, *, blackbody_tcp=True,
+                 interlock_detector_power=False, power_mode="it6332a"):
+        if power_mode not in ("it6332a", "split"):
+            raise ValueError(f"Unsupported power_mode: {power_mode}")
         self.lock = threading.RLock()
         self.cooler_fault_mv = None
         self.dmm_fault_value = None
         self.endpoints = {}
 
-        self.blackbody = Blackbody(True, 25.0, True, log_io=log_io, ramp_c_per_s=ramp_c_per_s)
-        self.power = It6332a(log_io=log_io, cooler_profile=True)
-        self.power.on_output_changed = self._on_power_output_changed
+        self.power_mode = power_mode
+        self.interlock_detector_power = interlock_detector_power
+        self.blackbody = Blackbody(blackbody_tcp, 25.0, True, log_io=log_io, ramp_c_per_s=ramp_c_per_s)
+        if power_mode == "split":
+            self.power = None
+            self.cooler_power = Udp6730(
+                voltage=12.0, current_limit=2.0, output=False,
+                log_io=log_io, on_output_changed=self._on_power_output_changed,
+            )
+            self.dp100_voltage = 12.0
+            self.dp100_current_limit = 2.0
+            self.dp100_output = False
+        else:
+            self.power = It6332a(log_io=log_io, cooler_profile=True)
+            self.power.on_output_changed = self._on_power_output_changed
+            self.cooler_power = None
+            self.dp100_voltage = 0.0
+            self.dp100_current_limit = 0.0
+            self.dp100_output = False
         self.oven = GwsStenOven(
             address=1, temperature=25.0, setpoint=25.0, mode="STANDBY",
             log_io=log_io, auto_track=(ramp_c_per_s <= 0.0),
         )
         self.dmm = Dmm6500(mode="DIOD", value=0.500, log_io=log_io, value_fn=self.dmm_value)
-        self.detector = DetectorController(log_io=log_io, current_ma_fn=self.detector_current_ma)
+        self.detector = DetectorController(
+            log_io=log_io, current_ma_fn=self.detector_current_ma,
+            powered_fn=self.detector_powered if interlock_detector_power else None,
+        )
         self.cooler = CoolerModbus(
             slave_address=1, register_address=0x7A52, voltage_mv=500.0,
             mv_fn=self.cooler_mv, log_io=log_io,
         )
 
-    def _on_power_output_changed(self, channel, enabled):
+    def _clear_detector_state(self):
         with self.lock:
-            pass  # Outputs live in self.power.output; coupled queries read dynamically.
+            self.detector.registers.clear()
+            self.detector.gain_code = 0
+            self.detector.channel_code = 0
+
+    def _on_power_output_changed(self, channel, enabled):
+        if self.power_mode == "it6332a" and self.interlock_detector_power and channel == 2 and not enabled:
+            self._clear_detector_state()
+
+    def cooler_powered(self):
+        with self.lock:
+            if self.power_mode == "split":
+                return self.cooler_power.output
+            return self.power.output[0]
+
+    def detector_powered(self):
+        with self.lock:
+            if self.power_mode == "split":
+                return self.dp100_output
+            return self.power.output[1]
+
+    def dp100_reading(self):
+        with self.lock:
+            enabled = bool(self.dp100_output)
+            return {
+                "setpoint_v": self.dp100_voltage,
+                "current_limit_a": self.dp100_current_limit,
+                "measured_v": self.dp100_voltage if enabled else 0.0,
+                "measured_a": 0.25 if enabled else 0.0,
+                "output_enabled": enabled,
+            }
+
+    def set_dp100_output(self, enabled):
+        with self.lock:
+            self.dp100_output = bool(enabled)
+            if self.interlock_detector_power and not self.dp100_output:
+                self._clear_detector_state()
+            return self.dp100_reading()
 
     def cooler_mv(self):
         with self.lock:
             if self.cooler_fault_mv is not None:
                 return float(self.cooler_fault_mv)
-            return 1080.0 if self.power.output[0] else 500.0
+            return 1080.0 if self.cooler_powered() else 500.0
 
     def dmm_value(self):
         with self.lock:
@@ -69,7 +128,7 @@ class VirtualStationState:
 
     def detector_current_ma(self, channel_code):
         with self.lock:
-            if not self.power.output[1]:
+            if not self.detector_powered():
                 return 0.0
             return 12.5 + float(channel_code & 0x0F) * 2.5
 
@@ -105,6 +164,26 @@ class VirtualStationState:
             gpol_v = None
             if 0x21 in regs and len(regs[0x21]) == 2:
                 gpol_v = (int.from_bytes(regs[0x21], "little") * 5.0) / 65535.0
+            if self.power_mode == "split":
+                power_snap = {
+                    "mode": "split",
+                    "voltage": [self.cooler_power.voltage, self.dp100_voltage, 0.0],
+                    "current_limit": [self.cooler_power.current_limit, self.dp100_current_limit, 0.0],
+                    "output": [self.cooler_power.output, self.dp100_output, False],
+                    "cooler_power": {
+                        "voltage": self.cooler_power.voltage,
+                        "current_limit": self.cooler_power.current_limit,
+                        "output": self.cooler_power.output,
+                    },
+                    "dp100": self.dp100_reading(),
+                }
+            else:
+                power_snap = {
+                    "mode": "it6332a",
+                    "voltage": list(self.power.voltage),
+                    "current_limit": list(self.power.current_limit),
+                    "output": list(self.power.output),
+                }
             return {
                 "endpoints": dict(self.endpoints),
                 "blackbody": {
@@ -112,11 +191,7 @@ class VirtualStationState:
                     "actual_c": self.blackbody.actual,
                     "stable": self.blackbody.stable,
                 },
-                "power": {
-                    "voltage": list(self.power.voltage),
-                    "current_limit": list(self.power.current_limit),
-                    "output": list(self.power.output),
-                },
+                "power": power_snap,
                 "oven": {
                     "target_c": self.oven.setpoint,
                     "actual_c": self.oven.temperature,
@@ -132,6 +207,7 @@ class VirtualStationState:
                     "requests": len(self.cooler.requests),
                 },
                 "detector": {
+                    "powered": self.detector_powered(),
                     "integration_us": int_us,
                     "empty_us": empty_us,
                     "gpol_v": gpol_v,
@@ -258,6 +334,12 @@ def start_control_http(host, port, state, stop):
             if self.path == "/state":
                 self._reply_json(200, state.snapshot())
                 return
+            if self.path == "/dp100":
+                if state.power_mode != "split":
+                    self._reply_json(409, {"error": "dp100 is only available in split power mode"})
+                    return
+                self._reply_json(200, state.dp100_reading())
+                return
             self._reply_json(404, {"error": "not found"})
 
         def do_POST(self):
@@ -271,6 +353,19 @@ def start_control_http(host, port, state, stop):
             if self.path == "/fault":
                 state.apply_fault(payload)
                 self._reply_json(200, state.snapshot())
+                return
+            if self.path == "/dp100/output":
+                if state.power_mode != "split":
+                    self._reply_json(409, {"error": "dp100 is only available in split power mode"})
+                    return
+                if "enabled" in payload:
+                    enabled = bool(payload["enabled"])
+                elif "output_enabled" in payload:
+                    enabled = bool(payload["output_enabled"])
+                else:
+                    self._reply_json(400, {"error": "missing 'enabled' field"})
+                    return
+                self._reply_json(200, state.set_dp100_output(enabled))
                 return
             if self.path == "/shutdown":
                 self._reply_json(200, {"stopping": True})
@@ -292,7 +387,7 @@ def _serve_http_until_stop(server, stop):
     server.server_close()
 
 
-def build_station_json(endpoints, raw_source):
+def build_station_json(endpoints, raw_source, power_mode="it6332a", power_driver_path=None):
     devices = {}
     if "blackbody" in endpoints:
         ep = endpoints["blackbody"]
@@ -309,9 +404,23 @@ def build_station_json(endpoints, raw_source):
             }
     if "power" in endpoints:
         ep = endpoints["power"]
-        conn = {"host": ep["host"], "tcp_port": ep["tcp_port"], "timeout_ms": 1200} if "tcp_port" in ep \
-            else {"port": ep.get("client_port", ep["port"]), "baud_rate": ep.get("baud_rate", 115200), "timeout_ms": 1200}
-        devices["supply"] = {"kind": "it6332a", "connection": conn}
+        if power_mode == "split":
+            conn = {"host": ep["host"], "tcp_port": ep["tcp_port"], "timeout_ms": 1200} if "tcp_port" in ep \
+                else {"port": ep.get("client_port", ep["port"]), "baud_rate": ep.get("baud_rate", 9600), "timeout_ms": 1200}
+            devices["cooler_power"] = {"kind": "udp6730", "connection": conn}
+            if power_driver_path and "control_port" in endpoints:
+                devices["detector_power"] = {
+                    "kind": "external-power",
+                    "connection": {
+                        "driver_path": str(power_driver_path),
+                        "driver_id": "mock_power",
+                        "driver_config": {"control_port": int(endpoints["control_port"])},
+                    },
+                }
+        else:
+            conn = {"host": ep["host"], "tcp_port": ep["tcp_port"], "timeout_ms": 1200} if "tcp_port" in ep \
+                else {"port": ep.get("client_port", ep["port"]), "baud_rate": ep.get("baud_rate", 115200), "timeout_ms": 1200}
+            devices["supply"] = {"kind": "it6332a", "connection": conn}
     if "oven" in endpoints:
         ep = endpoints["oven"]
         conn = {"host": ep["host"], "tcp_port": ep["tcp_port"], "address": 1, "delimiter": "crlf", "timeout_ms": 1500} if "tcp_port" in ep \
@@ -403,6 +512,10 @@ def main():
     parser.add_argument("--cooler-port", type=int, default=5020)
     parser.add_argument("--control-port", type=int, default=None)
     parser.add_argument("--ramp-c-per-s", type=float, default=0.0)
+    parser.add_argument("--power-mode", choices=("it6332a", "split"), default="it6332a",
+                        help="power supply model: single dual-channel it6332a or split udp6730+dp100")
+    parser.add_argument("--interlock-detector-power", action="store_true",
+                        help="suppress detector responses and clear its registers while detector power is off")
     parser.add_argument("--emit-station-json", type=Path, default=None)
     parser.add_argument("--emit-blackbody-config", type=Path, default=None)
     parser.add_argument("--raw-source", type=Path, help="RAW replay directory for --emit-station-json")
@@ -414,21 +527,28 @@ def main():
     stop = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: stop.set())
 
-    state = VirtualStationState(ramp_c_per_s=args.ramp_c_per_s, log_io=args.log_io)
-    specs = {
-        "blackbody": (state.blackbody, b"\r", None, 9600, 1, args.blackbody_port),
-        "power": (state.power, b"\n", None, 115200, 1, args.power_port),
-        "oven": (state.oven, b"\r\n", None, 9600, 1, args.oven_port),
-        "dmm": (state.dmm, b"\n", None, 115200, 1, args.dmm_port),
-        "detector": (state.detector, None, None, 115200, 1, args.detector_port),
-        "cooler": (state.cooler, None, _consume_modbus_buffer, 9600, 2, args.cooler_port),
-    }
-
     serial_map = {}
     if args.mode == "serial-map":
         if not args.config:
             parser.error("--config is required with --mode serial-map")
         serial_map = json.loads(args.config.read_text(encoding="utf-8"))
+
+    state = VirtualStationState(
+        ramp_c_per_s=args.ramp_c_per_s, log_io=args.log_io,
+        blackbody_tcp="port" not in serial_map.get("blackbody", {}),
+        interlock_detector_power=args.interlock_detector_power,
+        power_mode=args.power_mode,
+    )
+    power_spec = (state.cooler_power, b"\n", None, 9600, 1, args.power_port) \
+        if args.power_mode == "split" else (state.power, b"\n", None, 115200, 1, args.power_port)
+    specs = {
+        "blackbody": (state.blackbody, b"\r", None, 9600, 1, args.blackbody_port),
+        "power": power_spec,
+        "oven": (state.oven, b"\r\n", None, 9600, 1, args.oven_port),
+        "dmm": (state.dmm, b"\n", None, 115200, 1, args.dmm_port),
+        "detector": (state.detector, None, None, 115200, 1, args.detector_port),
+        "cooler": (state.cooler, None, _consume_modbus_buffer, 9600, 2, args.cooler_port),
+    }
 
     tcp_servers = []
     serial_threads = []
@@ -436,14 +556,17 @@ def main():
     ctrl_thread = None
     try:
         for name, (controller, delimiter, consume_fn, default_baud, default_stop, tcp_default) in specs.items():
-            cfg = serial_map.get(name) if args.mode == "serial-map" else None
+            if args.mode == "serial-map":
+                cfg = serial_map.get(name)
+                if cfg is None and name == "power":
+                    cfg = serial_map.get("cooler_power")
+            else:
+                cfg = None
             if cfg and "port" in cfg:
                 port_name = cfg["port"]
                 client_port = cfg.get("client_port")
                 baud = int(cfg.get("baud_rate", default_baud))
                 stop_bits = int(cfg.get("stop_bits", default_stop))
-                if name == "blackbody":
-                    controller.tcp = False
                 ep_info = {"port": port_name, "baud_rate": baud, "stop_bits": stop_bits}
                 if client_port:
                     ep_info["client_port"] = client_port
@@ -478,13 +601,18 @@ def main():
 
         if args.control_port is not None:
             _, actual_ctrl_port, ctrl_thread = start_control_http(args.host, args.control_port, state, stop)
+            endpoints["control_port"] = actual_ctrl_port
             endpoints["control_url"] = f"http://{args.host}:{actual_ctrl_port}"
 
         state.endpoints = endpoints
         if args.emit_station_json:
             args.emit_station_json.parent.mkdir(parents=True, exist_ok=True)
             args.emit_station_json.write_text(
-                json.dumps(build_station_json(endpoints, args.raw_source), ensure_ascii=False, indent=2) + "\n",
+                json.dumps(
+                    build_station_json(endpoints, args.raw_source, power_mode=args.power_mode),
+                    ensure_ascii=False,
+                    indent=2,
+                ) + "\n",
                 encoding="utf-8",
             )
         if args.emit_blackbody_config and "blackbody" in endpoints:
