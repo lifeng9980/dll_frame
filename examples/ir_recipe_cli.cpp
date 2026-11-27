@@ -97,6 +97,34 @@ std::string resolveStationSource(const fs::path &stationPath, const std::string 
             }
         }
     }
+    const auto devicesIt = station.find("devices");
+    if (devicesIt != station.end() && devicesIt->is_object()) {
+        auto resolveRel = [&](Json &obj, const char *key) {
+            const auto it = obj.find(key);
+            if (it == obj.end() || !it->is_string()) return;
+            const auto raw = it->get<std::string>();
+            if (raw.empty()) return;
+            const auto p = pathFromUtf8(raw);
+            if (p.is_relative()) {
+                *it = pathUtf8(fs::absolute(stationPath.parent_path() / p).lexically_normal());
+            }
+        };
+        for (auto &[alias, dev] : devicesIt->items()) {
+            (void)alias;
+            if (!dev.is_object()) continue;
+            const auto kindIt = dev.find("kind");
+            const auto connIt = dev.find("connection");
+            if (kindIt == dev.end() || !kindIt->is_string() || *kindIt != "external-power" ||
+                connIt == dev.end() || !connIt->is_object()) {
+                continue;
+            }
+            resolveRel(*connIt, "driver_path");
+            const auto cfgIt = connIt->find("driver_config");
+            if (cfgIt != connIt->end() && cfgIt->is_object()) {
+                resolveRel(*cfgIt, "dll_path");
+            }
+        }
+    }
     return station.dump();
 }
 

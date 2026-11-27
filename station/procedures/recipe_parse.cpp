@@ -1,5 +1,6 @@
 #include "recipe_config.h"
 #include "IR_device.h"
+#include "IR_power_driver_abi.h"
 #include "api_common.h"
 #include "station/instruments/device_config.h"
 #include <algorithm>
@@ -228,13 +229,23 @@ StationConfig parseStation(const char *text)
         if (kind == "pcn7-lt") config.kind = IR_PCN7LT;
         else if (kind == "dcn1000") config.kind = IR_DCN1000;
         else if (kind == "it6332a") config.kind = IR_IT6332A;
+        else if (kind == "udp6730") config.kind = IR_UDP6730;
+        else if (kind == "external-power") config.kind = IR_EXTERNAL_POWER;
         else if (kind == "gws-sten") config.kind = IR_OVEN_GWS_STEN;
         else if (kind == "dmm6500") config.kind = IR_DMM6500;
         else if (kind == "detector-serial") config.kind = IR_DETECTOR_SERIAL;
         else if (kind == "cooler-modbus") config.kind = IR_COOLER_MODBUS;
         else throw Error(IR_BAD_ARGUMENT, path + ".kind is unsupported");
         const auto &connection = objectField(device.value(), "connection", path);
-        instruments::validateDeviceConnection(config.kind, connection, path + ".connection");
+        if (config.kind == IR_IT6332A || config.kind == IR_UDP6730 || config.kind == IR_EXTERNAL_POWER) {
+            const auto cap = instruments::queryPowerDeviceCapabilities(
+                config.kind, connection, path + ".connection");
+            config.powerCapabilities = cap.capabilities;
+            config.powerMinChannel = cap.minChannel;
+            config.powerMaxChannel = cap.maxChannel;
+        } else {
+            instruments::validateDeviceConnection(config.kind, connection, path + ".connection");
+        }
         config.connectionJson = connection.dump();
         station.devices.emplace(device.key(), std::move(config));
     }
@@ -271,10 +282,13 @@ PowerStep parsePowerStep(StepRef ref, const std::string &type, const Json &field
     step.ref = std::move(ref);
     step.device = stringField(fields, "device", path);
     const auto found = station.devices.find(step.device);
-    require(found != station.devices.end() && found->second.kind == IR_IT6332A,
-            IR_BAD_ARGUMENT, path + ".device must name a configured IT6332A");
-    step.channel = integerField(fields, "channel", 1, 3, path);
+    require(found != station.devices.end() && found->second.powerCapabilities != 0,
+            IR_BAD_ARGUMENT, path + ".device must name a configured power supply");
+    const auto &devCfg = found->second;
+    step.channel = integerField(fields, "channel", devCfg.powerMinChannel, devCfg.powerMaxChannel, path);
     if (type == "power_set") {
+        require((devCfg.powerCapabilities & IR_POWER_CAP_SET) != 0,
+                IR_UNSUPPORTED, path + ".device '" + step.device + "' does not support power_set");
         allowFields(fields, {"id", "type", "device", "channel", "voltage_v", "current_limit_a"}, path);
         step.operation = PowerStep::Operation::set;
         step.voltageV = numberField(fields, "voltage_v", path);
@@ -282,6 +296,8 @@ PowerStep parsePowerStep(StepRef ref, const std::string &type, const Json &field
         require(step.voltageV >= 0.0 && step.currentLimitA > 0.0,
                 IR_BAD_ARGUMENT, path + " has invalid voltage or current limit");
     } else if (type == "power_output") {
+        require((devCfg.powerCapabilities & IR_POWER_CAP_OUTPUT) != 0,
+                IR_UNSUPPORTED, path + ".device '" + step.device + "' does not support power_output");
         allowFields(fields, {"id", "type", "device", "channel", "enabled", "off_after_run"}, path);
         step.operation = PowerStep::Operation::output;
         step.enabled = booleanField(fields, "enabled", path);
@@ -289,6 +305,8 @@ PowerStep parsePowerStep(StepRef ref, const std::string &type, const Json &field
         require(!step.enabled || step.offAfterRun, IR_BAD_ARGUMENT,
                 path + ".off_after_run must be true when enabling power output");
     } else {
+        require((devCfg.powerCapabilities & IR_POWER_CAP_READ) != 0,
+                IR_UNSUPPORTED, path + ".device '" + step.device + "' does not support power_read");
         allowFields(fields, {"id", "type", "device", "channel"}, path);
         step.operation = PowerStep::Operation::read;
     }
@@ -377,8 +395,13 @@ VariantType parseSharedControlOrCaptureOrFlushOrAnalyze(
                              "stable_threshold_a", "max_variation_a", "stable_required_samples",
                              "sample_interval_ms", "timeout_ms"}, path);
         const auto alias = stringField(fields, "device", path);
-        requireDeviceKind(station, alias, IR_IT6332A, path, "it6332a");
-        const int32_t channel = integerField(fields, "channel", 1, 3, path);
+        const auto devIt = station.devices.find(alias);
+        require(devIt != station.devices.end() && devIt->second.powerCapabilities != 0,
+                IR_BAD_ARGUMENT, path + ".device must name a configured power supply");
+        require((devIt->second.powerCapabilities & IR_POWER_CAP_READ) != 0,
+                IR_UNSUPPORTED, path + ".device '" + alias + "' does not support power readback");
+        const int32_t channel = integerField(fields, "channel",
+            devIt->second.powerMinChannel, devIt->second.powerMaxChannel, path);
         IRPowerCurrentStableSpec spec{};
         spec.expected_voltage_v = optionalNumber(fields, "expected_voltage_v", 0.0, path);
         spec.voltage_tolerance_v = optionalNumber(fields, "voltage_tolerance_v", 0.15, path);

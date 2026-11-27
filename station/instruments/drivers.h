@@ -1,6 +1,7 @@
 #pragma once
 
 #include "IR_device.h"
+#include "IR_power_driver_abi.h"
 #include "asio_link.h"
 #include <chrono>
 #include <cstdint>
@@ -137,6 +138,18 @@ private:
     std::unique_ptr<transport::AsioLink> link_;
 };
 
+class PowerSupply {
+public:
+    virtual ~PowerSupply() = default;
+    virtual uint32_t capabilities() const noexcept = 0;
+    virtual int minChannel() const noexcept = 0;
+    virtual int maxChannel() const noexcept = 0;
+    virtual IRPowerReading readPower(int channel) = 0;
+    virtual IRPowerReading setPowerOutput(int channel, bool enabled) = 0;
+    virtual IRPowerReading setPowerChannel(int channel, double voltageV, double currentLimitA) = 0;
+    virtual void close() {}
+};
+
 struct It6332aConfig {
     transport::Endpoint endpoint;
     std::chrono::milliseconds timeout{1200};
@@ -150,9 +163,34 @@ struct It6332aReading {
     bool outputEnabled{};
 };
 
-class It6332aPower {
+class It6332aPower final : public PowerSupply {
 public:
     explicit It6332aPower(It6332aConfig config);
+    uint32_t capabilities() const noexcept override
+    {
+        return IR_POWER_CAP_READ | IR_POWER_CAP_OUTPUT | IR_POWER_CAP_SET;
+    }
+    int minChannel() const noexcept override { return 1; }
+    int maxChannel() const noexcept override { return 3; }
+    IRPowerReading readPower(int channel) override
+    {
+        const auto v = read(channel);
+        return {v.setpointVoltageV, v.currentLimitA, v.measuredVoltageV, v.measuredCurrentA,
+                v.outputEnabled ? 1 : 0, 0};
+    }
+    IRPowerReading setPowerOutput(int channel, bool enabled) override
+    {
+        const auto v = setOutput(channel, enabled);
+        return {v.setpointVoltageV, v.currentLimitA, v.measuredVoltageV, v.measuredCurrentA,
+                v.outputEnabled ? 1 : 0, 0};
+    }
+    IRPowerReading setPowerChannel(int channel, double voltageV, double currentLimitA) override
+    {
+        const auto v = setChannel(channel, voltageV, currentLimitA);
+        return {v.setpointVoltageV, v.currentLimitA, v.measuredVoltageV, v.measuredCurrentA,
+                v.outputEnabled ? 1 : 0, 0};
+    }
+
     It6332aReading read(int channel);
     It6332aReading setChannel(int channel, double voltageV, double currentLimitA);
     It6332aReading setOutput(int channel, bool enabled);
@@ -171,6 +209,77 @@ private:
     It6332aConfig config_;
     std::unique_ptr<transport::AsioLink> link_;
     bool remote_{};
+};
+
+struct Udp6730Config {
+    transport::Endpoint endpoint;
+    std::chrono::milliseconds timeout{1500};
+};
+
+class Udp6730Power final : public PowerSupply {
+public:
+    explicit Udp6730Power(Udp6730Config config);
+    uint32_t capabilities() const noexcept override
+    {
+        return IR_POWER_CAP_READ | IR_POWER_CAP_OUTPUT;
+    }
+    int minChannel() const noexcept override { return 1; }
+    int maxChannel() const noexcept override { return 1; }
+    IRPowerReading readPower(int channel) override;
+    IRPowerReading setPowerOutput(int channel, bool enabled) override;
+    IRPowerReading setPowerChannel(int channel, double voltageV, double currentLimitA) override;
+
+private:
+    using Clock = std::chrono::steady_clock;
+    void connect();
+    void checkChannel(int channel) const;
+    std::string query(const std::string &command);
+    void write(const std::string &command);
+    double queryNumber(const std::string &command);
+    IRPowerReading readOnce();
+
+    Udp6730Config config_;
+    std::unique_ptr<transport::AsioLink> link_;
+};
+
+struct ExternalPowerConfig {
+    std::string driverPath;
+    std::string expectedDriverId;
+    std::string driverConfigJson;
+};
+
+struct ExternalPowerInspection {
+    uint32_t capabilities{0};
+    int32_t minChannel{0};
+    int32_t maxChannel{0};
+};
+
+ExternalPowerInspection inspectExternalPowerDriver(const ExternalPowerConfig &config,
+                                                   std::string_view path);
+
+class ExternalPowerSupply final : public PowerSupply {
+public:
+    explicit ExternalPowerSupply(ExternalPowerConfig config);
+    ~ExternalPowerSupply() override;
+
+    uint32_t capabilities() const noexcept override { return capabilities_; }
+    int minChannel() const noexcept override { return minChannel_; }
+    int maxChannel() const noexcept override { return maxChannel_; }
+    IRPowerReading readPower(int channel) override;
+    IRPowerReading setPowerOutput(int channel, bool enabled) override;
+    IRPowerReading setPowerChannel(int channel, double voltageV, double currentLimitA) override;
+    void close() override;
+
+private:
+    void checkChannel(int channel) const;
+
+    ExternalPowerConfig config_;
+    const IRPowerDriverDescriptor *desc_{nullptr};
+    IRPowerDriverHandle handle_{nullptr};
+    uint32_t capabilities_{0};
+    int32_t minChannel_{1};
+    int32_t maxChannel_{1};
+    bool closed_{false};
 };
 
 } // namespace ir::instruments

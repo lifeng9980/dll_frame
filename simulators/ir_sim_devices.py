@@ -229,6 +229,38 @@ class It6332a:
         return b""
 
 
+class Udp6730:
+    def __init__(self, voltage=12.0, current_limit=2.0, output=False):
+        self.voltage = float(voltage)
+        self.current_limit = float(current_limit)
+        self.output = bool(output)
+
+    def handle(self, command):
+        command = command.strip().decode("ascii", errors="replace")
+        upper = command.upper()
+        if upper == "*IDN?":
+            return b"UNI-T,UDP6730,IR-SIMULATOR,1.0\n"
+        if upper == "OUTP?" or upper == "OUTPUT?":
+            return (b"ON\n" if self.output else b"OFF\n")
+        if upper in ("OUTP ON", "OUTPUT ON"):
+            self.output = True
+            return None
+        if upper in ("OUTP OFF", "OUTPUT OFF"):
+            self.output = False
+            return None
+        if upper in ("VOLT?", "VOLTAGE?"):
+            return f"{self.voltage:.4f}\n".encode("ascii")
+        if upper in ("CURR?", "CURRENT?"):
+            return f"{self.current_limit:.4f}\n".encode("ascii")
+        if upper in ("MEAS:VOLT?", "MEASURE:VOLTAGE?"):
+            val = self.voltage if self.output else 0.0
+            return f"{val:.4f}\n".encode("ascii")
+        if upper in ("MEAS:CURR?", "MEASURE:CURRENT?"):
+            val = 0.35 if self.output else 0.0
+            return f"{val:.4f}\n".encode("ascii")
+        return b""
+
+
 class GwsStenOven:
     def __init__(self, address=1, temperature=25.0, setpoint=25.0, mode="STANDBY", alarm="",
                  drop_command="", drop_count=0, log_io=False, auto_track=False):

@@ -42,6 +42,9 @@ inline const char *pixelFormatName(int32_t dataType) noexcept
 struct DeviceConfig {
     int kind{};
     std::string connectionJson;
+    uint32_t powerCapabilities{0};
+    int32_t powerMinChannel{0};
+    int32_t powerMaxChannel{0};
 };
 
 struct StationConfig {

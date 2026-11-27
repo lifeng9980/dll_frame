@@ -28,10 +28,15 @@ using ir::instruments::DetectorSerialConfig;
 using ir::instruments::Dmm6500;
 using ir::instruments::Dmm6500Config;
 using ir::instruments::Doc058Blackbody;
+using ir::instruments::ExternalPowerConfig;
+using ir::instruments::ExternalPowerSupply;
 using ir::instruments::GwsStenConfig;
 using ir::instruments::GwsStenOven;
 using ir::instruments::It6332aConfig;
 using ir::instruments::It6332aPower;
+using ir::instruments::PowerSupply;
+using ir::instruments::Udp6730Config;
+using ir::instruments::Udp6730Power;
 using ir::transport::SerialEndpoint;
 using ir::transport::TcpEndpoint;
 using namespace ir::api;
@@ -40,7 +45,7 @@ struct Session {
     std::vector<std::string> endpointKeys;
     std::mutex mutex;
     std::unique_ptr<Doc058Blackbody> blackbody;
-    std::unique_ptr<It6332aPower> power;
+    std::unique_ptr<PowerSupply> power;
     std::unique_ptr<GwsStenOven> oven;
     std::unique_ptr<Dmm6500> dmm;
     std::unique_ptr<DetectorSerial> detector;
@@ -53,8 +58,8 @@ std::set<std::string> openingEndpoints;
 IRHandle nextHandle{1};
 
 using Endpoint = BlackbodyConfig::Endpoint;
-using DeviceOptions = std::variant<BlackbodyConfig, It6332aConfig, GwsStenConfig, Dmm6500Config,
-                                   DetectorSerialConfig, CoolerModbusConfig>;
+using DeviceOptions = std::variant<BlackbodyConfig, It6332aConfig, Udp6730Config, ExternalPowerConfig,
+                                   GwsStenConfig, Dmm6500Config, DetectorSerialConfig, CoolerModbusConfig>;
 
 class ConnectionFields {
 public:
@@ -228,6 +233,24 @@ DeviceOptions parseDeviceConnection(int32_t kind, const Json &json, std::string_
         result.timeout = fields.timeout(result.timeout);
         return result;
     }
+    case IR_UDP6730: {
+        Udp6730Config result;
+        result.endpoint = parseTcpOrSerialEndpoint(fields, 5026, 9600);
+        result.timeout = fields.timeout(result.timeout);
+        return result;
+    }
+    case IR_EXTERNAL_POWER: {
+        fields.allow({"driver_path", "driver_id", "driver_config"});
+        ExternalPowerConfig result;
+        result.driverPath = fields.text("driver_path", true);
+        result.expectedDriverId = fields.text("driver_id", false);
+        const auto driverCfgIt = json.find("driver_config");
+        if (driverCfgIt == json.end() || !driverCfgIt->is_object())
+            fields.fail("driver_config", "must be an object");
+        result.driverConfigJson = driverCfgIt->dump();
+        (void)ir::instruments::inspectExternalPowerDriver(result, path);
+        return result;
+    }
     case IR_OVEN_GWS_STEN:
         return parseOvenConfig(fields);
     case IR_DMM6500: {
@@ -339,7 +362,7 @@ template<class Action> void useBlackbody(IRHandle handle, Action action)
 template<class Action> void usePower(IRHandle handle, Action action)
 {
     useSession(handle, [&](Session &device) {
-        require(bool(device.power), IR_BAD_ARGUMENT, "Device handle is not an IT6332A power supply");
+        require(bool(device.power), IR_BAD_ARGUMENT, "Device handle is not a power supply");
         action(*device.power);
     });
 }
@@ -383,6 +406,23 @@ using ir::api::require;
 void validateDeviceConnection(int32_t kind, const nlohmann::json &connection, std::string_view path)
 {
     (void)parseDeviceConnection(kind, connection, path);
+}
+
+PowerCapabilitiesInfo queryPowerDeviceCapabilities(int32_t kind, const nlohmann::json &connection,
+                                                   std::string_view path)
+{
+    auto parsed = parseDeviceConnection(kind, connection, path);
+    if (std::holds_alternative<It6332aConfig>(parsed)) {
+        return {IR_POWER_CAP_READ | IR_POWER_CAP_OUTPUT | IR_POWER_CAP_SET, 1, 3};
+    }
+    if (std::holds_alternative<Udp6730Config>(parsed)) {
+        return {IR_POWER_CAP_READ | IR_POWER_CAP_OUTPUT, 1, 1};
+    }
+    if (const auto *ext = std::get_if<ExternalPowerConfig>(&parsed)) {
+        const auto info = inspectExternalPowerDriver(*ext, path);
+        return {info.capabilities, info.minChannel, info.maxChannel};
+    }
+    throw Error(IR_BAD_ARGUMENT, std::string(path) + " is not a power supply");
 }
 
 DeviceLease::DeviceLease(const IRHandle *handles, std::size_t count)
@@ -437,11 +477,23 @@ noexcept{
         needed(out, 1, 1);
         auto parsed = parseDeviceConnection(kind, parseConfigJson(config), "connection");
         const auto endpointKeys = std::visit([](auto &options) {
-            if constexpr (std::is_same_v<std::decay_t<decltype(options)>, Dmm6500Config>) {
+            using Config = std::decay_t<decltype(options)>;
+            if constexpr (std::is_same_v<Config, Dmm6500Config>) {
                 if (!options.visaResource.empty())
                     return std::vector<std::string>{"visa:" + lowercaseAscii(options.visaResource)};
+                return resolveEndpointKeys(options.endpoint, options.timeout);
+            } else if constexpr (std::is_same_v<Config, ExternalPowerConfig>) {
+                std::error_code ec;
+                const auto p = ir::utf8::pathFromUtf8(options.driverPath);
+                const auto norm = std::filesystem::weakly_canonical(p, ec);
+                auto pathKey = ir::utf8::pathToUtf8(ec ? p.lexically_normal() : norm);
+#ifdef _WIN32
+                pathKey = lowercaseAscii(std::move(pathKey));
+#endif
+                return std::vector<std::string>{"external_power:" + pathKey + ":" + options.driverConfigJson};
+            } else {
+                return resolveEndpointKeys(options.endpoint, options.timeout);
             }
-            return resolveEndpointKeys(options.endpoint, options.timeout);
         }, parsed);
         {
             std::lock_guard lock(devicesMutex);
@@ -466,6 +518,10 @@ noexcept{
                     device->blackbody = std::make_unique<Doc058Blackbody>(std::move(options));
                 else if constexpr (std::is_same_v<Config, It6332aConfig>)
                     device->power = std::make_unique<It6332aPower>(std::move(options));
+                else if constexpr (std::is_same_v<Config, Udp6730Config>)
+                    device->power = std::make_unique<Udp6730Power>(std::move(options));
+                else if constexpr (std::is_same_v<Config, ExternalPowerConfig>)
+                    device->power = std::make_unique<ExternalPowerSupply>(std::move(options));
                 else if constexpr (std::is_same_v<Config, GwsStenConfig>)
                     device->oven = std::make_unique<GwsStenOven>(std::move(options));
                 else if constexpr (std::is_same_v<Config, Dmm6500Config>)
@@ -494,7 +550,7 @@ noexcept{
     return guarded(err, bytes, [&] {
         std::shared_ptr<Session> device;
         std::unique_ptr<Doc058Blackbody> closingBlackbody;
-        std::unique_ptr<ir::instruments::It6332aPower> closingPower;
+        std::unique_ptr<PowerSupply> closingPower;
         std::unique_ptr<GwsStenOven> closingOven;
         std::unique_ptr<Dmm6500> closingDmm;
         std::unique_ptr<DetectorSerial> closingDetector;
@@ -519,11 +575,24 @@ noexcept{
             devices.erase(pos);
         }
         closingBlackbody.reset();
-        closingPower.reset();
-        closingOven.reset();
-        closingDmm.reset();
-        closingDetector.reset();
-        closingCooler.reset();
+        try {
+            if (closingPower) closingPower->close();
+            closingPower.reset();
+            closingOven.reset();
+            closingDmm.reset();
+            closingDetector.reset();
+            closingCooler.reset();
+        } catch (...) {
+            closingPower.reset();
+            closingOven.reset();
+            closingDmm.reset();
+            closingDetector.reset();
+            closingCooler.reset();
+            deviceLock.unlock();
+            std::lock_guard registryLock(devicesMutex);
+            for (const auto &endpoint : endpointKeys) openingEndpoints.erase(endpoint);
+            throw;
+        }
         deviceLock.unlock();
         {
             std::lock_guard registryLock(devicesMutex);
@@ -554,10 +623,8 @@ noexcept{
     if (readback) *readback = {};
     return guarded(err, bytes, [&] {
         needed(readback, 1, 1);
-        usePower(handle, [&](auto &power) {
-            const auto value = power.setChannel(channel, voltage, currentLimit);
-            *readback = {value.setpointVoltageV, value.currentLimitA, value.measuredVoltageV,
-                         value.measuredCurrentA, value.outputEnabled ? 1 : 0};
+        usePower(handle, [&](PowerSupply &power) {
+            *readback = power.setPowerChannel(channel, voltage, currentLimit);
         });
     });
 }
@@ -569,10 +636,8 @@ noexcept{
     return guarded(err, bytes, [&] {
         needed(readback, 1, 1);
         require(enabled == 0 || enabled == 1, IR_BAD_ARGUMENT, "enabled must be 0 or 1");
-        usePower(handle, [&](auto &power) {
-            const auto value = power.setOutput(channel, enabled != 0);
-            *readback = {value.setpointVoltageV, value.currentLimitA, value.measuredVoltageV,
-                         value.measuredCurrentA, value.outputEnabled ? 1 : 0};
+        usePower(handle, [&](PowerSupply &power) {
+            *readback = power.setPowerOutput(channel, enabled != 0);
         });
     });
 }
@@ -583,10 +648,8 @@ noexcept{
     if (reading) *reading = {};
     return guarded(err, bytes, [&] {
         needed(reading, 1, 1);
-        usePower(handle, [&](auto &power) {
-            const auto value = power.read(channel);
-            *reading = {value.setpointVoltageV, value.currentLimitA, value.measuredVoltageV,
-                        value.measuredCurrentA, value.outputEnabled ? 1 : 0};
+        usePower(handle, [&](PowerSupply &power) {
+            *reading = power.readPower(channel);
         });
     });
 }

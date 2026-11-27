@@ -19,7 +19,7 @@ import time
 
 SIMULATOR_DIR = Path(__file__).resolve().parents[1] / "simulators"
 sys.path.insert(0, str(SIMULATOR_DIR))
-from ir_sim_devices import It6332a  # noqa: E402
+from ir_sim_devices import It6332a, Udp6730  # noqa: E402
 
 IR_BUSY = 9
 
@@ -460,6 +460,7 @@ def main():
             assert not controller.output[0] and not second.exists()
             report, detail = run_recipe(sdk, offline, capture_only, second)
             assert report == (0, 2, 0, -1, 0), (report, detail)
+            test_udp6730_and_external_power(sdk, root, station, capture_only)
     finally:
         stop.set()
         if listener is not None:
@@ -474,6 +475,117 @@ def main():
             os.close(slave)
     assert not thread.is_alive()
     assert not server_error, server_error
+
+
+def test_udp6730_and_external_power(sdk, root, base_station, base_recipe):
+    # 1. Verify IT6332A multi-channel shared handle via direct C API
+    it_ctrl = It6332a()
+    it_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    it_srv.bind(("127.0.0.1", 0))
+    it_srv.listen(4)
+    it_port = it_srv.getsockname()[1]
+
+    udp_ctrl = Udp6730(voltage=12.0, current_limit=2.0, output=False)
+    udp_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    udp_srv.bind(("127.0.0.1", 0))
+    udp_srv.listen(4)
+    udp_port = udp_srv.getsockname()[1]
+
+    stop_srv = threading.Event()
+
+    def serve(sock, handler):
+        sock.settimeout(0.1)
+        while not stop_srv.is_set():
+            try:
+                conn, _ = sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            with conn:
+                conn.settimeout(0.1)
+                buf = b""
+                while not stop_srv.is_set():
+                    try:
+                        chunk = conn.recv(4096)
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    buf += chunk
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        reply = handler(line)
+                        if reply:
+                            conn.sendall(reply)
+
+    t_it = threading.Thread(target=serve, args=(it_srv, it_ctrl.handle), daemon=True)
+    t_udp = threading.Thread(target=serve, args=(udp_srv, udp_ctrl.handle), daemon=True)
+    t_it.start()
+    t_udp.start()
+    try:
+        err = c.create_string_buffer(1024)
+        it_h = c.c_uint64()
+        assert sdk.IR_OpenDevice(4, json.dumps({"host": "127.0.0.1", "tcp_port": it_port}).encode(),
+                                 c.byref(it_h), err, len(err)) == 0, err.value
+        r1 = Reading()
+        r2 = Reading()
+        assert sdk.IR_SetPowerChannel(it_h, 1, 12.0, 2.0, c.byref(r1), err, len(err)) == 0, err.value
+        assert sdk.IR_SetPowerChannel(it_h, 2, 5.0, 1.5, c.byref(r2), err, len(err)) == 0, err.value
+        assert sdk.IR_SetPowerOutput(it_h, 1, 1, c.byref(r1), err, len(err)) == 0, err.value
+        assert sdk.IR_ReadPower(it_h, 2, c.byref(r2), err, len(err)) == 0, err.value
+        assert r1.output_enabled == 1 and r2.output_enabled == 0
+        assert abs(r1.setpoint_v - 12.0) < 0.01 and abs(r2.setpoint_v - 5.0) < 0.01
+        assert sdk.IR_CloseDevice(it_h, err, len(err)) == 0, err.value
+
+        # 2. Verify UDP6730 C API (read + output supported, set unsupported)
+        udp_h = c.c_uint64()
+        assert sdk.IR_OpenDevice(9, json.dumps({"host": "127.0.0.1", "tcp_port": udp_port}).encode(),
+                                 c.byref(udp_h), err, len(err)) == 0, err.value
+        ur = Reading()
+        assert sdk.IR_ReadPower(udp_h, 1, c.byref(ur), err, len(err)) == 0, err.value
+        assert ur.output_enabled == 0 and abs(ur.setpoint_v - 12.0) < 0.01
+        assert sdk.IR_SetPowerOutput(udp_h, 1, 1, c.byref(ur), err, len(err)) == 0, err.value
+        assert ur.output_enabled == 1 and abs(ur.measured_v - 12.0) < 0.01
+        assert sdk.IR_SetPowerChannel(udp_h, 1, 12.0, 2.0, c.byref(ur), err, len(err)) == 10  # IR_UNSUPPORTED
+        assert sdk.IR_ReadPower(udp_h, 2, c.byref(ur), err, len(err)) == 2  # IR_BAD_ARGUMENT
+        assert sdk.IR_SetPowerOutput(udp_h, 1, 0, c.byref(ur), err, len(err)) == 0, err.value
+        assert sdk.IR_CloseDevice(udp_h, err, len(err)) == 0, err.value
+
+        # 3. Verify recipe capability precheck on UDP6730 & missing external power driver
+        udp_station = dict(
+            base_station,
+            devices={"cooler_power": {"kind": "udp6730", "connection": {"host": "127.0.0.1", "tcp_port": udp_port}}},
+        )
+        udp_recipe_ok = dict(base_recipe, steps=[
+            {"id": "p_on", "type": "power_output", "device": "cooler_power", "channel": 1, "enabled": True, "off_after_run": True},
+            {"id": "p_rd", "type": "power_read", "device": "cooler_power", "channel": 1},
+            *base_recipe["steps"],
+        ])
+        report, detail = run_recipe(sdk, udp_station, udp_recipe_ok, root / "udp-ok")
+        assert report == (0, 2, 0, -1, 0), (report, detail)
+        assert not udp_ctrl.output
+
+        udp_recipe_set = dict(base_recipe, steps=[
+            {"id": "p_set", "type": "power_set", "device": "cooler_power", "channel": 1, "voltage_v": 12.0, "current_limit_a": 2.0},
+        ])
+        status = sdk.IR_CheckRecipeJson(json.dumps(udp_station).encode(), json.dumps(udp_recipe_set).encode(), err, len(err))
+        assert status == 10 and b"power_set" in err.value, (status, err.value)
+
+        ext_bad = dict(
+            base_station,
+            devices={"dp": {"kind": "external-power", "connection": {"driver_path": str(root / "missing.dll"), "driver_config": {}}}},
+        )
+        status = sdk.IR_CheckRecipeJson(json.dumps(ext_bad).encode(), json.dumps(base_recipe).encode(), err, len(err))
+        assert status != 0, status
+    finally:
+        stop_srv.set()
+        it_srv.close()
+        udp_srv.close()
+        t_it.join(2)
+        t_udp.join(2)
 
 
 if __name__ == "__main__":

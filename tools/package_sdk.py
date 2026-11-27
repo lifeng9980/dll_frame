@@ -21,6 +21,7 @@ REQUIRED_CUSTOMER_FILES = (
     "include/IR_types.h",
     "include/IR_plugin_abi.h",
     "include/IR_plugin_cxx.hpp",
+    "include/IR_power_driver_abi.h",
     "SDK.md",
     "docs/客户接入说明.md",
 )

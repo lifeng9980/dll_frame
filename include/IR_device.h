@@ -12,7 +12,9 @@ typedef enum IRDeviceKind {
     IR_OVEN_GWS_STEN = 5,
     IR_DMM6500 = 6,
     IR_DETECTOR_SERIAL = 7,
-    IR_COOLER_MODBUS = 8
+    IR_COOLER_MODBUS = 8,
+    IR_UDP6730 = 9,
+    IR_EXTERNAL_POWER = 10
 } IRDeviceKind;
 
 typedef struct IRBlackbodyReading {
@@ -82,8 +84,11 @@ typedef struct IRPowerCurrentStableSpec {
 
 /* IT6332A 配置 JSON 含串口 port（baud_rate 默认 115200，可选 data_bits/parity/stop_bits）
  * 或 TCP host/tcp_port（默认 5026）二选一，以及可选 timeout_ms（默认 1200）。
- * 打开时确认 *IDN? 返回 IT6332A，并切换到远程控制。每个操作先确认所选通道。
- * 读数单位为 V 和 A。通道号由设备支持范围 1～3 校验。
+ * 打开时确认 *IDN? 返回 IT6332A，并切换到远程控制。每个操作先确认所选通道（1～3）。
+ * UDP6730 配置 JSON 含串口 port（baud_rate 默认 9600）或 TCP host/tcp_port（默认 5026）二选一，
+ * 可选 timeout_ms（默认 1500）；支持单通道（1）读取和输出控制。
+ * 外部电源驱动（IR_EXTERNAL_POWER）配置 JSON 含 driver_path、driver_config 对象及可选 driver_id。
+ * 读数单位为 V 和 A。不支持的能力返回 IR_UNSUPPORTED。
  * 指定设备正被流程预约时，本组操作返回 IR_BUSY。
  */
 IR_STATION_API int32_t IR_SetPowerChannel(IRHandle handle, int32_t channel,
