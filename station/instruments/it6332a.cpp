@@ -59,7 +59,11 @@ void It6332aPower::connect()
 {
     link_.reset();
     try {
-        link_ = transport::openLink(config_.endpoint, Clock::now() + config_.timeout);
+        const auto deadline = Clock::now() + config_.timeout;
+        if (config_.visaResource.empty())
+            link_ = transport::openLink(config_.endpoint, deadline);
+        else
+            link_ = transport::openVisaLink(config_.visaResource, deadline);
         const auto identity = query("*IDN?");
         require(upper(identity).find("IT6332A") != std::string::npos,
                 IR_IO_ERROR, "Device is not an IT6332A: " + identity);

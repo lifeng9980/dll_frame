@@ -35,7 +35,7 @@ uint32_t remaining(Deadline deadline)
 {
     const auto now = std::chrono::steady_clock::now();
     waitUntil(now); // Check the procedure's cancellation predicate.
-    require(now < deadline, IR_TIMEOUT, "DMM6500 VISA operation timed out");
+    require(now < deadline, IR_TIMEOUT, "VISA operation timed out");
     return static_cast<uint32_t>(std::chrono::ceil<std::chrono::milliseconds>(deadline - now).count());
 }
 
@@ -46,7 +46,7 @@ struct VisaModule {
     template<typename... Args>
     auto function(const char *name) const
     {
-        require(handle != nullptr, IR_UNSUPPORTED, "DMM6500 VISA requires the Windows x64 NI-VISA runtime (visa64.dll)");
+        require(handle != nullptr, IR_UNSUPPORTED, "VISA transport requires the Windows x64 NI-VISA runtime (visa64.dll)");
         auto address = GetProcAddress(handle, name);
         require(address != nullptr, IR_UNSUPPORTED, std::string("VISA runtime is missing ") + name);
         return reinterpret_cast<Status(WINAPI *)(Args...)>(address);
@@ -83,10 +83,10 @@ class VisaLink final : public ScpiLink {
             Status result{};
             uint64_t count{};
             check(get(event, StatusAttribute, &result), "viGetAttribute(status)");
-            check(result, "DMM6500 VISA transfer");
+            check(result, "VISA transfer");
             check(get(event, CountAttribute64, &count), "viGetAttribute(count)");
             require(count <= size, IR_IO_ERROR, "Invalid VISA transfer count");
-            require(start != read_ || result != VisaMaxCount, IR_IO_ERROR, "DMM6500 VISA response exceeds buffer limit");
+            require(start != read_ || result != VisaMaxCount, IR_IO_ERROR, "VISA response exceeds buffer limit");
             close_(event);
             return count;
         } catch (...) {
@@ -131,7 +131,7 @@ public:
         std::string reply(reinterpret_cast<const char *>(buffer.data()), static_cast<size_t>(count));
         const auto end = reply.find(delimiter);
         if (end != std::string::npos)
-            require(end + 1 == reply.size(), IR_IO_ERROR, "Unexpected data after DMM6500 VISA reply");
+            require(end + 1 == reply.size(), IR_IO_ERROR, "Unexpected data after VISA reply");
         return reply; // USB INSTR also supports end-of-message without LF.
     }
 };
@@ -148,7 +148,7 @@ std::unique_ptr<ScpiLink> openVisaLink(const std::string &resource, Deadline dea
 namespace ir::transport {
 std::unique_ptr<ScpiLink> openVisaLink(const std::string &, Deadline)
 {
-    throw api::Error(IR_UNSUPPORTED, "DMM6500 VISA transport requires Windows x64");
+    throw api::Error(IR_UNSUPPORTED, "VISA transport requires Windows x64");
 }
 }
 #endif

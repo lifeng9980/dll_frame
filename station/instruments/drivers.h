@@ -151,6 +151,7 @@ public:
 };
 
 struct It6332aConfig {
+    std::string visaResource;
     transport::Endpoint endpoint;
     std::chrono::milliseconds timeout{1200};
 };
@@ -207,7 +208,7 @@ private:
     void checkChannel(int channel) const;
 
     It6332aConfig config_;
-    std::unique_ptr<transport::AsioLink> link_;
+    std::unique_ptr<transport::ScpiLink> link_;
     bool remote_{};
 };
 
