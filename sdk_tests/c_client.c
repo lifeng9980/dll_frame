@@ -3,6 +3,7 @@
 #include "IR_device.h"
 #include "IR_recipe.h"
 #include "IR_plugin_abi.h"
+#include "IR_power_driver_abi.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -41,6 +42,8 @@ int main(int argc, char **argv)
         return 1;
     }
     if (strcmp(IR_PLUGIN_QUERY_SYMBOL, "ir_plugin_query") != 0 ||
+        IR_POWER_DRIVER_ABI_VERSION != 1u ||
+        strcmp(IR_POWER_DRIVER_QUERY_SYMBOL, "ir_power_driver_query") != 0 ||
         sizeof(IRRecipeStepEvent) != 56 ||
         sizeof(IRRecipeRunOptions) != 24 ||
         sizeof(IRSlotView) != 72 ||

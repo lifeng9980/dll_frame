@@ -232,6 +232,7 @@ if(BUILD_TESTING)
     ir_add_metric_plugin(ir_test_plugin_good sdk_tests/plugins/test_plugin_good.cpp)
     ir_add_metric_plugin(ir_test_plugin_bad_abi sdk_tests/plugins/test_plugin_bad_abi.cpp)
     ir_add_metric_plugin(ir_test_plugin_duplicate sdk_tests/plugins/test_plugin_duplicate.cpp)
+    ir_add_metric_plugin(ir_test_power_driver sdk_tests/plugins/mock_power_driver.cpp)
     add_executable(plugin_abi_test
         sdk_tests/plugin_abi_test.cpp
         sdk_tests/plugins/test_plugin_good.cpp)
@@ -286,7 +287,8 @@ if(BUILD_TESTING)
 
         add_test(NAME power_tcp COMMAND "${Python3_EXECUTABLE}" -B
             "${PROJECT_SOURCE_DIR}/sdk_tests/power_mock_test.py"
-            --tcp "$<TARGET_FILE:IR_station>" --fixture-parent "${PROJECT_BINARY_DIR}")
+            --tcp "$<TARGET_FILE:IR_station>" --fixture-parent "${PROJECT_BINARY_DIR}"
+            --power-driver "$<TARGET_FILE:ir_test_power_driver>")
         set_tests_properties(power_tcp PROPERTIES TIMEOUT 30)
 
         add_test(NAME virtual_station_hil COMMAND "${Python3_EXECUTABLE}" -B

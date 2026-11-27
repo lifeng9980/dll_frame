@@ -242,16 +242,17 @@ private:
     std::unique_ptr<transport::AsioLink> link_;
 };
 
-struct ExternalPowerConfig {
-    std::string driverPath;
-    std::string expectedDriverId;
-    std::string driverConfigJson;
-};
-
 struct ExternalPowerInspection {
     uint32_t capabilities{0};
     int32_t minChannel{0};
     int32_t maxChannel{0};
+};
+
+struct ExternalPowerConfig {
+    std::string driverPath;
+    std::string expectedDriverId;
+    std::string driverConfigJson;
+    ExternalPowerInspection inspected{};
 };
 
 ExternalPowerInspection inspectExternalPowerDriver(const ExternalPowerConfig &config,

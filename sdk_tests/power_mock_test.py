@@ -91,6 +91,7 @@ def main():
     parser.add_argument("--tcp", action="store_true", help="use loopback TCP transport instead of Linux PTY")
     parser.add_argument("library", type=Path)
     parser.add_argument("--fixture-parent", type=Path, default=Path.cwd())
+    parser.add_argument("--power-driver", type=Path, default=None)
     args = parser.parse_args()
 
     if not args.tcp and os.name == "nt":
@@ -460,7 +461,7 @@ def main():
             assert not controller.output[0] and not second.exists()
             report, detail = run_recipe(sdk, offline, capture_only, second)
             assert report == (0, 2, 0, -1, 0), (report, detail)
-            test_udp6730_and_external_power(sdk, root, station, capture_only)
+            test_udp6730_and_external_power(sdk, root, station, capture_only, args.power_driver)
     finally:
         stop.set()
         if listener is not None:
@@ -477,7 +478,7 @@ def main():
     assert not server_error, server_error
 
 
-def test_udp6730_and_external_power(sdk, root, base_station, base_recipe):
+def test_udp6730_and_external_power(sdk, root, base_station, base_recipe, power_driver=None):
     # 1. Verify IT6332A multi-channel shared handle via direct C API
     it_ctrl = It6332a()
     it_srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -580,6 +581,32 @@ def test_udp6730_and_external_power(sdk, root, base_station, base_recipe):
         )
         status = sdk.IR_CheckRecipeJson(json.dumps(ext_bad).encode(), json.dumps(base_recipe).encode(), err, len(err))
         assert status != 0, status
+
+        if power_driver is not None:
+            # 4. Full external power driver lifecycle, driver_id mismatch, capability check, and failed-close endpoint release
+            ext_h = c.c_uint64()
+            bad_id_cfg = {"driver_path": str(power_driver), "driver_id": "wrong_id", "driver_config": {"ok": True}}
+            assert sdk.IR_OpenDevice(10, json.dumps(bad_id_cfg).encode(), c.byref(ext_h), err, len(err)) == 2
+
+            bad_cfg = {"driver_path": str(power_driver), "driver_id": "mock_power", "driver_config": {"invalid": True}}
+            assert sdk.IR_OpenDevice(10, json.dumps(bad_cfg).encode(), c.byref(ext_h), err, len(err)) == 2
+
+            good_cfg = {"driver_path": str(power_driver), "driver_id": "mock_power", "driver_config": {"fail_close": True}}
+            assert sdk.IR_OpenDevice(10, json.dumps(good_cfg).encode(), c.byref(ext_h), err, len(err)) == 0, err.value
+            er = Reading()
+            assert sdk.IR_ReadPower(ext_h, 1, c.byref(er), err, len(err)) == 0, err.value
+            assert er.output_enabled == 0
+            assert sdk.IR_SetPowerOutput(ext_h, 1, 1, c.byref(er), err, len(err)) == 0, err.value
+            assert er.output_enabled == 1 and abs(er.measured_v - 12.0) < 0.01
+            assert sdk.IR_SetPowerChannel(ext_h, 1, 10.0, 1.0, c.byref(er), err, len(err)) == 10  # IR_UNSUPPORTED
+            assert sdk.IR_CloseDevice(ext_h, err, len(err)) == 6  # IR_IO_ERROR propagated from mockClose
+            # Endpoint must be released despite failed close, allowing immediate re-open
+            assert sdk.IR_OpenDevice(10, json.dumps(good_cfg).encode(), c.byref(ext_h), err, len(err)) == 0, err.value
+            good_cfg2 = {"driver_path": str(power_driver), "driver_id": "mock_power", "driver_config": {"ok": True}}
+            ext_station = dict(base_station, devices={"ext": {"kind": "external-power", "connection": good_cfg2}})
+            ext_set = dict(base_recipe, steps=[{"id": "s", "type": "power_set", "device": "ext", "channel": 1, "voltage_v": 5.0, "current_limit_a": 1.0}])
+            assert sdk.IR_CheckRecipeJson(json.dumps(ext_station).encode(), json.dumps(ext_set).encode(), err, len(err)) == 10
+            assert sdk.IR_CloseDevice(ext_h, err, len(err)) == 6
     finally:
         stop_srv.set()
         it_srv.close()

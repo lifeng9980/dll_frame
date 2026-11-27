@@ -15,6 +15,7 @@
 #include <charconv>
 #include <cctype>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -52,8 +53,9 @@ bool parseUdpOutput(const std::string &reply)
 
 std::string readErrBuf(const char *err, size_t capacity, const char *fallback)
 {
-    if (!err || capacity == 0) return fallback;
-    const size_t len = strnlen(err, capacity - 1);
+    if (!err || capacity <= 1) return fallback;
+    const void *nul = std::memchr(err, '\0', capacity - 1);
+    const size_t len = nul ? static_cast<size_t>(static_cast<const char *>(nul) - err) : (capacity - 1);
     if (len == 0) return fallback;
     return std::string(err, len);
 }
@@ -98,7 +100,10 @@ const IRPowerDriverDescriptor *loadExternalDriver(const std::string &driverPath,
     if (it == externalDrivers.end()) {
         const auto nativePath = ir::utf8::pathFromUtf8(driverPath);
 #ifdef _WIN32
-        HMODULE mod = LoadLibraryW(nativePath.c_str());
+        HMODULE mod = nativePath.is_absolute()
+            ? LoadLibraryExW(nativePath.c_str(), nullptr,
+                             LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)
+            : LoadLibraryW(nativePath.c_str());
         require(mod != nullptr, IR_IO_ERROR,
                 "Cannot load external power driver '" + driverPath + "' (Win32 error " +
                 std::to_string(GetLastError()) + ")");
@@ -110,10 +115,15 @@ const IRPowerDriverDescriptor *loadExternalDriver(const std::string &driverPath,
                         "External power driver '" + driverPath + "' is missing " IR_POWER_DRIVER_QUERY_SYMBOL);
         }
 #else
+        (void)dlerror();
         void *mod = dlopen(nativePath.c_str(), RTLD_NOW | RTLD_LOCAL);
-        require(mod != nullptr, IR_IO_ERROR,
-                "Cannot load external power driver '" + driverPath + "': " +
-                (dlerror() ? dlerror() : "unknown error"));
+        if (!mod) {
+            const char *dlErr = dlerror();
+            throw Error(IR_IO_ERROR,
+                        "Cannot load external power driver '" + driverPath + "': " +
+                        (dlErr ? dlErr : "unknown error"));
+        }
+        (void)dlerror();
         auto queryFn = reinterpret_cast<IRPowerDriverQueryFn>(
             dlsym(mod, IR_POWER_DRIVER_QUERY_SYMBOL));
         if (!queryFn) {
@@ -140,6 +150,7 @@ const IRPowerDriverDescriptor *loadExternalDriver(const std::string &driverPath,
             desc->abi_version == IR_POWER_DRIVER_ABI_VERSION &&
             desc->struct_size >= sizeof(IRPowerDriverDescriptor) &&
             desc->driver_id != nullptr && *desc->driver_id != '\0' &&
+            (desc->capabilities & (IR_POWER_CAP_READ | IR_POWER_CAP_OUTPUT | IR_POWER_CAP_SET)) != 0 &&
             desc->min_channel >= 1 && desc->max_channel >= desc->min_channel &&
             desc->validate_config != nullptr && desc->open != nullptr && desc->close != nullptr &&
             (!(desc->capabilities & IR_POWER_CAP_READ) || desc->read != nullptr) &&
@@ -384,6 +395,9 @@ IRPowerReading ExternalPowerSupply::setPowerChannel(int channel, double voltageV
     require((capabilities_ & IR_POWER_CAP_SET) != 0 && desc_->set_channel != nullptr,
             IR_UNSUPPORTED, "Power driver does not support power_set");
     checkChannel(channel);
+    require(std::isfinite(voltageV) && voltageV >= 0.0 &&
+            std::isfinite(currentLimitA) && currentLimitA > 0.0,
+            IR_BAD_ARGUMENT, "Power voltage must be nonnegative and current limit must be positive");
 
     IRPowerReading reading{};
     char err[512]{};

@@ -102,8 +102,10 @@ std::string resolveStationSource(const fs::path &stationPath, const std::string 
         auto resolveRel = [&](Json &obj, const char *key) {
             const auto it = obj.find(key);
             if (it == obj.end() || !it->is_string()) return;
-            const auto raw = it->get<std::string>();
-            if (raw.empty()) return;
+            auto raw = it->get<std::string>();
+            const auto first = raw.find_first_not_of(" \t\r\n\f\v");
+            if (first == std::string::npos) return;
+            raw = raw.substr(first, raw.find_last_not_of(" \t\r\n\f\v") - first + 1);
             const auto p = pathFromUtf8(raw);
             if (p.is_relative()) {
                 *it = pathUtf8(fs::absolute(stationPath.parent_path() / p).lexically_normal());

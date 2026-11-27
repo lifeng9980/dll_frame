@@ -248,7 +248,7 @@ DeviceOptions parseDeviceConnection(int32_t kind, const Json &json, std::string_
         if (driverCfgIt == json.end() || !driverCfgIt->is_object())
             fields.fail("driver_config", "must be an object");
         result.driverConfigJson = driverCfgIt->dump();
-        (void)ir::instruments::inspectExternalPowerDriver(result, path);
+        result.inspected = ir::instruments::inspectExternalPowerDriver(result, path);
         return result;
     }
     case IR_OVEN_GWS_STEN:
@@ -419,8 +419,7 @@ PowerCapabilitiesInfo queryPowerDeviceCapabilities(int32_t kind, const nlohmann:
         return {IR_POWER_CAP_READ | IR_POWER_CAP_OUTPUT, 1, 1};
     }
     if (const auto *ext = std::get_if<ExternalPowerConfig>(&parsed)) {
-        const auto info = inspectExternalPowerDriver(*ext, path);
-        return {info.capabilities, info.minChannel, info.maxChannel};
+        return {ext->inspected.capabilities, ext->inspected.minChannel, ext->inspected.maxChannel};
     }
     throw Error(IR_BAD_ARGUMENT, std::string(path) + " is not a power supply");
 }
