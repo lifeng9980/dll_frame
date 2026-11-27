@@ -529,8 +529,11 @@ def test_udp6730_and_external_power(sdk, root, base_station, base_recipe, power_
     try:
         err = c.create_string_buffer(1024)
         it_h = c.c_uint64()
-        assert sdk.IR_OpenDevice(4, json.dumps({"host": "127.0.0.1", "tcp_port": it_port}).encode(),
-                                 c.byref(it_h), err, len(err)) == 0, err.value
+        it_cfg = json.dumps({"host": "127.0.0.1", "tcp_port": it_port}).encode()
+        assert sdk.IR_OpenDevice(4, it_cfg, c.byref(it_h), err, len(err)) == 0, err.value
+        dup_h = c.c_uint64(77)
+        assert sdk.IR_OpenDevice(4, it_cfg, c.byref(dup_h), err, len(err)) == IR_BUSY, err.value
+        assert dup_h.value == 0
         r1 = Reading()
         r2 = Reading()
         assert sdk.IR_SetPowerChannel(it_h, 1, 12.0, 2.0, c.byref(r1), err, len(err)) == 0, err.value

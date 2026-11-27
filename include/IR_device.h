@@ -82,8 +82,8 @@ typedef struct IRPowerCurrentStableSpec {
     int32_t reserved;                 /* 对齐保留，置 0 */
 } IRPowerCurrentStableSpec;
 
-/* IT6332A 配置 JSON 含串口 port（baud_rate 默认 115200，可选 data_bits/parity/stop_bits）
- * 或 TCP host/tcp_port（默认 5026）二选一，以及可选 timeout_ms（默认 1200）。
+/* IT6332A 配置 JSON 含串口 port（baud_rate 默认 115200，可选 data_bits/parity/stop_bits）、
+ * TCP host/tcp_port（默认 5026）或 Windows visa_resource 三选一，以及可选 timeout_ms（默认 1200）。
  * 打开时确认 *IDN? 返回 IT6332A，并切换到远程控制。每个操作先确认所选通道（1～3）。
  * UDP6730 配置 JSON 含串口 port（baud_rate 默认 9600）或 TCP host/tcp_port（默认 5026）二选一，
  * 可选 timeout_ms（默认 1500）；支持单通道（1）读取和输出控制。

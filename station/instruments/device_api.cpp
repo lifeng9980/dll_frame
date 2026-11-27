@@ -229,7 +229,12 @@ DeviceOptions parseDeviceConnection(int32_t kind, const Json &json, std::string_
         return parseBlackbodyConfig(kind, fields);
     case IR_IT6332A: {
         It6332aConfig result;
-        result.endpoint = parseTcpOrSerialEndpoint(fields, 5026, 115200);
+        if (fields.contains("visa_resource")) {
+            fields.allow({"visa_resource", "timeout_ms"});
+            result.visaResource = fields.text("visa_resource", true);
+        } else {
+            result.endpoint = parseTcpOrSerialEndpoint(fields, 5026, 115200);
+        }
         result.timeout = fields.timeout(result.timeout);
         return result;
     }
@@ -477,7 +482,7 @@ noexcept{
         auto parsed = parseDeviceConnection(kind, parseConfigJson(config), "connection");
         const auto endpointKeys = std::visit([](auto &options) {
             using Config = std::decay_t<decltype(options)>;
-            if constexpr (std::is_same_v<Config, Dmm6500Config>) {
+            if constexpr (std::is_same_v<Config, Dmm6500Config> || std::is_same_v<Config, It6332aConfig>) {
                 if (!options.visaResource.empty())
                     return std::vector<std::string>{"visa:" + lowercaseAscii(options.visaResource)};
                 return resolveEndpointKeys(options.endpoint, options.timeout);

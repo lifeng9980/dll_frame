@@ -1439,6 +1439,7 @@ void testInstrumentConnectionPreflight()
         {"blackbody-serial", {{"kind", "dcn1000"},
                               {"connection", {{"port", "unused-serial"}, {"expected_head_serial", " HEAD "}}}}},
         {"supply", {{"kind", "it6332a"}, {"connection", {{"port", "unused-serial"}, {"parity", " EvEn "}}}}},
+        {"supply-visa", {{"kind", "it6332a"}, {"connection", {{"visa_resource", "USB0::0x2EC7::0x6332::TEST::INSTR"}, {"timeout_ms", 500}}}}},
         {"chamber", {{"kind", "gws-sten"}, {"connection", {{"host", "unused.invalid"}, {"delimiter", " CrLf "}}}}},
         {"usb-meter", {{"kind", "dmm6500"}, {"connection", {{"visa_resource", "USB0::0x05E6::0x6500::TEST::INSTR"}}}}},
         {"meter", {{"kind", "dmm6500"}, {"connection", {{"host", "unused.invalid"}}}}},
@@ -1459,6 +1460,10 @@ void testInstrumentConnectionPreflight()
         {"dcn1000", IR_DCN1000, {{"port", "unused-serial"}, {"baud_rate", 115200}}, ".baud_rate"},
         {"dcn1000", IR_DCN1000, {{"port", "unused-serial"}, {"head", 0}}, ".head"},
         {"it6332a", IR_IT6332A, {{"host", "unused.invalid"}, {"port", "unused-serial"}}, ""},
+        {"it6332a", IR_IT6332A, {{"visa_resource", " "}}, ".visa_resource"},
+        {"it6332a", IR_IT6332A, {{"visa_resource", "supply"}, {"host", "localhost"}}, ".host"},
+        {"it6332a", IR_IT6332A, {{"visa_resource", "supply"}, {"port", "COM8"}}, ".port"},
+        {"it6332a", IR_IT6332A, {{"visa_resource", "supply"}, {"baud_rate", 115200}}, ".baud_rate"},
         {"gws-sten", IR_OVEN_GWS_STEN, {{"host", "unused.invalid"}, {"delimiter", "bad"}}, ".delimiter"},
         {"dmm6500", IR_DMM6500, {{"visa_resource", " "}}, ".visa_resource"},
         {"dmm6500", IR_DMM6500, {{"visa_resource", "meter"}, {"host", "localhost"}}, ".host"},
@@ -1477,6 +1482,22 @@ void testInstrumentConnectionPreflight()
         CHECK(IR_OpenDevice(entry.kind, entry.connection.dump().c_str(), &handle, error, sizeof error) == IR_BAD_ARGUMENT);
         CHECK(handle == 0);
         CHECK(std::string_view(error).starts_with(std::string("connection") + entry.field));
+    }
+
+    // Failed VISA open must release the shared visa: endpoint key and emit device-agnostic diagnostics.
+    const char *visaCfg = R"({"visa_resource":"USB0::0x2EC7::0x6332::NONEXISTENT::INSTR","timeout_ms":100})";
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        IRHandle h1{1};
+        const int32_t s1 = IR_OpenDevice(IR_IT6332A, visaCfg, &h1, error, sizeof error);
+        CHECK(s1 != IR_OK && s1 != IR_BUSY);
+        CHECK(h1 == 0);
+        CHECK(std::string_view(error).find("DMM6500") == std::string_view::npos);
+
+        IRHandle h2{1};
+        const int32_t s2 = IR_OpenDevice(IR_DMM6500, visaCfg, &h2, error, sizeof error);
+        CHECK(s2 != IR_OK && s2 != IR_BUSY);
+        CHECK(h2 == 0);
+        CHECK(std::string_view(error).find("DMM6500") == std::string_view::npos);
     }
 }
 
