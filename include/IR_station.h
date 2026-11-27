@@ -85,7 +85,7 @@ IR_STATION_API int32_t IR_SetFrameQueueCapacity(int32_t capacity, char *err, int
 IR_STATION_API int32_t IR_TryReadLatestFrame(IRFrameBatchView *batch,
     char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
-/* 获取当前采集会话统计与 FrameQueue 诊断快照（线程安全、非阻塞）。 */
+/* 获取当前采集会话统计与 FrameQueue 诊断快照（线程安全，可能短暂等待预览复制）。 */
 IR_STATION_API int32_t IR_GetCaptureStats(IRCaptureStats *stats, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
 #ifdef __cplusplus

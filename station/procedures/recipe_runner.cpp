@@ -457,6 +457,17 @@ int32_t executeRepeatBurstStep(RuntimeState &rt, const RepeatBurstStep &rb)
     const auto loopStart = std::chrono::steady_clock::now();
     std::ofstream csvStream;
     int32_t iterationsDone = 0;
+    const auto recordCompletedBurst = [&] {
+        if (iterationsDone == 0) {
+            rt.burstRunsSummary.push_back({
+                {"id", rb.ref.id},
+                {"csv_file", rb.csvFile},
+                {"iterations", 1}
+            });
+        } else {
+            rt.burstRunsSummary.back()["iterations"] = iterationsDone + 1;
+        }
+    };
     for (;;) {
         rt.progress.enter(IR_RECIPE_STAGE_CAPTURE, &rb.ref);
         rt.capture.checkStop();
@@ -507,6 +518,7 @@ int32_t executeRepeatBurstStep(RuntimeState &rt, const RepeatBurstStep &rb)
         csvStream.flush();
         require(csvStream.good(), IR_IO_ERROR,
                 "Failed flushing burst summary CSV: " + rb.csvFile);
+        recordCompletedBurst();
         ++iterationsDone;
         if (rt.capture.source && rt.capture.source->isLive())
             rt.freshFramesRequired = true;
@@ -520,25 +532,23 @@ int32_t executeRepeatBurstStep(RuntimeState &rt, const RepeatBurstStep &rb)
 
         if (rb.intervalSec > 0.0) {
             rt.progress.enter(IR_RECIPE_STAGE_CAPTURE, &rb.ref);
-            const auto sleepEnd = std::chrono::steady_clock::now() +
-                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                    std::chrono::duration<double>(rb.intervalSec));
-            while (std::chrono::steady_clock::now() < sleepEnd) {
+            const auto waitStart = std::chrono::steady_clock::now();
+            const double elapsedBeforeWait = std::chrono::duration<double>(
+                waitStart - loopStart).count();
+            const double waitSeconds = rb.durationSec > 0.0
+                ? std::min(rb.intervalSec, std::max(0.0, rb.durationSec - elapsedBeforeWait))
+                : rb.intervalSec;
+            while (std::chrono::duration<double>(std::chrono::steady_clock::now() - waitStart).count() < waitSeconds) {
                 rt.capture.checkStop();
-                const auto rem = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    sleepEnd - std::chrono::steady_clock::now()).count();
-                if (rem <= 0) break;
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(std::min<int64_t>(rem, 50)));
+                const double waited = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - waitStart).count();
+                const double remaining = waitSeconds - waited;
+                if (remaining <= 0.0) break;
+                std::this_thread::sleep_for(std::chrono::duration<double>(std::min(0.05, remaining)));
             }
         }
     }
     rt.progress.enter(IR_RECIPE_STAGE_CAPTURE, &rb.ref);
-    rt.burstRunsSummary.push_back({
-        {"id", rb.ref.id},
-        {"csv_file", rb.csvFile},
-        {"iterations", iterationsDone}
-    });
     return iterationsDone;
 }
 

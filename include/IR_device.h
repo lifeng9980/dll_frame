@@ -48,6 +48,8 @@ IR_STATION_API int32_t IR_ReadBlackbody(IRHandle handle, IRBlackbodyReading *rea
     char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
 /* 等待已打开黑体在 tolerance_c 容差内连续保持 stable_window_ms 毫秒（可选要求设备自身稳定标志）。
+ * 本接口、IR_WaitOvenStable 和 IR_WaitPowerCurrentStable 与配方和已启动的采集共用进程级取消状态。
+ * 若另一线程持有其中一项活动操作，等待返回 IR_BUSY，即使使用不同的设备句柄。
  * 支持从其他线程调用 IR_RequestStop() 中止等待；reading 不可为 NULL，成功时返回最后一次读数。
  */
 IR_STATION_API int32_t IR_WaitBlackbodyStable(IRHandle handle, double target_c, double tolerance_c,
@@ -93,6 +95,7 @@ IR_STATION_API int32_t IR_ReadPower(IRHandle handle, int32_t channel,
     IRPowerReading *reading, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 
 /* 等待已开启电源通道先通过可选的负载启动确认，再连续保持电流稳定低于 stable_threshold_a。
+ * 并发与取消规则同 IR_WaitBlackbodyStable。
  * 支持从其他线程调用 IR_RequestStop() 中止等待；spec 与 reading 不可为 NULL，成功时返回最终读数。
  */
 IR_STATION_API int32_t IR_WaitPowerCurrentStable(IRHandle handle, int32_t channel,
@@ -138,6 +141,7 @@ IR_STATION_API int32_t IR_SetOven(IRHandle handle, double target_c, double *read
 IR_STATION_API int32_t IR_ReadOven(IRHandle handle, IROvenReading *reading,
     char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 IR_STATION_API int32_t IR_StopOven(IRHandle handle, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
+/* 等待温箱达到目标温度并保持稳定。并发与取消规则同 IR_WaitBlackbodyStable。 */
 IR_STATION_API int32_t IR_WaitOvenStable(IRHandle handle, double target_c, double tolerance_c,
     int32_t stable_window_ms, int32_t timeout_ms, int32_t require_no_alarm,
     IROvenReading *reading, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;

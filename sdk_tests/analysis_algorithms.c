@@ -90,6 +90,20 @@ int main(void)
         fprintf(stderr, "IR_FrameStatistics U32 failed: status=%d err=%s\n", status, err);
         return 1;
     }
+    status = IR_FrameStatistics(&wide_view, 1, wide_mean, wide_std, 4,
+                                wide_summary, 2, err, (int32_t)sizeof err);
+    if (status != IR_OK || fabs(wide_mean[0] - 70001.0) > 1e-12 ||
+        fabs(wide_std[0] - sqrt(2.0)) > 1e-12 ||
+        fabs(wide_summary[1] - sqrt(2.0)) > 1e-12) {
+        fprintf(stderr, "IR_FrameStatistics reused output buffers failed: status=%d err=%s\n", status, err);
+        return 1;
+    }
+    status = IR_FrameStatistics(&wide_view, 1, wide_mean, wide_mean, 4,
+                                wide_summary, 2, err, (int32_t)sizeof err);
+    if (status != IR_BAD_ARGUMENT) {
+        fprintf(stderr, "IR_FrameStatistics accepted aliased maps: status=%d err=%s\n", status, err);
+        return 1;
+    }
     IRArrayView short_view = wide_view;
     short_view.byte_size -= sizeof(uint32_t);
     if (IR_FrameStatistics(&short_view, 0, wide_mean, wide_std, 4,

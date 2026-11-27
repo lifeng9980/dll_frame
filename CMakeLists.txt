@@ -266,6 +266,12 @@ if(BUILD_TESTING)
             --capture-accept "$<TARGET_FILE:ir_capture_accept>" --fixture-parent "${PROJECT_BINARY_DIR}")
         set_tests_properties(ir_run_recipe_offline_check ir_capture_accept_soak PROPERTIES TIMEOUT 60)
 
+        add_test(NAME ir_drift_example_self_test COMMAND "${Python3_EXECUTABLE}" -B
+            "${PROJECT_SOURCE_DIR}/sdk_tests/raw_replay_cli_test.py"
+            --drift-example "${PROJECT_SOURCE_DIR}/examples/python/ir_drift_nodisk.py"
+            --library-dir "$<TARGET_FILE_DIR:IR_station>" --fixture-parent "${PROJECT_BINARY_DIR}")
+        set_tests_properties(ir_drift_example_self_test PROPERTIES TIMEOUT 120)
+
         add_test(NAME blackbody_tcp COMMAND "${Python3_EXECUTABLE}" -B
             "${PROJECT_SOURCE_DIR}/sdk_tests/blackbody_mock_test.py"
             tcp "$<TARGET_FILE:IR_station>" --fixture-parent "${PROJECT_BINARY_DIR}")

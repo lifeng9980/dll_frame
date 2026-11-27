@@ -11,6 +11,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Threads REQUIRED)
 set(IR_SDK_INCLUDE_DIR "${IR_SDK_ROOT}/include")
 
+add_library(ir_example_mean_plugin MODULE "${CMAKE_CURRENT_LIST_DIR}/plugins/mean_dn.cpp")
+target_include_directories(ir_example_mean_plugin PRIVATE "${IR_SDK_INCLUDE_DIR}")
+if(MSVC)
+    target_compile_options(ir_example_mean_plugin PRIVATE /utf-8)
+endif()
+
 if(WIN32)
     set(IR_SDK_BIN_DIR "${IR_SDK_ROOT}/windows-x64/bin")
     set(IR_SDK_LIB_DIR "${IR_SDK_ROOT}/windows-x64/lib")

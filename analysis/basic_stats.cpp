@@ -21,18 +21,18 @@ void frameStatisticsCore(const T *frames, int32_t frameCount, int64_t pixelCount
                          int32_t sampleStd, double *means, double *stds,
                          double *summary)
 {
-    std::vector<double> mean(static_cast<size_t>(pixelCount), 0.0);
-    std::vector<double> m2(static_cast<size_t>(pixelCount), 0.0);
+    std::fill_n(means, static_cast<size_t>(pixelCount), 0.0);
+    std::fill_n(stds, static_cast<size_t>(pixelCount), 0.0);
     for (int32_t frame = 0; frame < frameCount; ++frame)
     {
         const int64_t frameOffset = int64_t(frame) * pixelCount;
         for (int64_t pixel = 0; pixel < pixelCount; ++pixel)
         {
             const double value = static_cast<double>(frames[frameOffset + pixel]);
-            const double delta = value - mean[static_cast<size_t>(pixel)];
-            mean[static_cast<size_t>(pixel)] += delta / (frame + 1);
-            m2[static_cast<size_t>(pixel)] +=
-                delta * (value - mean[static_cast<size_t>(pixel)]);
+            const size_t index = static_cast<size_t>(pixel);
+            const double delta = value - means[index];
+            means[index] += delta / (frame + 1);
+            stds[index] += delta * (value - means[index]);
         }
     }
 
@@ -41,12 +41,10 @@ void frameStatisticsCore(const T *frames, int32_t frameCount, int64_t pixelCount
     for (int64_t pixel = 0; pixel < pixelCount; ++pixel)
     {
         const size_t index = static_cast<size_t>(pixel);
-        m2[index] = std::sqrt(std::max(0.0, m2[index] / (frameCount - sampleStd)));
-        average += mean[index] / pixelCount;
-        averageStd += m2[index] / pixelCount;
+        stds[index] = std::sqrt(std::max(0.0, stds[index] / (frameCount - sampleStd)));
+        average += means[index] / pixelCount;
+        averageStd += stds[index] / pixelCount;
     }
-    std::copy(mean.begin(), mean.end(), means);
-    std::copy(m2.begin(), m2.end(), stds);
     summary[0] = average;
     summary[1] = averageStd;
 }
@@ -70,6 +68,8 @@ extern "C" IR_ANALYSIS_API int32_t IR_FrameStatistics(
         needed(means, capacity, n);
         needed(stds, capacity, n);
         needed(summary, sn, 2);
+        require(means != stds, IR_BAD_ARGUMENT,
+                "mean_map and std_map must use separate buffers");
         dispatchRawArrayView(*input, [&](const auto *frames) {
             frameStatisticsCore(frames, input->frames, n, sample, means, stds, summary);
         });

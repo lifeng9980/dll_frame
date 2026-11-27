@@ -447,6 +447,8 @@ $standaloneCliCheck = Invoke-External -FilePath (Join-Path $ClientBuildDir "ir_r
 Assert-True ($standaloneCliCheck.StdOut.Trim() -eq "recipe=VALID") "standalone ir_run_recipe --check failed"
 $null = Invoke-External -FilePath (Join-Path $ClientBuildDir "ir_capture_accept.exe") -Arguments @("--list")
 Write-Host "  Standalone ir_c_client, ir_cpp_client, ir_analysis_c_sample, ir_run_recipe, and ir_capture_accept verified."
+$ExamplePlugin = Join-Path $ClientBuildDir "ir_example_mean_plugin.dll"
+Assert-True (Test-Path -LiteralPath $ExamplePlugin) "Customer metric plugin example was not built"
 
 Write-Step "10. Running packaged CLI and Python smoke tests"
 $PkgCli = Join-Path $PkgRoot "windows-x64\bin\ir_run_recipe.exe"
@@ -456,6 +458,11 @@ $RawSmokeDir = Join-Path $TempRecipesDir "replay"
 Invoke-External -FilePath $pythonPath -WorkingDirectory $RepoRoot `
     -Arguments @("-B", (Join-Path $RepoRoot "sdk_tests\raw_replay_cli_test.py"),
                  "--write-fixture", $RawSmokeDir) | Out-Null
+
+$null = Invoke-External -FilePath $pythonPath -WorkingDirectory $RepoRoot `
+    -Arguments @("-B", (Join-Path $RepoRoot "sdk_tests\raw_replay_cli_test.py"),
+                 "--plugin-example", $PkgCli,
+                 "--plugin-dll", $ExamplePlugin, "--fixture-parent", $TempRecipesDir)
 
 $OfflineStationObj = [System.IO.File]::ReadAllText((Join-Path $PkgRoot "examples\stations\offline.json"), $Utf8NoBom) | ConvertFrom-Json
 $OfflineStationObj.acquisition.source = "replay"

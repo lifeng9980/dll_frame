@@ -5,8 +5,9 @@
 extern "C" {
 #endif
 
-/* 检查工位 JSON 与流程 JSON 的结构和步骤关系，不打开设备、不创建文件。
- * 两个 JSON 参数均为 UTF-8。此接口可供 C、C# 和 Python 在运行前校验配置。
+/* 检查 UTF-8 工位 JSON 与流程 JSON 的结构和步骤关系。SDK 不打开采集源或仪器，也不创建输出文件。
+ * 若配置了 plugins，预检会加载插件库，调用 ir_plugin_query，并对配方引用的插件算子调用 prepare。
+ * 插件及其辅助库使用进程级缓存，更新后须重启宿主进程。
  */
 IR_STATION_API int32_t IR_CheckRecipeJson(const char *station_json_utf8,
     const char *recipe_json_utf8, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;

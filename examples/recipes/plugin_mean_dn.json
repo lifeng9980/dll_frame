@@ -1,0 +1,14 @@
+{
+  "schemav": 1,
+  "recipe_id": "example-plugin-mean-dn",
+  "steps": [
+    {"id": "capture", "type": "capture", "frames": 2,
+     "frame_timeout_ms": 0, "output": "batch"},
+    {"id": "mean", "type": "analyze", "method": "plugin:example.mean_dn",
+     "name": "plugin_mean", "input": "batch"}
+  ],
+  "limits": [
+    {"metric": "plugin_mean.mean_dn", "operator": "max", "value": 3.5, "unit": "DN"},
+    {"metric": "plugin_mean.mean_dn", "operator": "min", "value": 3.5, "unit": "DN"}
+  ]
+}

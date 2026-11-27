@@ -258,7 +258,7 @@ def main():
             t0 = time.perf_counter()
             try:
                 open_specs = [
-                    (IR_DCN1000, {"port": serial_map["blackbody"]["client_port"], "baud_rate": 9600, "timeout_ms": 1500}, h_bb),
+                    (IR_DCN1000, {"port": serial_map["blackbody"]["client_port"], "timeout_ms": 1500}, h_bb),
                     (IR_IT6332A, {"port": serial_map["power"]["client_port"], "baud_rate": 115200, "timeout_ms": 1200}, h_pwr),
                     (IR_OVEN_GWS_STEN, {"port": serial_map["oven"]["client_port"], "baud_rate": 9600, "address": 1, "delimiter": "crlf", "timeout_ms": 1500}, h_oven),
                     (IR_DMM6500, {"port": serial_map["dmm"]["client_port"], "baud_rate": 115200, "timeout_ms": 1500}, h_dmm),

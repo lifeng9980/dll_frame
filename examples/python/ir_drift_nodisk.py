@@ -18,8 +18,10 @@ import os
 from pathlib import Path
 import signal
 import sys
+import tempfile
 from tempfile import TemporaryDirectory
 import time
+import uuid
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
@@ -363,7 +365,7 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
     backend = backend_map[args.mode]
 
     output_dir = Path(args.output_dir).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=False)
     csv_path = output_dir / "drift_summary.csv"
     meta_path = output_dir / "drift_meta.json"
 
@@ -827,6 +829,8 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
                 if args.mode in ("directshow", "v4l2") and args.interval_sec > 0.0:
                     if args.max_bursts == 0 or burst_idx < args.max_bursts:
                         deadline = time.monotonic() + args.interval_sec
+                        if args.max_bursts == 0:
+                            deadline = min(deadline, start_mono + duration_s)
                         while not stop_flag and time.monotonic() < deadline:
                             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
 
@@ -837,10 +841,9 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
             mean_series = (c.c_double * n_pts)(*[float(r["org_mean_dn"]) for r in rows_written])
             freqs = (c.c_double * bins)()
             amps = (c.c_double * bins)()
-            drift_rate_hz = (1.0 / args.interval_sec) if args.interval_sec > 0.0 else 1.0
             check_status(
                 analysis.IR_ComputeRfft1D(
-                    mean_series, n_pts, drift_rate_hz, IR_WINDOW_RECTANGULAR, 1,
+                    mean_series, n_pts, 1.0, IR_WINDOW_RECTANGULAR, 1,
                     freqs, amps, None, bins, err, len(err),
                 ),
                 "IR_ComputeRfft1D(drift_series)",
@@ -849,9 +852,9 @@ def run_drift_session(args: argparse.Namespace, station, analysis, source_path: 
             best_k = max(range(1, bins), key=lambda k: amps[k]) if bins > 1 else 0
             drift_fft_summary = {
                 "bursts": n_pts,
-                "sample_rate_hz": drift_rate_hz,
+                "frequency_unit": "cycles/burst",
                 "dc_removed": True,
-                "peak_freq_hz": freqs[best_k],
+                "peak_cycles_per_burst": freqs[best_k],
                 "peak_amp_dn": amps[best_k],
             }
     finally:
@@ -914,7 +917,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--library-dir", type=Path, default=sdk_library_directory())
     parser.add_argument("--source", default="", help="camera name/device or RAW16 directory")
     parser.add_argument("--valid-bits", type=int, default=16)
-    parser.add_argument("--output-dir", type=Path, default=Path("./drift_nodisk_out"))
+    parser.add_argument("--output-dir", type=Path, default=None,
+                        help="new output directory; self-test creates a unique temporary directory by default")
     parser.add_argument("--duration-hours", type=float, default=5.0)
     parser.add_argument("--interval-sec", type=float, default=60.0)
     parser.add_argument("--max-bursts", type=int, default=0, help="0 = run until duration_hours")
@@ -955,6 +959,11 @@ def main() -> int:
         args.max_bursts = 3
     if is_self_test:
         args.enable_noise3d = True
+    if args.output_dir is None:
+        if is_self_test:
+            args.output_dir = Path(tempfile.gettempdir()) / f"ir-drift-self-test-{uuid.uuid4().hex}"
+        else:
+            args.output_dir = Path("./drift_nodisk_out")
 
     if not is_self_test and not args.source:
         raise SystemExit("--source is required when --mode is not self-test")
