@@ -53,19 +53,29 @@ std::vector<std::string> resolveTcpAddresses(const TcpEndpoint &endpoint, Deadli
 
 // One caller owns a link at a time. A request and all its response fragments
 // share the same deadline. Delimited and exact reads retain extra bytes for the next read.
-class AsioLink {
+class ScpiLink {
+public:
+    virtual ~ScpiLink() = default;
+    virtual void writeAll(std::string_view bytes, Deadline deadline) = 0;
+    virtual std::string readDelimited(char delimiter, Deadline deadline) = 0;
+    virtual void discardSerialInput() = 0;
+};
+
+std::unique_ptr<ScpiLink> openVisaLink(const std::string &resource, Deadline deadline);
+
+class AsioLink final : public ScpiLink {
 public:
     AsioLink(const TcpEndpoint &endpoint, Deadline deadline);
     explicit AsioLink(const SerialEndpoint &endpoint);
-    ~AsioLink();
+    ~AsioLink() override;
     AsioLink(const AsioLink &) = delete;
     AsioLink &operator=(const AsioLink &) = delete;
 
-    void writeAll(std::string_view bytes, Deadline deadline);
-    std::string readDelimited(char delimiter, Deadline deadline);
+    void writeAll(std::string_view bytes, Deadline deadline) override;
+    std::string readDelimited(char delimiter, Deadline deadline) override;
     std::string readDelimited(std::string_view delimiter, Deadline deadline);
     std::string readExact(std::size_t count, Deadline deadline);
-    void discardSerialInput();
+    void discardSerialInput() override;
 
 private:
     struct State;

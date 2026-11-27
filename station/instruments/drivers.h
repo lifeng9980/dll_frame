@@ -86,6 +86,7 @@ private:
 };
 
 struct Dmm6500Config {
+    std::string visaResource;
     transport::Endpoint endpoint;
     std::chrono::milliseconds timeout{2000};
 };
@@ -104,7 +105,7 @@ private:
     IRDmmReading readOnce(int32_t expectedMode);
 
     Dmm6500Config config_;
-    std::unique_ptr<transport::AsioLink> link_;
+    std::unique_ptr<transport::ScpiLink> link_;
 };
 
 struct GwsStenConfig {

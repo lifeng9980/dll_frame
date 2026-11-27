@@ -79,7 +79,11 @@ void Dmm6500::connect()
 {
     link_.reset();
     try {
-        link_ = transport::openLink(config_.endpoint, Clock::now() + config_.timeout);
+        const auto deadline = Clock::now() + config_.timeout;
+        if (config_.visaResource.empty())
+            link_ = transport::openLink(config_.endpoint, deadline);
+        else
+            link_ = transport::openVisaLink(config_.visaResource, deadline);
         const auto idn = upper(query("*IDN?"));
         require(idn.find("DMM6500") != std::string::npos, IR_IO_ERROR,
                 "Device is not a Keithley DMM6500: " + idn);

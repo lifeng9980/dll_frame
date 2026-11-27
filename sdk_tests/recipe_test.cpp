@@ -1440,6 +1440,7 @@ void testInstrumentConnectionPreflight()
                               {"connection", {{"port", "unused-serial"}, {"expected_head_serial", " HEAD "}}}}},
         {"supply", {{"kind", "it6332a"}, {"connection", {{"port", "unused-serial"}, {"parity", " EvEn "}}}}},
         {"chamber", {{"kind", "gws-sten"}, {"connection", {{"host", "unused.invalid"}, {"delimiter", " CrLf "}}}}},
+        {"usb-meter", {{"kind", "dmm6500"}, {"connection", {{"visa_resource", "USB0::0x05E6::0x6500::TEST::INSTR"}}}}},
         {"meter", {{"kind", "dmm6500"}, {"connection", {{"host", "unused.invalid"}}}}},
         {"detector", {{"kind", "detector-serial"}, {"connection", {{"host", "unused.invalid"}}}}},
         {"cooler", {{"kind", "cooler-modbus"}, {"connection", {{"port", "unused-serial"}}}}}
@@ -1459,6 +1460,9 @@ void testInstrumentConnectionPreflight()
         {"dcn1000", IR_DCN1000, {{"port", "unused-serial"}, {"head", 0}}, ".head"},
         {"it6332a", IR_IT6332A, {{"host", "unused.invalid"}, {"port", "unused-serial"}}, ""},
         {"gws-sten", IR_OVEN_GWS_STEN, {{"host", "unused.invalid"}, {"delimiter", "bad"}}, ".delimiter"},
+        {"dmm6500", IR_DMM6500, {{"visa_resource", " "}}, ".visa_resource"},
+        {"dmm6500", IR_DMM6500, {{"visa_resource", "meter"}, {"host", "localhost"}}, ".host"},
+        {"dmm6500", IR_DMM6500, {{"visa_resource", "meter"}, {"port", "COM8"}}, ".port"},
         {"dmm6500", IR_DMM6500, {{"host", " \t "}}, ".host"},
         {"dmm6500", IR_DMM6500, {{"host", "127.0.0.1"}, {"tcp_port", 1}, {"timeout_ms", 20}, {"stop_bits", 2}}, ".stop_bits"},
         {"detector-serial", IR_DETECTOR_SERIAL, {{"port", "unused-serial"}, {"tcp_port", 2102}}, ".tcp_port"},

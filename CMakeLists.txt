@@ -80,6 +80,7 @@ target_sources(IR_station PRIVATE
     station/instruments/doc058.cpp
     station/instruments/it6332a.cpp
     station/instruments/gws_sten.cpp
+    station/instruments/visa_link.cpp
     station/instruments/dmm6500.cpp
     station/instruments/detector_serial.cpp
     station/instruments/cooler_modbus.cpp

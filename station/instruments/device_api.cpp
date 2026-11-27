@@ -232,7 +232,12 @@ DeviceOptions parseDeviceConnection(int32_t kind, const Json &json, std::string_
         return parseOvenConfig(fields);
     case IR_DMM6500: {
         Dmm6500Config result;
-        result.endpoint = parseTcpOrSerialEndpoint(fields, 5025, 115200);
+        if (fields.contains("visa_resource")) {
+            fields.allow({"visa_resource", "timeout_ms"});
+            result.visaResource = fields.text("visa_resource", true);
+        } else {
+            result.endpoint = parseTcpOrSerialEndpoint(fields, 5025, 115200);
+        }
         result.timeout = fields.timeout(result.timeout);
         return result;
     }
@@ -432,6 +437,10 @@ noexcept{
         needed(out, 1, 1);
         auto parsed = parseDeviceConnection(kind, parseConfigJson(config), "connection");
         const auto endpointKeys = std::visit([](auto &options) {
+            if constexpr (std::is_same_v<std::decay_t<decltype(options)>, Dmm6500Config>) {
+                if (!options.visaResource.empty())
+                    return std::vector<std::string>{"visa:" + lowercaseAscii(options.visaResource)};
+            }
             return resolveEndpointKeys(options.endpoint, options.timeout);
         }, parsed);
         {

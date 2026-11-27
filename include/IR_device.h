@@ -162,7 +162,7 @@ typedef struct IRDmmReading {
     int32_t valid;        /* 1=有效 */
 } IRDmmReading;
 
-/* DMM6500 配置 JSON 含 port（默认 115200 baud）或 host/tcp_port（默认 5025）二选一及可选 timeout_ms（默认 2000）。 */
+/* DMM6500 配置 JSON 含 port（默认 115200 baud）、host/tcp_port（默认 5025）或 Windows visa_resource 三选一及可选 timeout_ms（默认 2000）。 */
 IR_STATION_API int32_t IR_SetDmmMode(IRHandle handle, int32_t mode, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
 IR_STATION_API int32_t IR_ReadDmm(IRHandle handle, int32_t expected_mode,
     IRDmmReading *reading, char *err, int32_t err_bytes) IR_STATION_NOEXCEPT;
