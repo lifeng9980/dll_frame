@@ -751,6 +751,79 @@ def test_udp6730_and_external_power(sdk, root, base_station, base_recipe, power_
                                               err, len(err)) == 10, err.value
                 assert sdk.IR_CloseDevice(ext_h, err, len(err)) == 0, err.value
 
+            # 4b-3. Canonical physical endpoint key. JSON formatting, key order, an omitted
+            #       ``driver_id`` and runtime-only knobs such as ``timeout_ms`` all describe the
+            #       same physical supply, so a second open must report IR_BUSY; a distinct
+            #       identity-bearing field (``serial``) must open independently instead.
+            def try_open_external(connection, indent=None):
+                handle = c.c_uint64()
+                status = sdk.IR_OpenDevice(10, json.dumps(connection, indent=indent).encode(),
+                                           c.byref(handle), err, len(err))
+                return status, handle.value
+
+            open_external({"serial": "SN-1", "ok": True})
+            same_supply_variants = (
+                # Reordered top-level and driver_config keys with no indentation at all.
+                ({"driver_config": {"ok": True, "serial": "SN-1"},
+                  "driver_path": str(power_driver), "driver_id": "mock_power"}, None),
+                # Pretty-printed document, omitted driver_id and a runtime-only timeout knob.
+                ({"driver_path": str(power_driver),
+                  "driver_config": {"timeout_ms": 500, "serial": "SN-1", "ok": True}}, 3),
+            )
+            for connection, indent in same_supply_variants:
+                status, duplicate = try_open_external(connection, indent)
+                assert status == IR_BUSY and duplicate == 0, (connection, status, err.value)
+
+            # A different serial number is a different supply: it opens alongside the first one.
+            second_cfg = {"driver_path": str(power_driver), "driver_id": "mock_power",
+                          "driver_config": {"ok": True, "serial": "SN-2"}}
+            status, second_h = try_open_external(second_cfg)
+            assert status == 0 and second_h, (status, err.value)
+            assert sdk.IR_ReadPower(ext_h, 1, c.byref(er), err, len(err)) == 0, err.value
+            assert sdk.IR_ReadPower(second_h, 1, c.byref(er), err, len(err)) == 0, err.value
+            assert sdk.IR_CloseDevice(second_h, err, len(err)) == 0, err.value
+            # Closing the second supply releases only its own endpoint.
+            status, reopened_second = try_open_external(second_cfg, 2)
+            assert status == 0 and reopened_second, (status, err.value)
+            assert sdk.IR_CloseDevice(reopened_second, err, len(err)) == 0, err.value
+            # The canonical key also lets the first supply reopen through a different formatting.
+            assert sdk.IR_CloseDevice(ext_h, err, len(err)) == 0, err.value
+            status, reopened_first = try_open_external(
+                {"driver_config": {"ok": True, "serial": "SN-1"},
+                 "driver_path": str(power_driver)}, 1)
+            assert status == 0 and reopened_first, (status, err.value)
+            assert sdk.IR_CloseDevice(reopened_first, err, len(err)) == 0, err.value
+
+            # 4b-4. A nested ``dll_path`` is hardware identity as well, so relative and absolute
+            #       spellings of one file must share one endpoint: an existing file referenced
+            #       relatively, and a relative spelling whose leading directory does not exist.
+            def open_with_dll_path(dll_path, serial):
+                return try_open_external({
+                    "driver_path": str(power_driver), "driver_id": "mock_power",
+                    "driver_config": {"ok": True, "serial": serial, "dll_path": dll_path}})
+
+            def relative_spelling(target):
+                try:
+                    relative = os.path.relpath(target, os.getcwd())
+                except ValueError:
+                    return None  # different Windows drive: no relative spelling exists
+                return None if os.path.isabs(relative) else relative
+
+            nested_cases = []
+            existing_relative = relative_spelling(Path(power_driver).resolve())
+            if existing_relative is not None:
+                nested_cases.append(("SN-DLL-EXISTING", existing_relative, str(Path(power_driver).resolve())))
+            missing_relative = os.path.join("ir_missing_parent", "ir_nested_driver.dll")
+            nested_cases.append(("SN-DLL-MISSING", missing_relative, os.path.abspath(missing_relative)))
+            for serial, relative_dll_path, absolute_dll_path in nested_cases:
+                assert relative_dll_path != absolute_dll_path, (relative_dll_path, absolute_dll_path)
+                status, handle = open_with_dll_path(relative_dll_path, serial)
+                assert status == 0 and handle, (serial, relative_dll_path, status, err.value)
+                status, duplicate = open_with_dll_path(absolute_dll_path, serial)
+                assert status == IR_BUSY and duplicate == 0, \
+                    (serial, relative_dll_path, absolute_dll_path, status, duplicate, err.value)
+                assert sdk.IR_CloseDevice(handle, err, len(err)) == 0, err.value
+
             # 4c. Canonicalized absolute loading. The driver is copied to a fresh file name under
             # the fixture root and opened through a relative driver_path in a *child process* (so
             # the driver cache is genuinely cold and the copy is unloaded before temp cleanup);

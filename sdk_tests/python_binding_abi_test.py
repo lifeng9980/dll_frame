@@ -493,7 +493,24 @@ def check_standalone_loaders(irsdk, library_dir, expected_version):
     station = irsdk.load_station(library_dir)
     assert station.IR_StationVersion().decode() == expected_version
     assert hasattr(station, "IR_OpenDevice"), "load_station must bind IR_station exports"
-    assert not hasattr(station, "IR_ROIMean"), "load_station must not bind analysis exports"
+    # ``load_station`` never binds analysis exports. The ctypes ``__dict__`` is the platform-neutral
+    # evidence: on ELF, ``dlsym`` on the station handle also walks its dependencies, so
+    # ``IR_ROIMean`` resolves through ``libIR_analysis.so`` even though nothing was bound here.
+    assert "IR_ROIMean" not in station.__dict__, "load_station must not bind analysis exports"
+    if os.name == "nt":
+        assert not hasattr(station, "IR_ROIMean"), "load_station must not bind analysis exports"
+    elif os.name == "posix":
+        # The imported analysis export must still belong to IR_analysis, never to IR_station.
+        loader = irsdk.loader
+        station_name, analysis_name = _library_files()
+        symbol = loader._posix_dlsym(station, b"IR_ROIMean")
+        assert symbol, "the ELF station handle must resolve the imported analysis export"
+        owner = loader._posix_symbol_path(symbol)
+        assert owner is not None, "cannot establish the on-disk identity of IR_ROIMean"
+        assert loader._same_module_path(owner, Path(library_dir) / analysis_name), \
+            f"IR_ROIMean resolved to '{owner}' instead of IR_analysis '{analysis_name}'"
+        assert not loader._same_module_path(owner, Path(library_dir) / station_name), \
+            f"IR_ROIMean must never live in IR_station '{station_name}'"
 
     # The failure path must release any provisional DLL directory handle it created.
     isolated = lambda candidate: [Path(candidate)]  # noqa: E731 - test isolation
@@ -745,24 +762,37 @@ def check_real_posix_interposition_subprocess(irsdk, library_dir, bindings_dir):
     """POSIX: a real ``RTLD_GLOBAL`` (``LD_PRELOAD``-style) object must break the load."""
     if os.name != "posix":
         return
-    compiler = shutil.which("cc") or shutil.which("gcc")
+    # CMake passes the configured C compiler so the probe matches the ABI the SDK was built with.
+    compiler = (os.environ.get("IR_TEST_C_COMPILER")
+                or shutil.which("cc")
+                or shutil.which("gcc"))
     if compiler is None:
         raise AssertionError(
-            "the POSIX interposition gate test needs a C compiler (cc or gcc) on PATH")
+            "the POSIX interposition gate test needs a C compiler "
+            "(IR_TEST_C_COMPILER, cc or gcc)")
+    include_dir = Path(__file__).resolve().parents[1] / "include"
+    if not (include_dir / "IR_analysis.h").is_file():
+        raise AssertionError(f"the POSIX interposition probe needs the public headers in {include_dir}")
     library_dir, bindings_dir = Path(library_dir).resolve(), Path(bindings_dir).resolve()
     with tempfile.TemporaryDirectory(prefix="irsdk-interpose-") as temporary:
         source = Path(temporary) / "foreign_probe.c"
+        # Including the shipped header keeps the exported prototype identical to the public ABI.
         source.write_text(
-            "double IR_ROIMean(const void *view, int x, int y, int width, int height,\n"
-            "                  double *out_mean)\n"
+            '#include "IR_analysis.h"\n'
+            "\n"
+            "int32_t IR_ROIMean(const IRArrayView *frames, int32_t x, int32_t y, int32_t roi_width,\n"
+            "                  int32_t roi_height, double *mean_dn, char *err, int32_t err_bytes)\n"
             "{\n"
-            "    (void)view; (void)x; (void)y; (void)width; (void)height;\n"
-            "    if (out_mean) *out_mean = 0.0;\n"
-            "    return 0.0;\n"
+            "    (void)frames; (void)x; (void)y; (void)roi_width; (void)roi_height;\n"
+            "    (void)err_bytes;\n"
+            "    if (mean_dn) *mean_dn = 0.0;\n"
+            "    if (err) err[0] = '\\0';\n"
+            "    return IR_OK;\n"
             "}\n", encoding="utf-8")
         foreign_so = Path(temporary) / "libforeign_probe.so"
         build = subprocess.run(
-            [compiler, "-shared", "-fPIC", "-Wl,-soname,libforeign_probe.so",
+            [compiler, "-shared", "-fPIC", "-std=c11", f"-I{include_dir}",
+             "-Wl,-soname,libforeign_probe.so",
              "-o", str(foreign_so), str(source)],
             capture_output=True, text=True, check=False)
         assert build.returncode == 0, (build.stdout, build.stderr)

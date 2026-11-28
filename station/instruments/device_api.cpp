@@ -148,6 +148,54 @@ std::string lowercaseAscii(std::string value)
     return value;
 }
 
+/**
+ * Absolute, canonical spelling of a configured driver path, so ``plugin.dll``, ``./plugin.dll``
+ * and the absolute spelling of the same file all identify one physical driver. Windows keys are
+ * ASCII-lowercased because the file system is case-insensitive there.
+ */
+std::string canonicalDriverPath(std::string_view utf8Path)
+{
+    auto path = ir::utf8::pathFromUtf8(utf8Path);
+    std::error_code errorCode;
+    // Anchor relative paths first: weakly_canonical() alone would resolve them against the
+    // current directory only for the existing prefix, which is not the same as anchoring first.
+    auto anchored = std::filesystem::absolute(path, errorCode);
+    if (errorCode) {
+        anchored = path.lexically_normal();
+    } else {
+        const auto resolved = std::filesystem::weakly_canonical(anchored, errorCode);
+        if (!errorCode) anchored = resolved;
+    }
+    auto key = ir::utf8::pathToUtf8(anchored.lexically_normal());
+#ifdef _WIN32
+    key = lowercaseAscii(std::move(key));
+#endif
+    return key;
+}
+
+/**
+ * Physical identity of an external power supply: the identity-bearing part of ``driver_config``
+ * with the runtime knobs and JSON formatting removed. Two configurations that describe the same
+ * hardware (different key order, whitespace or ``timeout_ms``) must produce one endpoint key so
+ * the second open reports IR_BUSY instead of driving a second session on the same supply.
+ */
+std::string canonicalDriverConfig(const Json &driverConfig)
+{
+    Json identity = driverConfig;
+    for (auto field = identity.begin(); field != identity.end();) {
+        // Field names are matched ASCII case-insensitively, like ``dll_path`` below.
+        const auto key = lowercaseAscii(field.key());
+        if (key == "timeout_ms") {
+            field = identity.erase(field);
+            continue;
+        }
+        if (key == "dll_path" && field->is_string())
+            *field = canonicalDriverPath(field->get<std::string>());
+        ++field;
+    }
+    return identity.dump();
+}
+
 int parseParity(const ConnectionFields &fields)
 {
     const auto parity = lowercaseAscii(fields.text("parity"));
@@ -261,6 +309,7 @@ DeviceOptions parseDeviceConnection(int32_t kind, const Json &json, std::string_
             fields.fail("driver_config", "must be an object");
         result.driverConfigJson = driverCfgIt->dump();
         result.inspected = ir::instruments::inspectExternalPowerDriver(result, path);
+        result.identityJson = canonicalDriverConfig(*driverCfgIt);
         return result;
     }
     case IR_OVEN_GWS_STEN:
@@ -494,14 +543,12 @@ noexcept{
                     return std::vector<std::string>{"visa:" + lowercaseAscii(options.visaResource)};
                 return resolveEndpointKeys(options.endpoint, options.timeout);
             } else if constexpr (std::is_same_v<Config, ExternalPowerConfig>) {
-                std::error_code ec;
-                const auto p = ir::utf8::pathFromUtf8(options.driverPath);
-                const auto norm = std::filesystem::weakly_canonical(p, ec);
-                auto pathKey = ir::utf8::pathToUtf8(ec ? p.lexically_normal() : norm);
-#ifdef _WIN32
-                pathKey = lowercaseAscii(std::move(pathKey));
-#endif
-                return std::vector<std::string>{"external_power:" + pathKey + ":" + options.driverConfigJson};
+                // A JSON array key has no delimiter, so colons inside Windows drive letters or
+                // driver ids can never collide with another field.
+                return std::vector<std::string>{
+                    Json::array({"external_power", canonicalDriverPath(options.driverPath),
+                                 lowercaseAscii(options.inspected.driverId), options.identityJson})
+                        .dump()};
             } else {
                 return resolveEndpointKeys(options.endpoint, options.timeout);
             }

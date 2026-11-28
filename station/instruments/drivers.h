@@ -251,12 +251,16 @@ struct ExternalPowerInspection {
     uint32_t capabilities{0};
     int32_t minChannel{0};
     int32_t maxChannel{0};
+    // Driver id resolved from the loaded descriptor; part of the physical endpoint identity.
+    std::string driverId;
 };
 
 struct ExternalPowerConfig {
     std::string driverPath;
     std::string expectedDriverId;
     std::string driverConfigJson;
+    // Canonical identity-bearing part of driver_config (runtime knobs and formatting removed).
+    std::string identityJson;
     ExternalPowerInspection inspected{};
 };
 

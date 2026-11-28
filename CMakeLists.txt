@@ -239,6 +239,37 @@ if(BUILD_TESTING)
     ir_add_metric_plugin(ir_test_power_driver sdk_tests/plugins/mock_power_driver.cpp)
     if(WIN32)
         target_link_libraries(ir_test_power_driver PRIVATE winhttp)
+
+        # VISA 链路测试：mock 运行时 DLL + 以 IR_VISA_TEST_OVERRIDE 单独编译的 visa_link.cpp。
+        # IR_station.dll 不定义该宏，生产路径始终只从 System32 加载 visa64.dll。
+        add_library(ir_test_mock_visa SHARED sdk_tests/mock_visa_runtime.cpp)
+        set_target_properties(ir_test_mock_visa PROPERTIES
+            C_VISIBILITY_PRESET hidden CXX_VISIBILITY_PRESET hidden
+            VISIBILITY_INLINES_HIDDEN YES
+            RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/tests/bin"
+            LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/tests/bin")
+        add_executable(visa_link_test
+            sdk_tests/visa_link_test.cpp
+            station/instruments/visa_link.cpp
+            station/instruments/asio_link.cpp
+            shared/utf8_path.cpp)
+        target_compile_definitions(visa_link_test PRIVATE
+            IR_VISA_TEST_OVERRIDE=1 ASIO_STANDALONE _WIN32_WINNT=0x0A00)
+        target_include_directories(visa_link_test PRIVATE
+            "${PROJECT_SOURCE_DIR}/include"
+            "${PROJECT_SOURCE_DIR}/station/instruments"
+            "${PROJECT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/shared")
+        target_include_directories(visa_link_test SYSTEM PRIVATE "${IR_ASIO_INCLUDE_DIR}")
+        target_link_libraries(visa_link_test PRIVATE Threads::Threads ws2_32 mswsock)
+        set_target_properties(visa_link_test PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/tests/bin")
+        add_dependencies(visa_link_test ir_test_mock_visa)
+        if(MSVC)
+            target_compile_options(visa_link_test PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(visa_link_test PRIVATE -UNDEBUG)
+        endif()
+        add_test(NAME visa_link COMMAND visa_link_test "$<TARGET_FILE:ir_test_mock_visa>")
     endif()
     add_executable(plugin_abi_test
         sdk_tests/plugin_abi_test.cpp
@@ -283,7 +314,8 @@ if(BUILD_TESTING)
             --expected-version "${PROJECT_VERSION}"
             --bindings-dir "${PROJECT_SOURCE_DIR}/bindings/python"
             --examples-dir "${PROJECT_SOURCE_DIR}/examples")
-        set_tests_properties(python_binding_abi PROPERTIES TIMEOUT 120)
+        set_tests_properties(python_binding_abi PROPERTIES TIMEOUT 120
+            ENVIRONMENT "IR_TEST_C_COMPILER=${CMAKE_C_COMPILER}")
 
         add_test(NAME ir_drift_example_self_test COMMAND "${Python3_EXECUTABLE}" -B
             "${PROJECT_SOURCE_DIR}/sdk_tests/raw_replay_cli_test.py"
@@ -339,8 +371,10 @@ if(WIN32 AND BUILD_TESTING)
     set(_ir_ctest_tmp "${PROJECT_BINARY_DIR}/ctest-tmp")
     file(MAKE_DIRECTORY "${_ir_ctest_tmp}")
     get_property(_ir_ctest_names DIRECTORY PROPERTY TESTS)
-    set_tests_properties(${_ir_ctest_names} PROPERTIES
-        ENVIRONMENT "TEMP=${_ir_ctest_tmp};TMP=${_ir_ctest_tmp}")
+    # Append instead of overwrite so a test's own ENVIRONMENT (IR_TEST_C_COMPILER on
+    # python_binding_abi) survives the shared TEMP/TMP redirection.
+    set_property(TEST ${_ir_ctest_names} APPEND PROPERTY
+        ENVIRONMENT "TEMP=${_ir_ctest_tmp}" "TMP=${_ir_ctest_tmp}")
 endif()
 
 install(TARGETS IR_station IR_analysis EXPORT IRSDKTargets RUNTIME DESTINATION bin

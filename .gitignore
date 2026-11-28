@@ -1,4 +1,6 @@
 /实验/
+/build-linux-debug/
+/build-linux-release/
 /CMakeUserPresets.json
 /.vscode/
 __pycache__/

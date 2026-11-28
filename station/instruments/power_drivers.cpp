@@ -358,7 +358,7 @@ ExternalPowerInspection inspectExternalPowerDriver(const ExternalPowerConfig &co
         throw Error(static_cast<IRStatus>(rc),
                     readErrBuf(err, sizeof(err), "External power driver config validation failed"));
     }
-    return {desc->capabilities, desc->min_channel, desc->max_channel};
+    return {desc->capabilities, desc->min_channel, desc->max_channel, desc->driver_id};
 }
 
 ExternalPowerSupply::ExternalPowerSupply(ExternalPowerConfig config)

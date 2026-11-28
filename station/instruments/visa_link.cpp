@@ -1,5 +1,6 @@
 #include "asio_link.h"
 #include "api_common.h"
+#include "utf8_path.h"
 
 #ifdef _WIN32
 #define NOMINMAX
@@ -14,6 +15,13 @@ using api::require;
 // VISA 64-bit C ABI, kept private so the NI development kit is optional.
 using Status = int32_t;
 using Object = uint32_t;
+#ifdef IR_VISA_TEST_OVERRIDE
+std::wstring &testVisaRuntimePath()
+{
+    static std::wstring path;
+    return path;
+}
+#endif
 constexpr Status VisaTimeout = -1073807339;
 constexpr Status VisaLocked = -1073807345;
 constexpr Status VisaBusy = -1073807246;
@@ -40,7 +48,17 @@ uint32_t remaining(Deadline deadline)
 }
 
 struct VisaModule {
+#ifdef IR_VISA_TEST_OVERRIDE
+    // Test-only seam (see asio_link.h): IR_station.dll is never compiled with this override, so
+    // production always resolves the NI-VISA runtime from System32 only. The test passes an
+    // already anchored absolute path, so dependencies resolve next to the mock runtime.
+    HMODULE handle = testVisaRuntimePath().empty()
+        ? nullptr
+        : LoadLibraryExW(testVisaRuntimePath().c_str(), nullptr,
+                         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+#else
     HMODULE handle = LoadLibraryExW(L"visa64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+#endif
     ~VisaModule() { if (handle) FreeLibrary(handle); }
 
     template<typename... Args>
@@ -143,6 +161,13 @@ std::unique_ptr<ScpiLink> openVisaLink(const std::string &resource, Deadline dea
     link->open(resource, deadline);
     return link;
 }
+
+#ifdef IR_VISA_TEST_OVERRIDE
+void setVisaRuntimePathForTest(const std::string &utf8Path)
+{
+    testVisaRuntimePath() = utf8::pathFromUtf8(utf8Path).wstring();
+}
+#endif
 }
 #else
 namespace ir::transport {

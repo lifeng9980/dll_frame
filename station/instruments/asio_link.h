@@ -63,6 +63,12 @@ public:
 
 std::unique_ptr<ScpiLink> openVisaLink(const std::string &resource, Deadline deadline);
 
+#ifdef IR_VISA_TEST_OVERRIDE
+// 仅测试编译单元的接缝：VISA 链接把运行时指向一个 mock DLL。IR_station.dll 不定义该宏，
+// 因此生产路径始终只从 System32 加载 visa64.dll。
+void setVisaRuntimePathForTest(const std::string &utf8Path);
+#endif
+
 class AsioLink final : public ScpiLink {
 public:
     AsioLink(const TcpEndpoint &endpoint, Deadline deadline);
