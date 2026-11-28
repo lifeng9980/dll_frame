@@ -75,6 +75,9 @@ class Controller:
         self.disconnect_reads = 0
         self.stable = True
         self.writes = 0
+        # DOC058 controller limits reported for function 67 (low) and 66 (high), °C.
+        self.low_limit = 0
+        self.high_limit = 50
         self.error = None
         self.temperature_requests = 0
         self.silent_temperature = False
@@ -126,8 +129,8 @@ class Controller:
                 73: b"0",
                 114: str(self.target).encode(),
                 97: str(self.target).encode(),
-                67: b"0",
-                66: b"50",
+                67: str(self.low_limit).encode(),
+                66: str(self.high_limit).encode(),
                 92: b"1" if self.stable else b"0",
             }[function]
 
@@ -223,6 +226,124 @@ def exercise(sdk, controller, config):
     finally:
         check(sdk.IR_CloseDevice, handle)
     check(sdk.IR_ReadBlackbody, handle, c.byref(reading), expected=invalid_handle)
+
+
+def exercise_setpoint_window(sdk, controller, config):
+    """DOC058 software window: defaults, optional min_setpoint_c / max_setpoint_c overrides."""
+    error = c.create_string_buffer(1024)
+    error_args = [c.c_char_p, c.c_int32]
+    sdk.IR_OpenDevice.argtypes = [c.c_int32, c.c_char_p, c.POINTER(c.c_uint64), *error_args]
+    sdk.IR_CloseDevice.argtypes = [c.c_uint64, *error_args]
+    sdk.IR_SetBlackbody.argtypes = [c.c_uint64, c.c_double, c.POINTER(c.c_double), *error_args]
+    kind = 2 if controller.tcp else 3
+    previous = controller.low_limit, controller.high_limit
+    try:
+        # Defaults are PCN7-LT -60..100 and DCN1000 -5..100 and reject out-of-window targets
+        # before any controller write is attempted.
+        handle = c.c_uint64()
+        readback = c.c_double()
+        status = sdk.IR_OpenDevice(kind, json.dumps(config).encode(), c.byref(handle),
+                                   error, len(error))
+        assert status == 0, (status, error.value)
+        try:
+            writes = controller.writes
+            too_high = 101.0
+            too_low = -61.0 if controller.tcp else -6.0
+            status = sdk.IR_SetBlackbody(handle, too_high, c.byref(readback), error, len(error))
+            assert status == 2, (status, error.value)
+            status = sdk.IR_SetBlackbody(handle, too_low, c.byref(readback), error, len(error))
+            assert status == 2, (status, error.value)
+            assert controller.writes == writes, "out-of-window targets must not reach the controller"
+        finally:
+            assert sdk.IR_CloseDevice(handle, error, len(error)) == 0, error.value
+
+        # A widened max_setpoint_c / min_setpoint_c is accepted and still clamps at its bound.
+        controller.low_limit = -20
+        controller.high_limit = 150
+        widened = dict(config, min_setpoint_c=-20.0, max_setpoint_c=150.0)
+        handle = c.c_uint64()
+        status = sdk.IR_OpenDevice(kind, json.dumps(widened).encode(), c.byref(handle),
+                                   error, len(error))
+        assert status == 0, (status, error.value)
+        try:
+            writes = controller.writes
+            status = sdk.IR_SetBlackbody(handle, 120.5, c.byref(readback), error, len(error))
+            assert status == 0, (status, error.value)
+            assert readback.value == 120.5, readback.value
+            status = sdk.IR_SetBlackbody(handle, -8.0, c.byref(readback), error, len(error))
+            assert status == 0, (status, error.value)
+            assert readback.value == -8.0, readback.value
+            status = sdk.IR_SetBlackbody(handle, 151.0, c.byref(readback), error, len(error))
+            assert status == 2, (status, error.value)
+            assert controller.writes == writes + 2, controller.writes
+        finally:
+            assert sdk.IR_CloseDevice(handle, error, len(error)) == 0, error.value
+
+        # An inverted window is a configuration error and opens nothing.
+        inverted = dict(config, min_setpoint_c=50.0, max_setpoint_c=10.0)
+        bad_handle = c.c_uint64()
+        status = sdk.IR_OpenDevice(kind, json.dumps(inverted).encode(), c.byref(bad_handle),
+                                   error, len(error))
+        assert status == 2 and not bad_handle.value, (status, error.value, bad_handle.value)
+
+        # Software window narrower than the controller limits: rejected by the software check
+        # before any controller write.
+        controller.low_limit = -20
+        controller.high_limit = 40
+        software_limited = dict(config, min_setpoint_c=-20.0, max_setpoint_c=25.0)
+        handle = c.c_uint64()
+        status = sdk.IR_OpenDevice(kind, json.dumps(software_limited).encode(),
+                                   c.byref(handle), error, len(error))
+        assert status == 0, (status, error.value)
+        try:
+            writes = controller.writes
+            status = sdk.IR_SetBlackbody(handle, 30.0, c.byref(readback), error, len(error))
+            assert status == 2, (status, error.value)
+            assert controller.writes == writes, controller.writes
+        finally:
+            assert sdk.IR_CloseDevice(handle, error, len(error)) == 0, error.value
+
+        # Controller limit narrower than the software window: rejected at the device limit
+        # readback, still before the setpoint write.
+        hardware_limited = dict(config, min_setpoint_c=-20.0, max_setpoint_c=150.0)
+        handle = c.c_uint64()
+        status = sdk.IR_OpenDevice(kind, json.dumps(hardware_limited).encode(),
+                                   c.byref(handle), error, len(error))
+        assert status == 0, (status, error.value)
+        try:
+            writes = controller.writes
+            status = sdk.IR_SetBlackbody(handle, 45.0, c.byref(readback), error, len(error))
+            assert status == 2, (status, error.value)
+            assert controller.writes == writes, controller.writes
+        finally:
+            assert sdk.IR_CloseDevice(handle, error, len(error)) == 0, error.value
+
+        # Wire quantization: the controller only receives 3 decimals. target 25.0006 passes the
+        # software window (25.0006 <= max_setpoint_c=25.0006) but its wire value "25.001" does
+        # not, so only the quantized value triggers IR_BAD_ARGUMENT - before any write. The
+        # mirrored lower bound behaves the same ("-25.001" < min_setpoint_c=-25.0006).
+        controller.low_limit = -30
+        quantized = dict(config, min_setpoint_c=-25.0006, max_setpoint_c=25.0006)
+        handle = c.c_uint64()
+        status = sdk.IR_OpenDevice(kind, json.dumps(quantized).encode(), c.byref(handle),
+                                   error, len(error))
+        assert status == 0, (status, error.value)
+        try:
+            writes = controller.writes
+            status = sdk.IR_SetBlackbody(handle, 25.0006, c.byref(readback), error, len(error))
+            assert status == 2, (status, error.value)
+            assert controller.writes == writes, "wire-rounded upper overflow must not reach the controller"
+            status = sdk.IR_SetBlackbody(handle, -25.0006, c.byref(readback), error, len(error))
+            assert status == 2, (status, error.value)
+            assert controller.writes == writes, "wire-rounded lower overflow must not reach the controller"
+            status = sdk.IR_SetBlackbody(handle, 25.0, c.byref(readback), error, len(error))
+            assert status == 0, (status, error.value)
+            assert readback.value == 25.0, readback.value
+            assert controller.writes == writes + 1, controller.writes
+        finally:
+            assert sdk.IR_CloseDevice(handle, error, len(error)) == 0, error.value
+    finally:
+        controller.low_limit, controller.high_limit = previous
 
 
 def exercise_wait_blackbody_stable(sdk, controller, config):
@@ -593,6 +714,7 @@ def main():
     server.start()
     try:
         exercise(sdk, controller, config)
+        exercise_setpoint_window(sdk, controller, config)
         exercise_wait_blackbody_stable(sdk, controller, config)
         exercise_recipe(args, sdk, controller, config)
         exercise_json_recipe_ownership(args, sdk, controller, config)

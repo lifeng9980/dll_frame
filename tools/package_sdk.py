@@ -16,7 +16,12 @@ from urllib.parse import unquote
 import zipfile
 
 
-COMMON_ITEMS = ("include", "docs", "examples", "simulators", "third_party", "SDK.md")
+COMMON_ITEMS = ("include", "docs", "examples", "simulators", "third_party", "bindings", "SDK.md")
+# Files copied out of the CMake install tree into the package-specific layouts.
+CMAKE_PACKAGE_FILES = (
+    "lib/cmake/IRSDK/IRSDKConfig.cmake",
+    "lib/cmake/IRSDK/IRSDKConfigVersion.cmake",
+)
 REQUIRED_CUSTOMER_FILES = (
     "include/IR_types.h",
     "include/IR_plugin_abi.h",
@@ -24,6 +29,12 @@ REQUIRED_CUSTOMER_FILES = (
     "include/IR_power_driver_abi.h",
     "SDK.md",
     "docs/客户接入说明.md",
+    "bindings/python/pyproject.toml",
+    "bindings/python/irsdk/__init__.py",
+    "bindings/python/irsdk/abi.py",
+    "bindings/python/irsdk/loader.py",
+    "cmake/IRSDKConfig.cmake",
+    "cmake/IRSDKConfigVersion.cmake",
 )
 FORBIDDEN_PACKAGE_FILES = (
     "AGENTS.md",
@@ -54,7 +65,8 @@ FORBIDDEN_PATTERNS = (
     )),
 )
 HYGIENE_TEXT_EXTENSIONS = (
-    ".md", ".txt", ".json", ".py", ".c", ".cpp", ".h", ".hpp", ".cs", ".csproj", ".ps1", ".sh", ".cmake",
+    ".md", ".txt", ".json", ".py", ".c", ".cpp", ".h", ".hpp", ".cs", ".csproj", ".ps1", ".sh",
+    ".cmake", ".toml",
 )
 MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 DEBUG_CRT_DLL_RE = re.compile(
@@ -347,6 +359,15 @@ def make_package(source_root, windows_install, linux_install, archive, windows_o
             if tree_hashes(windows_content) != tree_hashes(linux_content):
                 raise ValueError(f"Windows and Linux install content differs: {item}")
 
+    # The CMake package files are platform independent; a dual-platform package must ship
+    # byte-identical config files.
+    for relative in CMAKE_PACKAGE_FILES:
+        require_file(windows_install / relative)
+        if not windows_only:
+            require_file(linux_install / relative)
+            if file_hash(windows_install / relative) != file_hash(linux_install / relative):
+                raise ValueError(f"Windows and Linux CMake package files differ: {relative}")
+
     for relative in (
         "bin/IR_station.dll", "bin/IR_analysis.dll", "bin/ir_run_recipe.exe",
         "bin/ir_capture_accept.exe",
@@ -368,6 +389,9 @@ def make_package(source_root, windows_install, linux_install, archive, windows_o
 
         for item in COMMON_ITEMS:
             copy_item(windows_install / item, stage / item)
+
+        for relative in CMAKE_PACKAGE_FILES:
+            copy_item(windows_install / relative, stage / "cmake" / Path(relative).name)
 
         for relative in ("bin/IR_station.dll", "bin/IR_analysis.dll", "bin/ir_run_recipe.exe",
                          "bin/ir_capture_accept.exe", "lib/IR_station.lib", "lib/IR_analysis.lib"):

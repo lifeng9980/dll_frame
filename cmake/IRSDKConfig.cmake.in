@@ -1,0 +1,82 @@
+@PACKAGE_INIT@
+
+set(IRSDK_VERSION "@PROJECT_VERSION@")
+
+# Two supported layouts share one config file:
+#   a) standard CMake install prefix: <prefix>/lib/cmake/IRSDK/IRSDKConfig.cmake
+#      plus the generated IRSDKTargets.cmake next to it (IMPORTED targets from the export set);
+#   b) packaged archive: <pkg_root>/cmake/IRSDKConfig.cmake with include/ and
+#      windows-x64/{bin,lib} or linux-x86_64/lib.
+# Only relative, package-relative paths are used here.
+set(_irsdk_targets_file "${CMAKE_CURRENT_LIST_DIR}/IRSDKTargets.cmake")
+
+if(EXISTS "${_irsdk_targets_file}")
+    include("${_irsdk_targets_file}")
+    set(IRSDK_ROOT_DIR "${PACKAGE_PREFIX_DIR}")
+    set(IRSDK_INCLUDE_DIR "${PACKAGE_PREFIX_DIR}/include")
+    set(IRSDK_BIN_DIR "${PACKAGE_PREFIX_DIR}/bin")
+    set(IRSDK_LIB_DIR "${PACKAGE_PREFIX_DIR}/lib")
+    set(IRSDK_PACKAGE_ARCHIVE FALSE)
+else()
+    get_filename_component(IRSDK_ROOT_DIR "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+    set(IRSDK_INCLUDE_DIR "${IRSDK_ROOT_DIR}/include")
+    set(IRSDK_PACKAGE_ARCHIVE TRUE)
+    if(WIN32)
+        set(IRSDK_BIN_DIR "${IRSDK_ROOT_DIR}/windows-x64/bin")
+        set(IRSDK_LIB_DIR "${IRSDK_ROOT_DIR}/windows-x64/lib")
+        set(_irsdk_analysis_location "${IRSDK_BIN_DIR}/IR_analysis.dll")
+        set(_irsdk_analysis_implib "${IRSDK_LIB_DIR}/IR_analysis.lib")
+        set(_irsdk_station_location "${IRSDK_BIN_DIR}/IR_station.dll")
+        set(_irsdk_station_implib "${IRSDK_LIB_DIR}/IR_station.lib")
+    else()
+        set(IRSDK_BIN_DIR "${IRSDK_ROOT_DIR}/linux-x86_64/lib")
+        set(IRSDK_LIB_DIR "${IRSDK_ROOT_DIR}/linux-x86_64/lib")
+        set(_irsdk_analysis_location "${IRSDK_LIB_DIR}/libIR_analysis.so")
+        set(_irsdk_station_location "${IRSDK_LIB_DIR}/libIR_station.so")
+    endif()
+    foreach(_irsdk_file IN ITEMS
+            "${_irsdk_analysis_location}" "${_irsdk_station_location}"
+            "${IRSDK_INCLUDE_DIR}/IR_station.h")
+        if(NOT EXISTS "${_irsdk_file}")
+            set(IRSDK_FOUND FALSE)
+            set(IRSDK_NOT_FOUND_MESSAGE "IR SDK package archive is incomplete: ${_irsdk_file} is missing")
+            return()
+        endif()
+    endforeach()
+    # Windows consumers link through the import libraries, so they must be present too.
+    if(WIN32)
+        foreach(_irsdk_file IN ITEMS "${_irsdk_analysis_implib}" "${_irsdk_station_implib}")
+            if(NOT EXISTS "${_irsdk_file}")
+                set(IRSDK_FOUND FALSE)
+                set(IRSDK_NOT_FOUND_MESSAGE "IR SDK package archive is incomplete: ${_irsdk_file} is missing")
+                return()
+            endif()
+        endforeach()
+    endif()
+    if(NOT TARGET IRSDK::IR_analysis)
+        add_library(IRSDK::IR_analysis SHARED IMPORTED)
+        set_target_properties(IRSDK::IR_analysis PROPERTIES
+            IMPORTED_LOCATION "${_irsdk_analysis_location}"
+            INTERFACE_INCLUDE_DIRECTORIES "${IRSDK_INCLUDE_DIR}")
+        if(WIN32)
+            set_target_properties(IRSDK::IR_analysis PROPERTIES
+                IMPORTED_IMPLIB "${_irsdk_analysis_implib}")
+        endif()
+    endif()
+    if(NOT TARGET IRSDK::IR_station)
+        add_library(IRSDK::IR_station SHARED IMPORTED)
+        # IR_station links IR_analysis privately; keep this identical to the exported
+        # IRSDKTargets.cmake interface so both layouts behave the same.
+        set_target_properties(IRSDK::IR_station PROPERTIES
+            IMPORTED_LOCATION "${_irsdk_station_location}"
+            INTERFACE_INCLUDE_DIRECTORIES "${IRSDK_INCLUDE_DIR}")
+        if(WIN32)
+            set_target_properties(IRSDK::IR_station PROPERTIES
+                IMPORTED_IMPLIB "${_irsdk_station_implib}")
+        endif()
+    endif()
+endif()
+
+set(IRSDK_PYTHON_BINDINGS_DIR "${IRSDK_ROOT_DIR}/bindings/python")
+
+check_required_components(IRSDK)

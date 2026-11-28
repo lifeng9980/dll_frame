@@ -175,17 +175,27 @@ IRBlackbodyReading Doc058Blackbody::read()
 
 double Doc058Blackbody::set(double target)
 {
-    const auto minimum = tcp() ? -60.0 : -5.0;
-    require(std::isfinite(target) && target >= minimum && target <= 100.0,
-            IR_BAD_ARGUMENT, "Blackbody target is outside the software range");
-    require(numberWithReconnect(Mode) == 0, IR_IO_ERROR, "Blackbody is outside absolute temperature mode");
-    const auto low = numberWithReconnect(LowLimit);
-    const auto high = numberWithReconnect(HighLimit);
-    require(target >= low && target <= high, IR_BAD_ARGUMENT, "Blackbody target is outside device limits");
-
+    // The controller receives a fixed 3-decimal wire value, so validate both the requested
+    // target and the value actually sent: rounding must never widen the configured window.
+    require(std::isfinite(target), IR_BAD_ARGUMENT, "Blackbody target must be finite");
     char digits[32];
     const auto converted = std::to_chars(digits, digits + sizeof digits, target, std::chars_format::fixed, 3);
     require(converted.ec == std::errc{}, IR_BAD_ARGUMENT, "Invalid setpoint format");
+    double wireTarget{};
+    const auto parsed = std::from_chars(digits, converted.ptr, wireTarget);
+    require(parsed.ec == std::errc{} && parsed.ptr == converted.ptr && std::isfinite(wireTarget),
+            IR_BAD_ARGUMENT, "Invalid setpoint format");
+    const auto inWindow = [&](double value) {
+        return value >= config_.minSetpointC && value <= config_.maxSetpointC;
+    };
+    require(inWindow(target) && inWindow(wireTarget), IR_BAD_ARGUMENT,
+            "Blackbody target is outside the software range");
+    require(numberWithReconnect(Mode) == 0, IR_IO_ERROR, "Blackbody is outside absolute temperature mode");
+    const auto low = numberWithReconnect(LowLimit);
+    const auto high = numberWithReconnect(HighLimit);
+    require(target >= low && target <= high && wireTarget >= low && wireTarget <= high,
+            IR_BAD_ARGUMENT, "Blackbody target is outside device limits");
+
     try {
         request(Setpoint, std::string(digits, converted.ptr), true);
     } catch (const Error &error) {

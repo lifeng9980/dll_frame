@@ -18,6 +18,10 @@ struct BlackbodyConfig {
     std::chrono::milliseconds commandInterval{};
     int head{-1};
     std::string expectedHead;
+    // Software setpoint window, overridable with min_setpoint_c / max_setpoint_c.
+    // Defaults match the DOC058 controller families: PCN7-LT -60..100, DCN1000 -5..100.
+    double minSetpointC{-60.0};
+    double maxSetpointC{100.0};
 };
 
 class Doc058Blackbody {

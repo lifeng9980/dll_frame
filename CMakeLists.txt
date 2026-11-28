@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 project(IRSDK VERSION 1.8.0 LANGUAGES C CXX)
 include(CTest)
+include(CMakePackageConfigHelpers)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
@@ -129,7 +130,10 @@ if(WIN32)
     target_link_libraries(IR_station PRIVATE ws2_32 mswsock advapi32)
 endif()
 foreach(target IR_station IR_analysis)
-    target_include_directories(${target} PUBLIC "${PROJECT_SOURCE_DIR}/include"
+    # 公共头目录使用 build/install 接口分离，third_party 仅作私有编译期依赖。
+    target_include_directories(${target}
+        PUBLIC "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
+               "$<INSTALL_INTERFACE:include>"
         PRIVATE "${PROJECT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/shared")
     set_target_properties(${target} PROPERTIES INSTALL_RPATH "$ORIGIN"
         C_VISIBILITY_PRESET hidden CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES)
@@ -272,6 +276,15 @@ if(BUILD_TESTING)
             --capture-accept "$<TARGET_FILE:ir_capture_accept>" --fixture-parent "${PROJECT_BINARY_DIR}")
         set_tests_properties(ir_run_recipe_offline_check ir_capture_accept_soak PROPERTIES TIMEOUT 60)
 
+        add_test(NAME python_binding_abi COMMAND "${Python3_EXECUTABLE}" -B
+            "${PROJECT_SOURCE_DIR}/sdk_tests/python_binding_abi_test.py"
+            --c-client "$<TARGET_FILE:c_client>"
+            --library-dir "$<TARGET_FILE_DIR:IR_station>"
+            --expected-version "${PROJECT_VERSION}"
+            --bindings-dir "${PROJECT_SOURCE_DIR}/bindings/python"
+            --examples-dir "${PROJECT_SOURCE_DIR}/examples")
+        set_tests_properties(python_binding_abi PROPERTIES TIMEOUT 120)
+
         add_test(NAME ir_drift_example_self_test COMMAND "${Python3_EXECUTABLE}" -B
             "${PROJECT_SOURCE_DIR}/sdk_tests/raw_replay_cli_test.py"
             --drift-example "${PROJECT_SOURCE_DIR}/examples/python/ir_drift_nodisk.py"
@@ -328,10 +341,46 @@ if(WIN32 AND BUILD_TESTING)
         ENVIRONMENT "TEMP=${_ir_ctest_tmp};TMP=${_ir_ctest_tmp}")
 endif()
 
-install(TARGETS IR_station IR_analysis RUNTIME DESTINATION bin
+install(TARGETS IR_station IR_analysis EXPORT IRSDKTargets RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib ARCHIVE DESTINATION lib)
 install(TARGETS ir_run_recipe ir_capture_accept RUNTIME DESTINATION bin)
 install(DIRECTORY include/ DESTINATION include)
+# 标准 CMake 包：<prefix>/lib/cmake/IRSDK 下的 targets 与 config 文件。
+install(EXPORT IRSDKTargets FILE IRSDKTargets.cmake
+    NAMESPACE IRSDK:: DESTINATION lib/cmake/IRSDK)
+configure_package_config_file("${PROJECT_SOURCE_DIR}/cmake/IRSDKConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/IRSDKConfig.cmake"
+    INSTALL_DESTINATION lib/cmake/IRSDK
+    NO_SET_AND_CHECK_MACRO)
+write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/IRSDKConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION} COMPATIBILITY SameMajorVersion ARCH_INDEPENDENT)
+# The CMake helper scripts write host line endings; normalize to LF so the Windows and
+# Linux install trees are byte-identical (tools/package_sdk.py verifies the hashes).
+# file(CONFIGURE ... NEWLINE_STYLE LF) is the only CMake primitive that keeps LF on Windows
+# (file(WRITE)/configure_file/file(GENERATE) all rewrite LF to CRLF there), but it expands
+# @VAR@ tokens, so reword the helper banner first and fail fast on any remaining token.
+foreach(_ir_pkg_generated IRSDKConfig.cmake IRSDKConfigVersion.cmake)
+    file(READ "${CMAKE_CURRENT_BINARY_DIR}/${_ir_pkg_generated}" _ir_pkg_text)
+    string(REPLACE "\r\n" "\n" _ir_pkg_text "${_ir_pkg_text}")
+    string(REPLACE "\r" "" _ir_pkg_text "${_ir_pkg_text}")
+    string(REPLACE "@PACKAGE_INIT@" "PACKAGE_INIT" _ir_pkg_text "${_ir_pkg_text}")
+    string(FIND "${_ir_pkg_text}" "@" _ir_pkg_at)
+    if(NOT _ir_pkg_at EQUAL -1)
+        message(FATAL_ERROR
+            "${_ir_pkg_generated} contains an '@' token that the LF rewrite would expand")
+    endif()
+    file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/${_ir_pkg_generated}"
+        CONTENT "${_ir_pkg_text}" NEWLINE_STYLE LF @ONLY)
+endforeach()
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/IRSDKConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/IRSDKConfigVersion.cmake"
+    DESTINATION lib/cmake/IRSDK)
+# 官方精简 Python 绑定（纯 ctypes，零第三方依赖）；仅装发布文件，不带本地 build/dist。
+install(FILES bindings/python/pyproject.toml DESTINATION bindings/python)
+install(FILES bindings/python/irsdk/__init__.py
+    bindings/python/irsdk/abi.py
+    bindings/python/irsdk/loader.py
+    DESTINATION bindings/python/irsdk)
 install(FILES SDK.md DESTINATION .)
 install(FILES docs/客户接入说明.md DESTINATION docs)
 install(FILES sdk_tests/c_client.c sdk_tests/analysis_algorithms.c DESTINATION examples)

@@ -9,11 +9,22 @@ IR SDK 面向 Windows x64 与 Ubuntu 24.04 x86-64 使用同一份源码和公共
 
 应用包含 `IR_station.h`、`IR_device.h`、`IR_recipe.h`、`IR_analysis.h` 或 `IR_plugin_abi.h`，以 `IR_*` 调用 C 接口。两个库分别提供 `IR_StationVersion()` 与 `IR_AnalysisVersion()` 运行期版本查询；Windows DLL 同时内嵌 `VERSIONINFO` 文件版本资源。公共状态码与 UTF-8 错误缓冲区约定见 `IR_status.h`。客户程序只需要两个 SDK 库及所用语言的运行环境；详细接入与配方/样例说明见 [客户接入说明](docs/客户接入说明.md)。
 
+## 客户集成入口
+
+| 入口 | 用法 | 说明 |
+|---|---|---|
+| C ABI | `include/IR_*.h` + `windows-x64/{bin,lib}`（或 `linux-x86_64/lib`） | 纯 C99/C11 头文件，零第三方运行库 |
+| CMake 包 | `find_package(IRSDK CONFIG REQUIRED)` → `IRSDK::IR_station`、`IRSDK::IR_analysis` | 标准安装前缀走 `<prefix>/lib/cmake/IRSDK/`；解压包走 `<pkg_root>/cmake/IRSDKConfig.cmake`（`-DIRSDK_DIR=<pkg_root>/cmake`）。同时提供 `IRSDK_VERSION`、`IRSDK_ROOT_DIR`、`IRSDK_INCLUDE_DIR`、`IRSDK_PYTHON_BINDINGS_DIR` |
+| Python | `import irsdk`（`bindings/python/irsdk`） | 纯 `ctypes` 镜像：枚举与状态码常量、41 个公共结构体尺寸校验、57 个导出符号签名、`load_sdk`/`call_sdk`/`sdk_versions` |
+| CLI | `windows-x64/bin/ir_run_recipe.exe`、`ir_capture_accept.exe` | 离线预检、配方执行、采帧拷机 |
+
+包内目录形状：`include/`、`windows-x64/bin`、`windows-x64/lib`、`linux-x86_64/lib`、`cmake/`、`bindings/python/`、`examples/`、`simulators/`、`docs/`、`third_party/`、`SDK.md`。`third_party/nlohmann_json` 仅供独立编译的 CLI 样例使用，不进入 SDK 双库的运行时依赖。
+
 ## 四层能力入口
 
 | 层 | 核心入口 | 能力说明 |
 |---|---|---|
-| 仪器控制 | `IR_OpenDevice`、`IR_ListSerialPorts` | 黑体（PCN7-LT TCP / DCN1000 串口）、IT6332A 电源（TCP / 串口 / Windows USB/NI-VISA，`IR_WaitPowerCurrentStable` 启动冲击确认与稳态电流等待）、GWS STEN 烘箱（`IR_SetOven`/`IR_ReadOven`/`IR_StopOven`/`IR_WaitOvenStable`）、Keithley DMM6500 SCPI（TCP、串口、Windows USB/NI-VISA；`IR_SetDmmMode`/`IR_ReadDmm`）、探测器 `0xCC` 串口（`IR_SetDetectorTiming`/`IR_SetDetectorGpol`/`IR_SetDetectorRegister`/`IR_MeasureDetectorCurrent`）与制冷机 Modbus RTU（`IR_COOLER_MODBUS`，默认 `8N2`） |
+| 仪器控制 | `IR_OpenDevice`、`IR_ListSerialPorts` | 黑体（PCN7-LT TCP / DCN1000 串口，可选 `min_setpoint_c`/`max_setpoint_c` 软件设定窗口，默认 -60..100 / -5..100）、IT6332A 电源（TCP / 串口 / Windows USB/NI-VISA，`IR_WaitPowerCurrentStable` 启动冲击确认与稳态电流等待）、GWS STEN 烘箱（`IR_SetOven`/`IR_ReadOven`/`IR_StopOven`/`IR_WaitOvenStable`）、Keithley DMM6500 SCPI（TCP、串口、Windows USB/NI-VISA；`IR_SetDmmMode`/`IR_ReadDmm`）、探测器 `0xCC` 串口（`IR_SetDetectorTiming`/`IR_SetDetectorGpol`/`IR_SetDetectorRegister`/`IR_MeasureDetectorCurrent`）与制冷机 Modbus RTU（`IR_COOLER_MODBUS`，默认 `8N2`） |
 | 原始采集 | `IR_ListCaptureDevices`、`IR_OpenFrames`、`IR_ReadFrames` | RAW16 / RAW32_LE 离线回放（`IR_RAW_REPLAY`）、U16 DirectShow（`IR_DIRECTSHOW`）、U16 V4L2（`IR_V4L2`）；`IR_FlushFrames` 支撑不停流多 Burst 采集；`IR_TryReadLatestFrame` 提供无阻塞预览，`IR_GetCaptureStats` 提供线程安全的有界 `FrameQueue` 诊断（可能短暂等待预览复制） |
 | 指标计算 | `IR_analysis` 独立动态库 | `IR_FrameStatistics`、`IR_ROIMean`、`IR_FrameStatisticsNuc`、Noise3D 帧计算、`IR_ChannelSpectrum` 与 `IR_FlickerDetect` 通过 `IRArrayView` 接收 U16/U32 紧密帧数组；GB/GJB、两点 NUC、`15×15` 盒式/高斯空间滤波、算术扣噪/阈值掩码、1D/2D FFT（`IR_Fft2dMagnitudeF64`）与 `IR_GjbEvaluateBurstMetrics` |
 | 流程编排 | `IR_CheckRecipeJson`、`IR_RunRecipeJson` | 统一 `schemav` 流程格式（多温点/多条件、跨步像元图与掩码引用、`flush_frames`、可选 `save_raw`、`repeat_burst` 周期无存盘温漂、16 项内置算子、`IR_plugin_abi.h` 外部算子插件、`step_records` 逐步耗时及 `safety.blackbody_standby`/`safety.oven_standby` 待机收尾） |

@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "irsdk"
+version = "1.8.0"
+description = "Thin ctypes binding for the IR SDK pure C ABI (IR_station + IR_analysis)"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools]
+packages = ["irsdk"]

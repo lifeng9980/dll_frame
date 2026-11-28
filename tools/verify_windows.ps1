@@ -360,6 +360,14 @@ $InstallDir = Join-Path $WorkRoot "install-windows-release"
 Invoke-External -FilePath $cmakePath -WorkingDirectory $RepoRoot `
     -Arguments @("--install", $BuildDir, "--config", "Release", "--prefix", $InstallDir) | Out-Null
 Write-Host "  Installed to $InstallDir"
+# Generated CMake package files must be LF-only so Windows/Linux install trees stay identical.
+foreach ($cmakeFile in @("IRSDKConfig.cmake", "IRSDKConfigVersion.cmake")) {
+    $cmakePathInstalled = Join-Path $InstallDir "lib\cmake\IRSDK\$cmakeFile"
+    Assert-True (Test-Path -LiteralPath $cmakePathInstalled) "Missing installed CMake package file: $cmakePathInstalled"
+    $cmakeBytes = [System.IO.File]::ReadAllBytes($cmakePathInstalled)
+    Assert-True (-not ($cmakeBytes -contains 13)) "$cmakeFile must use LF line endings (found CR)"
+}
+Write-Host "  CMake package files use LF line endings"
 
 Write-Step "7. Packaging Windows-only SDK archive with hygiene verification"
 $PackageDir = Join-Path $WorkRoot "package"
@@ -450,6 +458,60 @@ Write-Host "  Standalone ir_c_client, ir_cpp_client, ir_analysis_c_sample, ir_ru
 $ExamplePlugin = Join-Path $ClientBuildDir "ir_example_mean_plugin.dll"
 Assert-True (Test-Path -LiteralPath $ExamplePlugin) "Customer metric plugin example was not built"
 
+Write-Step "9b. Verifying find_package(IRSDK CONFIG) consumers (install prefix and packaged archive)"
+function Test-IrsdkConsumer {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourceDir,
+        [Parameter(Mandatory = $true)][string]$ConsumerBuildDir,
+        [Parameter(Mandatory = $true)][string[]]$ConfigureArgs,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+    $configure = @("-S", $SourceDir, "-B", $ConsumerBuildDir, "-G", "Ninja",
+                   "-DCMAKE_BUILD_TYPE=Release") + $ConfigureArgs
+    Invoke-External -FilePath $cmakePath -WorkingDirectory $RepoRoot -Arguments $configure | Out-Null
+    Invoke-External -FilePath $cmakePath -WorkingDirectory $RepoRoot `
+        -Arguments @("--build", $ConsumerBuildDir, "--target", "ir_c_client",
+                     "ir_analysis_c_sample", "ir_run_recipe") | Out-Null
+
+    # 1) station + analysis client links and runs through the package interface.
+    $clientRes = Invoke-External -FilePath (Join-Path $ConsumerBuildDir "ir_c_client.exe") `
+        -Arguments @($SdkVersion)
+    Assert-True ($clientRes.StdOut.Trim() -eq $SdkVersion) `
+        "$Label ir_c_client output mismatch: $($clientRes.StdOut)"
+
+    # 2) analysis-only client must not pull in the station runtime.
+    $analysisExe = Join-Path $ConsumerBuildDir "ir_analysis_c_sample.exe"
+    $analysisDeps = Invoke-External -FilePath $dumpbinPath -Arguments @("/nologo", "/dependents", $analysisExe)
+    $analysisDllLines = @($analysisDeps.StdOut -split "`r?`n" |
+        Where-Object { $_ -match '^\s+\S+\.dll\s*$' } | ForEach-Object { $_.Trim() })
+    Assert-True ($analysisDllLines -contains "IR_analysis.dll") `
+        "$Label ir_analysis_c_sample.exe must depend on IR_analysis.dll (got: $($analysisDllLines -join ', '))"
+    Assert-True (-not ($analysisDllLines -contains "IR_station.dll")) `
+        "$Label ir_analysis_c_sample.exe must not depend on IR_station.dll (got: $($analysisDllLines -join ', '))"
+    $null = Invoke-External -FilePath $analysisExe
+
+    # 3) station-only client (ir_run_recipe) builds and preflights without analysis linking.
+    $cliCheck = Invoke-External -FilePath (Join-Path $ConsumerBuildDir "ir_run_recipe.exe") `
+        -Arguments @("--check", "--station", (Join-Path $SourceDir "stations\offline.json"),
+                     "--recipe", (Join-Path $SourceDir "recipes\noise_roi.json"))
+    Assert-True ($cliCheck.StdOut.Trim() -eq "recipe=VALID") `
+        "$Label station-only ir_run_recipe --check failed: $($cliCheck.StdOut)"
+    Write-Host "  $Label consumer verified (station+analysis, analysis-only, station-only)"
+}
+
+# Install prefix: <prefix>/lib/cmake/IRSDK/IRSDKConfig.cmake + IRSDKTargets.cmake.
+Test-IrsdkConsumer -SourceDir (Join-Path $InstallDir "examples") `
+    -ConsumerBuildDir (Join-Path $WorkRoot "consumer-install") `
+    -ConfigureArgs @("-DCMAKE_PREFIX_PATH=$InstallDir") `
+    -Label "install-prefix"
+
+# Packaged archive: <pkg_root>/cmake/IRSDKConfig.cmake with imported SHARED targets.
+Test-IrsdkConsumer -SourceDir (Join-Path $PkgRoot "examples") `
+    -ConsumerBuildDir (Join-Path $WorkRoot "consumer-package") `
+    -ConfigureArgs @("-DIRSDK_DIR=$(Join-Path $PkgRoot 'cmake')") `
+    -Label "packaged-archive"
+Write-Host "  find_package(IRSDK CONFIG) consumers verified for $InstallDir and $PkgRoot"
+
 Write-Step "10. Running packaged CLI and Python smoke tests"
 $PkgCli = Join-Path $PkgRoot "windows-x64\bin\ir_run_recipe.exe"
 $TempRecipesDir = Join-Path $WorkRoot "temp-recipes"
@@ -488,6 +550,26 @@ $pyRunRes = Invoke-External -FilePath $pythonPath -WorkingDirectory $WorkRoot `
 Assert-True ($pyRunRes.StdOut -match "(?m)^run_status=PASS\r?$") "ir_recipe.py --run failed (got: $($pyRunRes.StdOut))"
 Assert-True (Test-Path (Join-Path $WorkRoot "py-recipe-out\result.json")) "Python output missing under working directory"
 Write-Host "  Packaged CLI and Python recipe runs verified."
+
+# Packaged official binding: import from bindings/python with zero configuration, let
+# load_sdk() auto-discover windows-x64/bin from the package layout (Chinese + space path),
+# then verify struct sizes and run a real IR_ROIMean call through call_sdk().
+$BindingSmoke = "import ctypes, sys; sys.path.insert(0, sys.argv[1]); import irsdk; " + `
+    "sizes = irsdk.verify_struct_sizes(); " + `
+    "libs = irsdk.load_sdk(); " + `
+    "assert libs.station_version == sys.argv[2] == libs.analysis_version, (libs.station_version, libs.analysis_version); " + `
+    "assert len(sizes) == 41, len(sizes); " + `
+    "assert len(irsdk.STATION_EXPORTS) == 35 and len(irsdk.ANALYSIS_EXPORTS) == 22; " + `
+    "pixels = (ctypes.c_uint16 * 4)(1, 2, 3, 4); " + `
+    "view = irsdk.array_view(pixels, irsdk.IR_TYPE_U16, 2, 2); " + `
+    "mean = ctypes.c_double(); " + `
+    "irsdk.call_sdk(libs.analysis, 'IR_ROIMean', ctypes.byref(view), 0, 0, 2, 2, ctypes.byref(mean)); " + `
+    "assert mean.value == 2.5, mean.value; " + `
+    "print('irsdk', libs.station_version, len(sizes), 'structs', len(irsdk.STATION_EXPORTS) + len(irsdk.ANALYSIS_EXPORTS), 'exports', 'roi', mean.value)"
+$bindingRes = Invoke-External -FilePath $pythonPath -WorkingDirectory $PkgRoot `
+    -Environment @{ IR_SDK_LIB_DIR = ""; IR_SDK_BIN_DIR = ""; IRSDK_DIR = ""; IR_SDK_ROOT = "" } `
+    -Arguments @("-B", "-c", $BindingSmoke, (Join-Path $PkgRoot "bindings\python"), $SdkVersion)
+Write-Host "  Packaged irsdk binding smoke: $($bindingRes.StdOut.Trim())"
 
 Write-Step "11. Checking optional C# sample (dotnet)"
 $dotnetCandidates = New-Object System.Collections.Generic.List[string]

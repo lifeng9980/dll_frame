@@ -187,17 +187,24 @@ BlackbodyConfig parseBlackbodyConfig(int32_t kind, const ConnectionFields &field
     result.timeout = fields.timeout(result.timeout);
     result.expectedHead = fields.text("expected_head_serial");
     if (kind == IR_PCN7LT) {
-        fields.allow({"host", "tcp_port", "head", "expected_head_serial", "timeout_ms"});
+        fields.allow({"host", "tcp_port", "head", "expected_head_serial", "timeout_ms",
+                      "min_setpoint_c", "max_setpoint_c"});
         result.endpoint = parseTcpEndpoint(fields, 2101);
         result.commandInterval = std::chrono::milliseconds{100};
         result.head = fields.integer("head", result.head, -1, 1);
         if (!result.expectedHead.empty() && result.head < 0)
             fields.fail("expected_head_serial", "requires a head index of 0 or 1");
     } else {
-        fields.allow({"port", "expected_head_serial", "timeout_ms"});
+        fields.allow({"port", "expected_head_serial", "timeout_ms",
+                      "min_setpoint_c", "max_setpoint_c"});
         result.endpoint = SerialEndpoint{fields.text("port", true), 9600};
         result.commandInterval = std::chrono::milliseconds{200};
+        result.minSetpointC = -5.0;
     }
+    result.minSetpointC = fields.number("min_setpoint_c", result.minSetpointC);
+    result.maxSetpointC = fields.number("max_setpoint_c", result.maxSetpointC);
+    if (result.minSetpointC > result.maxSetpointC)
+        fields.fail("min_setpoint_c", "must be <= max_setpoint_c");
     return result;
 }
 
