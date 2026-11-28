@@ -51,6 +51,22 @@ bool parseUdpOutput(const std::string &reply)
     throw Error(IR_IO_ERROR, "UDP6730 returned an invalid output state: " + reply);
 }
 
+/**
+ * Reject out-of-contract power driver readbacks: an undocumented ``output_enabled`` value or a
+ * non-finite voltage/current would silently poison the recipe metrics and result.json.
+ */
+void validateExternalReading(const IRPowerReading &reading, const char *operation)
+{
+    require(reading.output_enabled == 0 || reading.output_enabled == 1, IR_IO_ERROR,
+            std::string("External power driver ") + operation +
+                " returned an invalid output_enabled flag: " + std::to_string(reading.output_enabled));
+    require(std::isfinite(reading.setpoint_v) && std::isfinite(reading.current_limit_a) &&
+                std::isfinite(reading.measured_v) && std::isfinite(reading.measured_a),
+            IR_IO_ERROR,
+            std::string("External power driver ") + operation +
+                " returned a non-finite reading (setpoint/current limit/measured voltage/current)");
+}
+
 std::string readErrBuf(const char *err, size_t capacity, const char *fallback)
 {
     if (!err || capacity <= 1) return fallback;
@@ -71,6 +87,36 @@ struct CachedExternalDriver {
 
 std::mutex externalDriversMutex;
 std::map<std::string, CachedExternalDriver> externalDrivers;
+
+/**
+ * Resolve ``driverPath`` to an absolute canonical file path *before* loading it.
+ *
+ * Loading whatever the working directory happens to contain is a hardening hole (DLL search
+ * order / ambiguous relative names), so the path is anchored, canonicalized and proven to be
+ * a regular file. Only a broken ``weakly_canonical`` falls back to ``lexically_normal``; a
+ * failed ``absolute`` is an error, never a silent relative load.
+ */
+std::filesystem::path resolveDriverTarget(const std::string &driverPath)
+{
+    std::error_code ec;
+    const auto original = ir::utf8::pathFromUtf8(driverPath);
+    const auto absolutePath = std::filesystem::absolute(original, ec);
+    if (ec) {
+        throw Error(IR_IO_ERROR, "Cannot resolve external power driver '" + driverPath +
+                                      "' to an absolute path: " + ec.message());
+    }
+    ec.clear();
+    const auto canonical = std::filesystem::weakly_canonical(absolutePath, ec);
+    const auto targetPath = ec ? absolutePath.lexically_normal() : canonical;
+    require(targetPath.is_absolute(), IR_IO_ERROR,
+            "External power driver '" + driverPath + "' did not resolve to an absolute path (got '" +
+                ir::utf8::pathToUtf8(targetPath) + "')");
+    ec.clear();
+    require(std::filesystem::is_regular_file(targetPath, ec), IR_IO_ERROR,
+            "External power driver '" + driverPath + "' is not an existing file (resolved to '" +
+                ir::utf8::pathToUtf8(targetPath) + "')");
+    return targetPath;
+}
 
 std::string normalizeDriverKey(const std::string &driverPath)
 {
@@ -93,17 +139,18 @@ const IRPowerDriverDescriptor *loadExternalDriver(const std::string &driverPath,
 {
     require(!driverPath.empty(), IR_BAD_ARGUMENT,
             std::string(errorContext) + ".driver_path must be nonempty");
-    const std::string key = normalizeDriverKey(driverPath);
+    const auto targetPath = resolveDriverTarget(driverPath);
+    const std::string key = normalizeDriverKey(ir::utf8::pathToUtf8(targetPath));
 
     std::lock_guard lock(externalDriversMutex);
     auto it = externalDrivers.find(key);
     if (it == externalDrivers.end()) {
-        const auto nativePath = ir::utf8::pathFromUtf8(driverPath);
 #ifdef _WIN32
-        HMODULE mod = nativePath.is_absolute()
-            ? LoadLibraryExW(nativePath.c_str(), nullptr,
-                             LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)
-            : LoadLibraryW(nativePath.c_str());
+        // Always load through the restricted search flags: LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR keeps
+        // the driver's own directory ahead of the application directory and PATH.
+        HMODULE mod = LoadLibraryExW(targetPath.c_str(), nullptr,
+                                     LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                                         LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
         require(mod != nullptr, IR_IO_ERROR,
                 "Cannot load external power driver '" + driverPath + "' (Win32 error " +
                 std::to_string(GetLastError()) + ")");
@@ -116,7 +163,7 @@ const IRPowerDriverDescriptor *loadExternalDriver(const std::string &driverPath,
         }
 #else
         (void)dlerror();
-        void *mod = dlopen(nativePath.c_str(), RTLD_NOW | RTLD_LOCAL);
+        void *mod = dlopen(targetPath.c_str(), RTLD_NOW | RTLD_LOCAL);
         if (!mod) {
             const char *dlErr = dlerror();
             throw Error(IR_IO_ERROR,
@@ -367,6 +414,7 @@ IRPowerReading ExternalPowerSupply::readPower(int channel)
         throw Error(static_cast<IRStatus>(rc),
                     readErrBuf(err, sizeof(err), "External power driver read failed"));
     }
+    validateExternalReading(reading, "read");
     return reading;
 }
 
@@ -386,6 +434,11 @@ IRPowerReading ExternalPowerSupply::setPowerOutput(int channel, bool enabled)
         throw Error(static_cast<IRStatus>(rc),
                     readErrBuf(err, sizeof(err), "External power driver set_output failed"));
     }
+    validateExternalReading(reading, "set_output");
+    require(reading.output_enabled == (enabled ? 1 : 0), IR_IO_ERROR,
+            std::string("External power driver output state readback does not match the requested "
+                        "state (requested ") +
+                (enabled ? "1" : "0") + ", reported " + std::to_string(reading.output_enabled) + ")");
     return reading;
 }
 
@@ -408,6 +461,7 @@ IRPowerReading ExternalPowerSupply::setPowerChannel(int channel, double voltageV
         throw Error(static_cast<IRStatus>(rc),
                     readErrBuf(err, sizeof(err), "External power driver set_channel failed"));
     }
+    validateExternalReading(reading, "set_channel");
     return reading;
 }
 

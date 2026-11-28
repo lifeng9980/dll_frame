@@ -305,7 +305,9 @@ if(BUILD_TESTING)
             "${PROJECT_SOURCE_DIR}/sdk_tests/power_mock_test.py"
             --tcp "$<TARGET_FILE:IR_station>" --fixture-parent "${PROJECT_BINARY_DIR}"
             --power-driver "$<TARGET_FILE:ir_test_power_driver>")
-        set_tests_properties(power_tcp PROPERTIES TIMEOUT 30)
+        # The external-power regressions spawn child interpreters and copy the mock driver, which
+        # can be slowed by on-access virus scanning; allow generous headroom over the ~11-16 s run.
+        set_tests_properties(power_tcp PROPERTIES TIMEOUT 120)
 
         add_test(NAME virtual_station_hil COMMAND "${Python3_EXECUTABLE}" -B
             "${PROJECT_SOURCE_DIR}/sdk_tests/virtual_station_hil_test.py"
@@ -328,7 +330,7 @@ if(BUILD_TESTING)
             add_test(NAME power_serial COMMAND "${Python3_EXECUTABLE}" -B
                 "${PROJECT_SOURCE_DIR}/sdk_tests/power_mock_test.py" "$<TARGET_FILE:IR_station>"
                 --fixture-parent "${PROJECT_BINARY_DIR}")
-            set_tests_properties(power_serial PROPERTIES TIMEOUT 30)
+            set_tests_properties(power_serial PROPERTIES TIMEOUT 120)
         endif()
     endif()
 endif()

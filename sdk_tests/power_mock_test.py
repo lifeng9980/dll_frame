@@ -11,7 +11,9 @@ import json
 import os
 from pathlib import Path
 import select
+import shutil
 import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -21,7 +23,94 @@ SIMULATOR_DIR = Path(__file__).resolve().parents[1] / "simulators"
 sys.path.insert(0, str(SIMULATOR_DIR))
 from ir_sim_devices import It6332a, Udp6730  # noqa: E402
 
+IR_IO_ERROR = 6
 IR_BUSY = 9
+
+# Child-process probe: a fresh interpreter has an empty driver cache, so the *relative*
+# ``driver_path`` exercises the cold canonicalization path without leaving a loaded module
+# behind that would block Windows temp cleanup.
+COLD_RELATIVE_DRIVER_PROBE = r'''
+import ctypes as c
+import json
+import os
+import sys
+
+library, driver_path = sys.argv[1], sys.argv[2]
+if hasattr(os, "add_dll_directory"):
+    os.add_dll_directory(os.path.dirname(os.path.abspath(library)))
+sdk = c.CDLL(os.path.abspath(library))
+sdk.IR_OpenDevice.argtypes = [c.c_int32, c.c_char_p, c.POINTER(c.c_uint64),
+                              c.c_char_p, c.c_int32]
+handle = c.c_uint64()
+error = c.create_string_buffer(1024)
+config = json.dumps({"driver_path": driver_path, "driver_id": "mock_power",
+                     "driver_config": {"ok": True}}).encode()
+status = sdk.IR_OpenDevice(10, config, c.byref(handle), error, len(error))
+print(status, handle.value, error.value.decode("utf-8", "replace"))
+raise SystemExit(0 if status == 0 and handle.value else 1)
+'''
+
+# Child-process probe for the opt-in ``power_set`` capability: the driver only advertises
+# ``IR_POWER_CAP_SET`` when ``IR_MOCK_POWER_ALLOW_SET_CHANNEL=1``, so the parent process keeps an
+# immutable READ | OUTPUT descriptor for its whole lifetime.
+SET_CHANNEL_DRIVER_PROBE = r'''
+import ctypes as c
+import json
+import os
+import sys
+
+library, driver_path = sys.argv[1], sys.argv[2]
+if hasattr(os, "add_dll_directory"):
+    os.add_dll_directory(os.path.dirname(os.path.abspath(library)))
+
+
+class Reading(c.Structure):
+    _fields_ = [("setpoint_v", c.c_double), ("current_limit_a", c.c_double),
+                ("measured_v", c.c_double), ("measured_a", c.c_double),
+                ("output_enabled", c.c_int32)]
+
+
+sdk = c.CDLL(os.path.abspath(library))
+error_args = [c.c_char_p, c.c_int32]
+sdk.IR_OpenDevice.argtypes = [c.c_int32, c.c_char_p, c.POINTER(c.c_uint64), *error_args]
+sdk.IR_CloseDevice.argtypes = [c.c_uint64, *error_args]
+sdk.IR_ReadPower.argtypes = [c.c_uint64, c.c_int32, c.POINTER(Reading), *error_args]
+sdk.IR_SetPowerChannel.argtypes = [c.c_uint64, c.c_int32, c.c_double, c.c_double,
+                                   c.POINTER(Reading), *error_args]
+
+IR_IO_ERROR = 6
+error = c.create_string_buffer(1024)
+reading = Reading()
+
+
+def open_device(driver_config):
+    config = json.dumps({"driver_path": driver_path, "driver_id": "mock_power",
+                         "driver_config": driver_config}).encode()
+    handle = c.c_uint64()
+    status = sdk.IR_OpenDevice(10, config, c.byref(handle), error, len(error))
+    assert status == 0 and handle.value, (driver_config, status, error.value)
+    return handle
+
+
+def close_device(handle):
+    assert sdk.IR_CloseDevice(handle, error, len(error)) == 0, error.value
+
+
+handle = open_device({"ok": True})
+status = sdk.IR_SetPowerChannel(handle, 1, 5.0, 1.0, c.byref(reading), error, len(error))
+assert status == 0, (status, error.value)
+assert abs(reading.setpoint_v - 5.0) < 1e-9 and abs(reading.current_limit_a - 1.0) < 1e-9
+assert reading.output_enabled == 0
+close_device(handle)
+
+for nan_field in ("setpoint_v", "current_limit_a", "measured_v", "measured_a"):
+    handle = open_device({"nan_field": nan_field})
+    status = sdk.IR_SetPowerChannel(handle, 1, 5.0, 1.0, c.byref(reading), error, len(error))
+    assert status == IR_IO_ERROR and b"non-finite" in error.value, (nan_field, status, error.value)
+    close_device(handle)
+
+print("set_channel probe ok")
+'''
 
 
 class Reading(c.Structure):
@@ -610,6 +699,83 @@ def test_udp6730_and_external_power(sdk, root, base_station, base_recipe, power_
             ext_set = dict(base_recipe, steps=[{"id": "s", "type": "power_set", "device": "ext", "channel": 1, "voltage_v": 5.0, "current_limit_a": 1.0}])
             assert sdk.IR_CheckRecipeJson(json.dumps(ext_station).encode(), json.dumps(ext_set).encode(), err, len(err)) == 10
             assert sdk.IR_CloseDevice(ext_h, err, len(err)) == 6
+
+            # 4b. Host readback gates: mismatched output state, out-of-contract flag, non-finite values
+            def open_external(driver_config):
+                cfg = {"driver_path": str(power_driver), "driver_id": "mock_power",
+                       "driver_config": driver_config}
+                assert sdk.IR_OpenDevice(10, json.dumps(cfg).encode(), c.byref(ext_h),
+                                         err, len(err)) == 0, err.value
+
+            open_external({"mismatch_output": True})
+            assert sdk.IR_ReadPower(ext_h, 1, c.byref(er), err, len(err)) == 0, err.value
+            assert er.output_enabled == 0
+            assert sdk.IR_SetPowerOutput(ext_h, 1, 1, c.byref(er), err, len(err)) == IR_IO_ERROR, err.value
+            assert b"readback" in err.value, err.value
+            assert sdk.IR_CloseDevice(ext_h, err, len(err)) == 0, err.value
+
+            open_external({"bad_output_flag": True})
+            assert sdk.IR_ReadPower(ext_h, 1, c.byref(er), err, len(err)) == IR_IO_ERROR, err.value
+            assert b"output_enabled" in err.value, err.value
+            assert sdk.IR_SetPowerOutput(ext_h, 1, 1, c.byref(er), err, len(err)) == IR_IO_ERROR, err.value
+            assert sdk.IR_CloseDevice(ext_h, err, len(err)) == 0, err.value
+
+            open_external({"nan_reading": True})
+            assert sdk.IR_ReadPower(ext_h, 1, c.byref(er), err, len(err)) == IR_IO_ERROR, err.value
+            assert b"non-finite" in err.value, err.value
+            assert sdk.IR_SetPowerOutput(ext_h, 1, 0, c.byref(er), err, len(err)) == IR_IO_ERROR, err.value
+            assert sdk.IR_CloseDevice(ext_h, err, len(err)) == 0, err.value
+
+            # 4b-2. Every ABI-visible double is gated individually. ``IR_ReadPower`` stays in this
+            #        process (default READ | OUTPUT descriptor); the opt-in ``power_set``
+            #        capability is selected by an environment variable and therefore exercised in
+            #        a child process whose driver advertises IR_POWER_CAP_SET.
+            for nan_field in ("setpoint_v", "current_limit_a", "measured_v", "measured_a"):
+                open_external({"nan_field": nan_field})
+                status = sdk.IR_ReadPower(ext_h, 1, c.byref(er), err, len(err))
+                assert status == IR_IO_ERROR and b"non-finite" in err.value, (nan_field, status, err.value)
+                assert sdk.IR_CloseDevice(ext_h, err, len(err)) == 0, err.value
+
+            set_channel_probe = subprocess.run(
+                [sys.executable, "-B", "-c", SET_CHANNEL_DRIVER_PROBE,
+                 str(Path(sdk._name).resolve()), str(Path(power_driver).resolve())],
+                capture_output=True, text=True, check=False,
+                env=dict(os.environ, IR_MOCK_POWER_ALLOW_SET_CHANNEL="1"))
+            assert set_channel_probe.returncode == 0, (set_channel_probe.stdout,
+                                                       set_channel_probe.stderr)
+
+            # The parent process still sees the immutable read/output descriptor: no power_set.
+            if os.environ.get("IR_MOCK_POWER_ALLOW_SET_CHANNEL") != "1":
+                open_external({"ok": True})
+                assert sdk.IR_SetPowerChannel(ext_h, 1, 5.0, 1.0, c.byref(er),
+                                              err, len(err)) == 10, err.value
+                assert sdk.IR_CloseDevice(ext_h, err, len(err)) == 0, err.value
+
+            # 4c. Canonicalized absolute loading. The driver is copied to a fresh file name under
+            # the fixture root and opened through a relative driver_path in a *child process* (so
+            # the driver cache is genuinely cold and the copy is unloaded before temp cleanup);
+            # a nonexistent path must fail with IR_IO_ERROR before any LoadLibrary/dlopen attempt.
+            cold_copy = root / ("cold_relative_mock_power.dll" if os.name == "nt"
+                                else "cold_relative_mock_power.so")
+            shutil.copyfile(power_driver, cold_copy)
+            try:
+                relative_driver = os.path.relpath(cold_copy, os.getcwd())
+            except ValueError:
+                relative_driver = None  # different Windows drive: no relative form exists
+            if relative_driver is not None and not os.path.isabs(relative_driver):
+                library = str(Path(sdk._name).resolve())
+                probe = subprocess.run(
+                    [sys.executable, "-B", "-c", COLD_RELATIVE_DRIVER_PROBE,
+                     library, relative_driver],
+                    capture_output=True, text=True, check=False)
+                assert probe.returncode == 0, (relative_driver, probe.stdout, probe.stderr)
+
+            missing_cfg = {"driver_path": str(root / "no_such_power_driver.dll"),
+                           "driver_id": "mock_power", "driver_config": {"ok": True}}
+            assert sdk.IR_OpenDevice(10, json.dumps(missing_cfg).encode(), c.byref(ext_h),
+                                     err, len(err)) == IR_IO_ERROR, err.value
+            assert ext_h.value == 0
+            assert b"not an existing file" in err.value, err.value
 
             if os.name == "nt":
                 # 5. Verify control_port config validation (no connection during validate) & bounded error when offline

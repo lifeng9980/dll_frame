@@ -13,9 +13,11 @@ from __future__ import annotations
 import ctypes as c
 import os
 from pathlib import Path
+import threading
 
 from .abi import (
     D,
+    EXPECTED_SDK_MAJOR_MINOR,
     HANDLE,
     I,
     I64,
@@ -57,6 +59,42 @@ from .abi import (
 )
 
 _ERR_ARGS = (c.c_char_p, I)
+
+# ``kernel32`` with ``use_last_error`` is bound once on Windows; the native module-path helpers
+# below are the only OS-specific code in this module and are inert elsewhere.
+_KERNEL32 = c.WinDLL("kernel32", use_last_error=True) if os.name == "nt" else None
+_WINTYPES = None
+if _KERNEL32 is not None:  # pragma: no cover - Windows only
+    import ctypes.wintypes as _WINTYPES
+
+    _KERNEL32.GetModuleFileNameW.argtypes = (_WINTYPES.HMODULE, _WINTYPES.LPWSTR, _WINTYPES.DWORD)
+    _KERNEL32.GetModuleFileNameW.restype = _WINTYPES.DWORD
+    _KERNEL32.GetCurrentProcess.argtypes = ()
+    _KERNEL32.GetCurrentProcess.restype = _WINTYPES.HANDLE
+    _KERNEL32.K32EnumProcessModules.argtypes = (_WINTYPES.HANDLE, c.POINTER(_WINTYPES.HMODULE),
+                                                _WINTYPES.DWORD, c.POINTER(_WINTYPES.DWORD))
+    _KERNEL32.K32EnumProcessModules.restype = _WINTYPES.BOOL
+    _KERNEL32.FreeLibrary.argtypes = (_WINTYPES.HMODULE,)
+    _KERNEL32.FreeLibrary.restype = _WINTYPES.BOOL
+
+_MODULE_PATH_MAX_CHARS = 32768
+
+
+# POSIX identity helpers: ``dlsym`` (symbol address inside a specific object) and ``dladdr``
+# (object path owning an address) are the only way to prove which ``IR_analysis`` an
+# ``IR_station`` import table actually bound. Both live in the global namespace of the process.
+class _DlInfo(c.Structure):
+    _fields_ = [("dli_fname", c.c_char_p), ("dli_fbase", c.c_void_p),
+                ("dli_sname", c.c_char_p), ("dli_saddr", c.c_void_p)]
+
+
+_LIBC = None
+if os.name == "posix":  # pragma: no cover - POSIX only
+    _LIBC = c.CDLL(None)
+    _LIBC.dlsym.argtypes = (c.c_void_p, c.c_char_p)
+    _LIBC.dlsym.restype = c.c_void_p
+    _LIBC.dladdr.argtypes = (c.c_void_p, c.POINTER(_DlInfo))
+    _LIBC.dladdr.restype = c.c_int
 
 # name -> leading argtypes; the trailing (char *err, int32_t err_bytes) is appended.
 STATION_SIGNATURES = (
@@ -204,6 +242,12 @@ _VERSION_MAX_CHARS = 128
 # handle too early breaks later plugin/backend loads from the same directory.
 _DLL_DIR_HANDLES = {}
 _LIBRARY_CACHE = {}
+# Directories whose load is currently executing / already completed successfully. A nested load
+# of an in-progress directory must fail instead of rolling back the outer attempt's handles.
+_IN_PROGRESS_DIRS = set()
+_COMMITTED_DIRS = set()
+# Reentrant: the cache guard nests into _open_dll_directory / _close_dll_directory.
+_DLL_LOCK = threading.RLock()
 
 
 def _library_names():
@@ -314,15 +358,18 @@ def _open_dll_directory(path):
     if add is None:
         return False
     key = str(path)
-    if key in _DLL_DIR_HANDLES:
-        return False
-    _DLL_DIR_HANDLES[key] = add(key)
+    with _DLL_LOCK:
+        if key in _DLL_DIR_HANDLES:
+            return False
+        _DLL_DIR_HANDLES[key] = add(key)
     return True
 
 
 def _close_dll_directory(path):
     key = str(path)
-    handle = _DLL_DIR_HANDLES.pop(key, None)
+    with _DLL_LOCK:
+        handle = _DLL_DIR_HANDLES.pop(key, None)
+    # Closing outside the lock keeps the critical section free of foreign code.
     if handle is not None:
         handle.close()
 
@@ -352,30 +399,406 @@ def _load_library(directory, file_name):
     return c.CDLL(str(path))
 
 
-def load_station(library_dir=None):
-    """Load and bind ``IR_station`` only (the directory must also hold ``IR_analysis``)."""
-    directory = resolve_sdk_library_dir(library_dir, library="station")
-    opened = _open_dll_directory(directory)
-    station_name, _ = _library_names()
+def _same_module_path(left, right):
+    """Windows paths compare case-insensitively; POSIX paths stay exact."""
+    return os.path.normcase(str(left)) == os.path.normcase(str(right))
+
+
+def _module_path_from_handle(handle):
+    """On-disk path of a loaded module handle (``None`` off Windows)."""
+    if _KERNEL32 is None or not handle:
+        return None
+    buffer = c.create_unicode_buffer(_MODULE_PATH_MAX_CHARS)
+    written = _KERNEL32.GetModuleFileNameW(_WINTYPES.HMODULE(handle), buffer, len(buffer))
+    if not written:
+        return None
+    return Path(buffer.value).resolve()
+
+
+def _list_resident_module_paths_windows(module_name):
+    """Enumerate every loaded module of the current process matching ``module_name``."""
+    process = _KERNEL32.GetCurrentProcess()
+    capacity = 64
+    while True:
+        modules = (_WINTYPES.HMODULE * capacity)()
+        needed = _WINTYPES.DWORD(0)
+        if not _KERNEL32.K32EnumProcessModules(process, modules, c.sizeof(modules),
+                                              c.byref(needed)):
+            # Never degrade to "nothing resident": an unreadable module list would silently
+            # disable every identity gate below, so fail closed instead.
+            raise RuntimeError(
+                "cannot enumerate the loaded modules of this process (K32EnumProcessModules "
+                f"failed with Win32 error {c.get_last_error()})")
+        if needed.value <= c.sizeof(modules):
+            break
+        capacity *= 2
+    wanted = str(module_name).lower()
+    found = {}
+    for index in range(needed.value // c.sizeof(_WINTYPES.HMODULE)):
+        path = _module_path_from_handle(modules[index])
+        if path is not None and path.name.lower() == wanted:
+            found[os.path.normcase(str(path))] = path
+    return list(found.values())
+
+
+def _list_resident_module_paths_posix(module_name):
+    """Parse ``/proc/self/maps`` for file-backed mappings matching ``module_name``."""
     try:
-        return bind_station_dll(_load_library(directory, station_name))
-    except Exception:
-        if opened:
-            _close_dll_directory(directory)
-        raise
+        maps = Path("/proc/self/maps").read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        # Fail closed: an unreadable map would silently disable the identity gates.
+        raise RuntimeError(
+            f"cannot read /proc/self/maps to enumerate loaded modules: {error}") from error
+    found = {}
+    for line in maps.splitlines():
+        marker = line.find(" /")
+        if marker < 0:
+            continue
+        token = line[marker + 1:].strip()
+        if token.endswith(" (deleted)"):
+            token = token[: -len(" (deleted)")]
+        if not token.startswith("/"):
+            continue
+        try:
+            path = Path(token).resolve()
+        except OSError:
+            continue
+        if path.name == module_name or path.name.startswith(f"{module_name}."):
+            found[os.path.normcase(str(path))] = path
+    return list(found.values())
+
+
+def _list_resident_module_paths(module_name):
+    """Every in-process module path whose file name matches ``module_name`` (resolved, unique).
+
+    Windows walks ``K32EnumProcessModules`` so N same-named modules loaded from different
+    directories are all visible; POSIX parses ``/proc/self/maps``. Both raise ``RuntimeError``
+    when the OS cannot answer, because an empty answer would weaken every identity gate below.
+    """
+    if _KERNEL32 is not None:
+        return _list_resident_module_paths_windows(module_name)
+    if os.name == "posix":
+        return _list_resident_module_paths_posix(module_name)
+    return []
+
+
+def _posix_dlsym(library, symbol_name):
+    """Address of ``symbol_name`` as bound by ``library`` (POSIX only; ``None`` elsewhere)."""
+    if _LIBC is None or library is None:
+        return None
+    handle = getattr(library, "_handle", None)
+    if not handle:
+        return None
+    return _LIBC.dlsym(c.c_void_p(handle), symbol_name)
+
+
+def _posix_symbol_path(address):
+    """On-disk path of the shared object owning ``address``, or ``None`` (POSIX only)."""
+    if _LIBC is None or not address:
+        return None
+    info = _DlInfo()
+    if not _LIBC.dladdr(c.c_void_p(address), c.byref(info)):
+        return None
+    if not info.dli_fname:
+        return None
+    return Path(os.fsdecode(info.dli_fname)).resolve()
+
+
+def _posix_global_dlsym(symbol_name):
+    """Address of ``symbol_name`` in the *global* scope (``RTLD_DEFAULT``), or ``None``.
+
+    ``RTLD_DEFAULT`` is ``(void *)0`` on glibc/musl: exactly the scope ELF relocation consults
+    before an object's own dependencies, i.e. where ``LD_PRELOAD`` / ``RTLD_GLOBAL`` objects win.
+    ``dlsym``'s first parameter stays ``c_void_p`` so ``None`` / ``c_void_p(0)`` both query it.
+    """
+    if _LIBC is None:
+        return None
+    return _LIBC.dlsym(c.c_void_p(0), symbol_name)
+
+
+def _assert_no_posix_global_interposition(directory, analysis_name, station_name=None):
+    """POSIX: no SDK export may resolve to a foreign object through the global scope.
+
+    A preloaded (``LD_PRELOAD``) or ``RTLD_GLOBAL`` object that defines e.g. ``IR_ROIMean`` wins
+    over the library's own definition during ELF relocation - a per-object ``dlsym`` cannot see
+    that. Every export of the libraries in use must therefore resolve *globally* back to the file
+    we loaded. Symbols that are not globally resolvable cannot be interposed and are skipped.
+    """
+    targets = [(ANALYSIS_EXPORTS, analysis_name)]
+    if station_name is not None:
+        targets.append((STATION_EXPORTS, station_name))
+    for exports, name in targets:
+        expected = (Path(directory) / name).resolve()
+        for symbol in exports:
+            address = _posix_global_dlsym(symbol.encode("ascii"))
+            if not address:
+                continue  # not visible in the global scope, so nothing can interpose
+            backing = _posix_symbol_path(address)
+            if backing is None or not _same_module_path(backing, expected):
+                raise RuntimeError(
+                    f"Global symbol interposition detected for {symbol}: resolved to "
+                    f"'{backing if backing is not None else 'unknown'}' instead of '{expected}'")
+
+
+def _unload_library(library):
+    """Best-effort release of a library opened by a load attempt that is being rolled back.
+
+    Only ever called for handles this attempt opened, so the refcount stays balanced: a module
+    that was already resident keeps its existing reference.
+    """
+    if library is None:
+        return
+    handle = getattr(library, "_handle", None)
+    if not handle:
+        return
+    if _KERNEL32 is not None:
+        _KERNEL32.FreeLibrary(_WINTYPES.HMODULE(handle))
+        return
+    try:
+        import _ctypes
+
+        _ctypes.dlclose(handle)
+    except (AttributeError, ImportError, OSError):
+        pass
+
+
+def _assert_foreign_modules_absent(directory, names):
+    """Refuse to load when a same-named SDK module is resident from another directory.
+
+    A resident ``IR_analysis`` silently satisfies ``IR_station``'s import table, so a mixed pair
+    has to be rejected *before* the loader runs instead of through a confusing version or
+    calling-convention failure later. Every resident copy is checked, not just the first one.
+    """
+    for name in names:
+        expected = (Path(directory) / name).resolve()
+        for resident in _list_resident_module_paths(name):
+            if not _same_module_path(resident, expected):
+                raise RuntimeError(
+                    f"{name} is already loaded from '{resident}', but the requested SDK "
+                    f"directory is '{Path(directory).resolve()}' (expected '{expected}'); "
+                    f"a mixed SDK pair is not supported - restart the process to load another build")
+    if os.name == "posix":
+        # A globally interposed export would silently replace the function we are about to bind.
+        station_name, analysis_name = _library_names()
+        _assert_no_posix_global_interposition(
+            directory, analysis_name, station_name if station_name in names else None)
+
+
+def _assert_unique_resident_module(directory, name):
+    """After loading, exactly one module with this name may be resident, and it must be ours.
+
+    Fails closed: an empty enumeration is a hard error, never a silent skip.
+    """
+    resident = _list_resident_module_paths(name)
+    expected = (Path(directory) / name).resolve()
+    if len(resident) != 1 or not _same_module_path(resident[0], expected):
+        raise RuntimeError(
+            f"expected exactly one resident {name} at '{expected}', found "
+            + (", ".join(f"'{path}'" for path in resident) if resident else "none"))
+
+
+def _assert_loaded_module_match(library, directory, name):
+    """Verify the handle we bound is the file we asked for (Windows only; no-op elsewhere)."""
+    if _KERNEL32 is None:
+        return
+    expected = (Path(directory) / name).resolve()
+    actual = _module_path_from_handle(getattr(library, "_handle", None))
+    if actual is None:
+        raise RuntimeError(
+            f"cannot verify the loaded module path for {name}; expected '{expected}'")
+    if not _same_module_path(actual, expected):
+        raise RuntimeError(
+            f"{name} was loaded from '{actual}' instead of the requested "
+            f"'{expected}'; the DLL search path was diverted")
+
+
+def _verify_posix_analysis(analysis, directory, analysis_name):
+    """POSIX: the ``IR_AnalysisVersion`` we call must live in the file we asked for."""
+    symbol = _posix_dlsym(analysis, b"IR_AnalysisVersion")
+    path = _posix_symbol_path(symbol) if symbol else None
+    if path is None:
+        raise RuntimeError(
+            f"cannot establish the on-disk identity of IR_analysis '{analysis_name}' loaded from "
+            f"'{Path(directory).resolve()}'")
+    expected = (Path(directory) / analysis_name).resolve()
+    if not _same_module_path(path, expected):
+        raise RuntimeError(
+            f"IR_analysis was loaded from '{path}' instead of the requested '{expected}'; "
+            f"the shared-library search path was diverted")
+    _assert_no_posix_global_interposition(directory, analysis_name)
+    _assert_unique_resident_module(directory, analysis_name)
+
+
+def _verify_posix_pair(station, analysis, directory, station_name, analysis_name):
+    """POSIX: prove ``IR_station`` bound the exact ``IR_analysis`` object we loaded.
+
+    ``IR_station`` declares ``IR_AnalysisVersion`` as an import, so ``dlsym`` on the station
+    handle returns the address the dynamic linker actually resolved - which catches a foreign
+    ``.so`` with a matching SONAME that ``/proc/self/maps`` alone cannot distinguish.
+    """
+    analysis_sym = _posix_dlsym(analysis, b"IR_AnalysisVersion")
+    station_dep_sym = _posix_dlsym(station, b"IR_AnalysisVersion")
+    station_sym = _posix_dlsym(station, b"IR_StationVersion")
+    identities = (
+        ("IR_analysis IR_AnalysisVersion", analysis_sym),
+        ("IR_station dependency IR_AnalysisVersion", station_dep_sym),
+        ("IR_station IR_StationVersion", station_sym),
+    )
+    for label, symbol in identities:
+        if not symbol or _posix_symbol_path(symbol) is None:
+            raise RuntimeError(
+                f"cannot establish the on-disk identity of {label} for SDK directory "
+                f"'{Path(directory).resolve()}'")
+    if station_dep_sym != analysis_sym:
+        raise RuntimeError(
+            f"IR_station resolved IR_AnalysisVersion to '{_posix_symbol_path(station_dep_sym)}' "
+            f"instead of the loaded IR_analysis at '{_posix_symbol_path(analysis_sym)}'; "
+            f"a mixed SDK pair is not supported")
+    expected_analysis = (Path(directory) / analysis_name).resolve()
+    expected_station = (Path(directory) / station_name).resolve()
+    analysis_path = _posix_symbol_path(analysis_sym)
+    station_path = _posix_symbol_path(station_sym)
+    if not _same_module_path(analysis_path, expected_analysis):
+        raise RuntimeError(
+            f"IR_analysis was loaded from '{analysis_path}' instead of the requested "
+            f"'{expected_analysis}'; the shared-library search path was diverted")
+    if not _same_module_path(station_path, expected_station):
+        raise RuntimeError(
+            f"IR_station was loaded from '{station_path}' instead of the requested "
+            f"'{expected_station}'; the shared-library search path was diverted")
+    _assert_no_posix_global_interposition(directory, analysis_name, station_name)
+    _assert_unique_resident_module(directory, analysis_name)
+    _assert_unique_resident_module(directory, station_name)
+
+
+def _verify_loaded_pair(station, analysis, directory, station_name, analysis_name):
+    """Verify a loaded ``IR_station`` / ``IR_analysis`` pair; fail closed on real handles.
+
+    Only non-``ctypes.CDLL`` objects (unit-test doubles) skip the native checks - a real load is
+    always verified, and an OS enumeration failure raises instead of weakening the gate.
+    """
+    if not isinstance(analysis, c.CDLL):
+        return
+    if os.name == "nt":
+        _assert_loaded_module_match(analysis, directory, analysis_name)
+        _assert_loaded_module_match(station, directory, station_name)
+        _assert_unique_resident_module(directory, analysis_name)
+        _assert_unique_resident_module(directory, station_name)
+    elif os.name == "posix":
+        _verify_posix_pair(station, analysis, directory, station_name, analysis_name)
+
+
+def _verify_loaded_analysis(analysis, directory, analysis_name):
+    """Verify a loaded ``IR_analysis``; fail closed on real handles."""
+    if not isinstance(analysis, c.CDLL):
+        return
+    if os.name == "nt":
+        _assert_loaded_module_match(analysis, directory, analysis_name)
+        _assert_unique_resident_module(directory, analysis_name)
+    elif os.name == "posix":
+        _verify_posix_analysis(analysis, directory, analysis_name)
+
+
+def _validate_version_compatibility(station_version=None, analysis_version=None,
+                                    expected_major_minor=EXPECTED_SDK_MAJOR_MINOR):
+    """Reject SDK builds this binding was not written against.
+
+    Every supplied version must be a numeric dot-separated string starting with
+    ``<expected_major_minor>.``; when both libraries report a version they must be identical
+    (a mixed ``IR_station`` / ``IR_analysis`` pair is never supported).
+    """
+    prefix = f"{expected_major_minor}."
+    for label, version in (("IR_station", station_version), ("IR_analysis", analysis_version)):
+        if version is None:
+            continue
+        segments = version.split(".")
+        if len(segments) < 2 or not all(segment.isascii() and segment.isdigit()
+                                        for segment in segments):
+            raise RuntimeError(
+                f"{label} version {version!r} is not a numeric dot-separated version; "
+                f"this irsdk binding expects SDK {expected_major_minor}.x")
+        if not version.startswith(prefix):
+            raise RuntimeError(
+                f"{label} version {version!r} is incompatible with this irsdk binding, "
+                f"which requires SDK {expected_major_minor}.x")
+    if station_version is not None and analysis_version is not None \
+            and station_version != analysis_version:
+        raise RuntimeError(
+            f"IR_station version {station_version!r} does not match IR_analysis version "
+            f"{analysis_version!r}; a mixed SDK pair is not supported")
+
+
+def load_station(library_dir=None):
+    """Load and bind ``IR_station`` (plus the ``IR_analysis`` it links against) and gate versions."""
+    directory = resolve_sdk_library_dir(library_dir, library="station")
+    key = str(directory)
+    station_name, analysis_name = _library_names()
+    # One critical section covers registration, loading, validation and rollback: a concurrent
+    # thread must never observe (or reuse) a directory handle this attempt is about to release.
+    with _DLL_LOCK:
+        if key in _IN_PROGRESS_DIRS:
+            raise RuntimeError(f"Reentrant load of SDK directory in progress: {directory}")
+        _assert_foreign_modules_absent(directory, (analysis_name, station_name))
+        _IN_PROGRESS_DIRS.add(key)
+        opened = False
+        loaded = []
+        try:
+            opened = _open_dll_directory(directory)
+            # Analysis first: IR_station links against IR_analysis on every platform.
+            raw_analysis = _load_library(directory, analysis_name)
+            loaded.append(raw_analysis)
+            analysis = bind_analysis_dll(raw_analysis)
+            raw_station = _load_library(directory, station_name)
+            loaded.append(raw_station)
+            station = bind_station_dll(raw_station)
+            _verify_loaded_pair(station, analysis, directory, station_name, analysis_name)
+            station_version = _read_version(station, "IR_StationVersion")
+            analysis_version = _read_version(analysis, "IR_AnalysisVersion")
+            _validate_version_compatibility(station_version=station_version,
+                                            analysis_version=analysis_version)
+            _COMMITTED_DIRS.add(key)
+        except BaseException:
+            # Release this attempt's native handles before the provisional directory handle.
+            for library in reversed(loaded):
+                _unload_library(library)
+            if opened and key not in _COMMITTED_DIRS:
+                _close_dll_directory(directory)
+            raise
+        finally:
+            _IN_PROGRESS_DIRS.discard(key)
+    return station
 
 
 def load_analysis(library_dir=None):
-    """Load and bind ``IR_analysis`` only."""
+    """Load and bind ``IR_analysis`` only, gated on the reported version."""
     directory = resolve_sdk_library_dir(library_dir, library="analysis")
-    opened = _open_dll_directory(directory)
+    key = str(directory)
     _, analysis_name = _library_names()
-    try:
-        return bind_analysis_dll(_load_library(directory, analysis_name))
-    except Exception:
-        if opened:
-            _close_dll_directory(directory)
-        raise
+    with _DLL_LOCK:
+        if key in _IN_PROGRESS_DIRS:
+            raise RuntimeError(f"Reentrant load of SDK directory in progress: {directory}")
+        _assert_foreign_modules_absent(directory, (analysis_name,))
+        _IN_PROGRESS_DIRS.add(key)
+        opened = False
+        loaded = []
+        try:
+            opened = _open_dll_directory(directory)
+            raw_analysis = _load_library(directory, analysis_name)
+            loaded.append(raw_analysis)
+            analysis = bind_analysis_dll(raw_analysis)
+            _verify_loaded_analysis(analysis, directory, analysis_name)
+            analysis_version = _read_version(analysis, "IR_AnalysisVersion")
+            _validate_version_compatibility(analysis_version=analysis_version)
+            _COMMITTED_DIRS.add(key)
+        except BaseException:
+            for library in reversed(loaded):
+                _unload_library(library)
+            if opened and key not in _COMMITTED_DIRS:
+                _close_dll_directory(directory)
+            raise
+        finally:
+            _IN_PROGRESS_DIRS.discard(key)
+    return analysis
 
 
 class SdkLibraries:
@@ -385,21 +808,45 @@ class SdkLibraries:
         self.library_dir = Path(library_dir).resolve()
         if not self.library_dir.is_dir():
             raise FileNotFoundError(f"SDK library directory does not exist: {self.library_dir}")
-        opened = _open_dll_directory(self.library_dir)
         station_name, analysis_name = _library_names()
-        try:
-            # Analysis first: IR_station links against IR_analysis on every platform.
-            self.analysis = bind_analysis_dll(_load_library(self.library_dir, analysis_name))
-            self.station = bind_station_dll(_load_library(self.library_dir, station_name))
-            self.station_version = _read_version(self.station, "IR_StationVersion")
-            self.analysis_version = _read_version(self.analysis, "IR_AnalysisVersion")
-        except Exception:
-            # Release the provisional directory handle when this directory never loaded.
-            self.analysis = None
-            self.station = None
-            if opened:
-                _close_dll_directory(self.library_dir)
-            raise
+        self.analysis = None
+        self.station = None
+        key = str(self.library_dir)
+        with _DLL_LOCK:
+            if key in _IN_PROGRESS_DIRS:
+                raise RuntimeError(
+                    f"Reentrant load of SDK directory in progress: {self.library_dir}")
+            _assert_foreign_modules_absent(self.library_dir, (analysis_name, station_name))
+            _IN_PROGRESS_DIRS.add(key)
+            opened = False
+            loaded = []
+            try:
+                opened = _open_dll_directory(self.library_dir)
+                # Analysis first: IR_station links against IR_analysis on every platform.
+                raw_analysis = _load_library(self.library_dir, analysis_name)
+                loaded.append(raw_analysis)
+                self.analysis = bind_analysis_dll(raw_analysis)
+                raw_station = _load_library(self.library_dir, station_name)
+                loaded.append(raw_station)
+                self.station = bind_station_dll(raw_station)
+                _verify_loaded_pair(self.station, self.analysis, self.library_dir,
+                                    station_name, analysis_name)
+                self.station_version = _read_version(self.station, "IR_StationVersion")
+                self.analysis_version = _read_version(self.analysis, "IR_AnalysisVersion")
+                _validate_version_compatibility(station_version=self.station_version,
+                                                analysis_version=self.analysis_version)
+                _COMMITTED_DIRS.add(key)
+            except BaseException:
+                # Drop this attempt's native handles, then the provisional directory handle.
+                for library in reversed(loaded):
+                    _unload_library(library)
+                self.analysis = None
+                self.station = None
+                if opened and key not in _COMMITTED_DIRS:
+                    _close_dll_directory(self.library_dir)
+                raise
+            finally:
+                _IN_PROGRESS_DIRS.discard(key)
 
     def __repr__(self):  # pragma: no cover - diagnostics only
         return (f"SdkLibraries(library_dir={str(self.library_dir)!r}, "
@@ -407,11 +854,18 @@ class SdkLibraries:
 
 
 def load_sdk(library_dir=None):
-    """Load (and cache per directory) the ``IR_station`` / ``IR_analysis`` pair."""
+    """Load (and cache per directory) the ``IR_station`` / ``IR_analysis`` pair.
+
+    The cache read/insert and both DLL-directory handle maps are guarded by :data:`_DLL_LOCK`,
+    so concurrent first loads share exactly one :class:`SdkLibraries` instance.
+    """
     directory = resolve_sdk_library_dir(library_dir, library="both")
-    libraries = _LIBRARY_CACHE.get(str(directory))
-    if libraries is None:
-        libraries = _LIBRARY_CACHE[str(directory)] = SdkLibraries(directory)
+    key = str(directory)
+    with _DLL_LOCK:
+        libraries = _LIBRARY_CACHE.get(key)
+        if libraries is not None:
+            return libraries
+        libraries = _LIBRARY_CACHE[key] = SdkLibraries(directory)
     return libraries
 
 

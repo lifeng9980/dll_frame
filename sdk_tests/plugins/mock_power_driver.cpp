@@ -1,6 +1,7 @@
 #include "IR_power_driver_abi.h"
 
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -19,11 +20,99 @@ struct MockPowerSession {
     bool enabled{false};
     bool failClose{false};
     bool useControlIpc{false};
+    // Opt-in readback corruptions used by the power_mock_test.py regression gates.
+    bool mismatchOutput{false};
+    bool badOutputFlag{false};
+    bool nanReading{false};
+    // 0 = none, 1 = setpoint_v, 2 = current_limit_a, 3 = measured_v, 4 = measured_a.
+    int32_t nanField{0};
     int32_t controlPort{0};
     int32_t timeoutMs{1500};
     double setV{12.0};
     double setA{2.0};
 };
+
+/**
+ * Two immutable descriptors: the default one only advertises read/output, the ``power_set``
+ * capable one is selected by the ``IR_MOCK_POWER_ALLOW_SET_CHANNEL=1`` environment variable so
+ * the host's descriptor never mutates between connections.
+ */
+int32_t mockValidate(const char *configJson, char *err, int32_t errBytes) noexcept;
+int32_t mockOpen(const char *configJson, IRPowerDriverHandle *outHandle, char *identityUtf8,
+                 int32_t identityBytes, char *err, int32_t errBytes) noexcept;
+int32_t mockRead(IRPowerDriverHandle handle, int32_t channel, IRPowerReading *outReading,
+                 char *err, int32_t errBytes) noexcept;
+int32_t mockSetOutput(IRPowerDriverHandle handle, int32_t channel, int32_t enabled,
+                      IRPowerReading *outReadback, char *err, int32_t errBytes) noexcept;
+int32_t mockSetChannel(IRPowerDriverHandle handle, int32_t channel, double voltageV,
+                       double currentLimitA, IRPowerReading *outReadback,
+                       char *err, int32_t errBytes) noexcept;
+int32_t mockClose(IRPowerDriverHandle handle, char *err, int32_t errBytes) noexcept;
+
+const IRPowerDriverDescriptor kReadOutputDescriptor{
+    IR_POWER_DRIVER_ABI_VERSION,
+    static_cast<uint32_t>(sizeof(IRPowerDriverDescriptor)),
+    "mock_power",
+    IR_POWER_CAP_READ | IR_POWER_CAP_OUTPUT,
+    1,
+    1,
+    &mockValidate,
+    &mockOpen,
+    &mockRead,
+    &mockSetOutput,
+    nullptr,
+    &mockClose};
+
+const IRPowerDriverDescriptor kFullDescriptor{
+    IR_POWER_DRIVER_ABI_VERSION,
+    static_cast<uint32_t>(sizeof(IRPowerDriverDescriptor)),
+    "mock_power",
+    IR_POWER_CAP_READ | IR_POWER_CAP_OUTPUT | IR_POWER_CAP_SET,
+    1,
+    1,
+    &mockValidate,
+    &mockOpen,
+    &mockRead,
+    &mockSetOutput,
+    &mockSetChannel,
+    &mockClose};
+
+/** ``IR_MOCK_POWER_ALLOW_SET_CHANNEL=1`` selects the ``power_set`` capable descriptor. */
+bool allowSetChannelFromEnvironment() noexcept
+{
+#ifdef _WIN32
+    char value[8]{};
+    // GetEnvironmentVariableA keeps MSVC from flagging GetEnvironmentVariableW's CRT twin.
+    const DWORD written = GetEnvironmentVariableA("IR_MOCK_POWER_ALLOW_SET_CHANNEL", value,
+                                                  static_cast<DWORD>(sizeof(value)));
+    return written > 0 && std::strcmp(value, "1") == 0;
+#else
+    const char *value = std::getenv("IR_MOCK_POWER_ALLOW_SET_CHANNEL");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+#endif
+}
+
+/** Apply the opt-in readback corruptions requested by the test configuration. */
+void applyCorruptions(const MockPowerSession &cfg, IRPowerReading &reading) noexcept
+{
+    const double notANumber = std::nan("");
+    if (cfg.nanReading) {
+        // Host must reject non-finite readbacks instead of feeding them into metrics.
+        reading.measured_v = notANumber;
+        reading.measured_a = notANumber;
+    }
+    switch (cfg.nanField) {
+    case 1: reading.setpoint_v = notANumber; break;
+    case 2: reading.current_limit_a = notANumber; break;
+    case 3: reading.measured_v = notANumber; break;
+    case 4: reading.measured_a = notANumber; break;
+    default: break;
+    }
+    if (cfg.badOutputFlag) {
+        // Out-of-contract flag value (only 0/1 is legal).
+        reading.output_enabled = 2;
+    }
+}
 
 void writeErr(char *err, int32_t errBytes, const char *msg) noexcept
 {
@@ -116,6 +205,30 @@ int32_t parseMockConfig(const char *configJson, MockPowerSession &cfg, char *err
 
     cfg.failClose = std::strstr(configJson, "\"fail_close\":true") != nullptr ||
                     std::strstr(configJson, "\"fail_close\": true") != nullptr;
+    // Opt-in readback corruption flags; absent means a well-behaved driver.
+    (void)parseBoolField(configJson, "mismatch_output", cfg.mismatchOutput);
+    (void)parseBoolField(configJson, "bad_output_flag", cfg.badOutputFlag);
+    (void)parseBoolField(configJson, "nan_reading", cfg.nanReading);
+
+    const char *nanFieldVal = nullptr;
+    if (findJsonField(configJson, "nan_field", &nanFieldVal)) {
+        const auto matches = [nanFieldVal](const char *literal) {
+            const size_t len = std::strlen(literal);
+            return std::strncmp(nanFieldVal, "\"", 1) == 0 &&
+                   std::strncmp(nanFieldVal + 1, literal, len) == 0 &&
+                   nanFieldVal[len + 1] == '\"';
+        };
+        if (matches("setpoint_v")) cfg.nanField = 1;
+        else if (matches("current_limit_a")) cfg.nanField = 2;
+        else if (matches("measured_v")) cfg.nanField = 3;
+        else if (matches("measured_a")) cfg.nanField = 4;
+        else {
+            writeErr(err, errBytes,
+                     "mock_power nan_field must be one of setpoint_v, current_limit_a, measured_v, "
+                     "measured_a");
+            return IR_BAD_ARGUMENT;
+        }
+    }
 
     const char *portVal = nullptr;
     if (findJsonField(configJson, "control_port", &portVal)) {
@@ -334,6 +447,7 @@ int32_t mockRead(IRPowerDriverHandle handle, int32_t channel,
     outReading->measured_a = s->enabled ? 0.25 : 0.0;
     outReading->output_enabled = s->enabled ? 1 : 0;
     outReading->reserved = 0;
+    applyCorruptions(*s, *outReading);
     return IR_OK;
 }
 
@@ -365,6 +479,27 @@ int32_t mockSetOutput(IRPowerDriverHandle handle, int32_t channel, int32_t enabl
 #endif
     }
     s->enabled = enabled != 0;
+    const int32_t readRc = mockRead(handle, channel, outReadback, err, errBytes);
+    if (readRc == IR_OK && s->mismatchOutput) {
+        // Report the opposite of the requested state so the host readback gate must fire.
+        outReadback->output_enabled = enabled != 0 ? 0 : 1;
+    }
+    return readRc;
+}
+
+int32_t mockSetChannel(IRPowerDriverHandle handle, int32_t channel, double voltageV,
+                       double currentLimitA, IRPowerReading *outReadback,
+                       char *err, int32_t errBytes) noexcept
+{
+    if (!handle) return IR_INVALID_HANDLE;
+    if (!outReadback) return IR_NULL_POINTER;
+    if (channel != 1) {
+        writeErr(err, errBytes, "mock_power only supports channel 1");
+        return IR_BAD_ARGUMENT;
+    }
+    auto *s = static_cast<MockPowerSession *>(handle);
+    s->setV = voltageV;
+    s->setA = currentLimitA;
     return mockRead(handle, channel, outReadback, err, errBytes);
 }
 
@@ -381,21 +516,6 @@ int32_t mockClose(IRPowerDriverHandle handle, char *err, int32_t errBytes) noexc
     return IR_OK;
 }
 
-const IRPowerDriverDescriptor kMockDesc{
-    IR_POWER_DRIVER_ABI_VERSION,
-    static_cast<uint32_t>(sizeof(IRPowerDriverDescriptor)),
-    "mock_power",
-    IR_POWER_CAP_READ | IR_POWER_CAP_OUTPUT,
-    1,
-    1,
-    &mockValidate,
-    &mockOpen,
-    &mockRead,
-    &mockSetOutput,
-    nullptr,
-    &mockClose
-};
-
 } // namespace
 
 extern "C" IR_POWER_DRIVER_EXPORT int32_t ir_power_driver_query(
@@ -404,6 +524,6 @@ extern "C" IR_POWER_DRIVER_EXPORT int32_t ir_power_driver_query(
     (void)err;
     (void)errBytes;
     if (!out_desc) return IR_NULL_POINTER;
-    *out_desc = &kMockDesc;
+    *out_desc = allowSetChannelFromEnvironment() ? &kFullDescriptor : &kReadOutputDescriptor;
     return IR_OK;
 }

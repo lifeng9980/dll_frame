@@ -33,6 +33,6 @@ from . import loader as _loader
 from .abi import *  # noqa: F401,F403  (public surface declared in abi.__all__)
 from .loader import *  # noqa: F401,F403  (public surface declared in loader.__all__)
 
-__version__ = "1.8.0"
+__version__ = _abi.BINDING_VERSION
 
 __all__ = [*_abi.__all__, *_loader.__all__, "__version__"]

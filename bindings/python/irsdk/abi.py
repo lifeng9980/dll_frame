@@ -19,6 +19,11 @@ import ctypes as c
 import os
 from pathlib import Path
 
+# Binding/ABI gate identity: the binding refuses to run on a 32-bit interpreter and only
+# accepts the SDK ``major.minor`` it was written against.
+BINDING_VERSION = "1.8.0"
+EXPECTED_SDK_MAJOR_MINOR = "1.8"
+
 D = c.c_double
 I = c.c_int32
 I64 = c.c_int64
@@ -697,7 +702,13 @@ def verify_struct_sizes():
     return sizes
 
 
-STRUCT_SIZES = verify_struct_sizes() if c.sizeof(c.c_void_p) == 8 else {}
+# Every layout below is derived for 64-bit pointers (Windows x64 / LP64); a 32-bit
+# interpreter would silently missize every struct, so fail loudly instead.
+if c.sizeof(c.c_void_p) != 8:
+    raise RuntimeError(
+        f"irsdk requires 64-bit Python (pointer size={c.sizeof(c.c_void_p)} bytes)")
+
+STRUCT_SIZES = verify_struct_sizes()
 
 
 def array_view(data, data_type, width, height, frames=1, byte_size=None):
