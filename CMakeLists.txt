@@ -137,6 +137,9 @@ foreach(target IR_station IR_analysis)
         PRIVATE "${PROJECT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/shared")
     set_target_properties(${target} PROPERTIES INSTALL_RPATH "$ORIGIN"
         C_VISIBILITY_PRESET hidden CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fno-gnu-unique>)
+    endif()
 endforeach()
 
 add_executable(ir_run_recipe examples/ir_recipe_cli.cpp)
